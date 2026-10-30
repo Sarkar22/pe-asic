@@ -39,7 +39,12 @@
 
   "//": "Save some time",
   "RUN_KLAYOUT_XOR": 0,
-  "RUN_KLAYOUT_DRC": 0,
+  "RUN_KLAYOUT_DRC": 1,
+  "RUN_MAGIC_DRC": 0,
+
+  "//": "LibreLane 3.1.0.dev3 runs every OpenROAD step single-threaded unless this is set",
+  "OPENROAD_THREADS": 8,
+  "KLAYOUT_DRC_THREADS": 8,
 
   "//": "Don't put clock buffers on the outputs",
   "DESIGN_REPAIR_BUFFER_OUTPUT_PORTS": 0,

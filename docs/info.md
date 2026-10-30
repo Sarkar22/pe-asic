@@ -9,12 +9,12 @@ You can also include images in this folder and reference them in the markdown. E
 
 ## How it works
 
-Explain how your project works
+Toolchain smoke test for a protocol emulator. A rising edge on `SEND` latches `DATA` and sends it as one 8N1 UART frame at 115200 baud (50 MHz clock) on `UART_TX`. `BUSY` is high during the frame, and `SEND` is ignored while it is.
 
 ## How to test
 
-Explain how to use your project
+Set `DATA`, pulse `SEND` high for at least 3 clock cycles, and read the byte from `UART_TX` with any 115200 8N1 UART receiver.
 
 ## External hardware
 
-List external hardware used in your project (e.g. PMOD, LED display, etc), if any
+None. On the demo board, `UART_TX` reaches the RP2350 UART1 RX pin.

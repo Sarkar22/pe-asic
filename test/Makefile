@@ -1,12 +1,17 @@
 # Makefile
 # See https://docs.cocotb.org/en/stable/quickstart.html for more info
 
+# cocotb 1.x silently runs 0 tests here, and newer versions break gl_test's results check.
+ifneq ($(shell cocotb-config --version),2.0.1)
+$(error cocotb 2.0.1 required: activate the project venv)
+endif
+
 # defaults
 SIM ?= icarus
 FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
-PROJECT_SOURCES = project.v
+PROJECT_SOURCES = project.v uart_tx.v
 
 ifneq ($(GATES),yes)
 

@@ -1,2 +1,6 @@
 pytest==8.4.2
 cocotb==2.0.1
+cocotbext-uart==0.1.4
+cocotbext-i2c==0.1.2
+cocotbext-spi @ git+https://github.com/schang412/cocotbext-spi@67857d0c7b9ea854467b57269becb9b221d9986e
+cocotb-coverage==2.0

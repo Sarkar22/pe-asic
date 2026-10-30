@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2024 Your Name
+ * Toolchain smoke test: send uio_in as one 8N1 byte on each rising edge of ui_in[0].
  * SPDX-License-Identifier: Apache-2.0
  */
 
 `default_nettype none
 
-module tt_um_example (
+module tt_um_sarkar22_pe (
     input  wire [7:0] ui_in,    // Dedicated inputs
     output wire [7:0] uo_out,   // Dedicated outputs
     input  wire [7:0] uio_in,   // IOs: Input path
@@ -16,12 +16,40 @@ module tt_um_example (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-  // All output pins must be assigned. If not used, assign to 0.
-  assign uo_out  = ui_in + uio_in;  // Example: ou_out is the sum of ui_in and uio_in
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+  // Reset: asserted asynchronously, released synchronously.
+  reg [1:0] rst_sync;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) rst_sync <= 2'b00;
+    else        rst_sync <= {rst_sync[0], 1'b1};
+  end
+  wire rst_n_sync = rst_sync[1];
+
+  // 2-FF synchronizer and rising-edge detect on the send input.
+  reg [2:0] send_sync;
+  always @(posedge clk or negedge rst_n_sync) begin
+    if (!rst_n_sync) send_sync <= 3'b000;
+    else             send_sync <= {send_sync[1:0], ui_in[0]};
+  end
+  wire send_pulse = send_sync[1] & ~send_sync[2];
+
+  wire tx;
+  wire busy;
+
+  uart_tx uart (
+      .clk  (clk),
+      .rst_n(rst_n_sync),
+      .data (uio_in),
+      .start(send_pulse),
+      .tx   (tx),
+      .busy (busy)
+  );
+
+  // uo_out[4] is the demo board's RP2350 UART1 RX pin.
+  assign uo_out  = {3'b000, tx, 3'b000, busy};
+  assign uio_out = 8'h00;
+  assign uio_oe  = 8'h00;
 
   // List all unused inputs to prevent warnings
-  wire _unused = &{ena, clk, rst_n, 1'b0};
+  wire _unused = &{ena, ui_in[7:1], 1'b0};
 
 endmodule
