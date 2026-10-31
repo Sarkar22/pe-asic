@@ -35,4 +35,32 @@ module tb ();
       .rst_n  (rst_n)     // not reset
   );
 
+`ifdef GL_TEST
+  // A netlist can pass the protocol tests and still be wrong on pins they never
+  // look at, so the RTL core runs beside it and every output pin is compared.
+  wire [7:0] rtl_uo_out;
+  wire [7:0] rtl_uio_out;
+  wire [7:0] rtl_uio_oe;
+
+  pe_core rtl_core (
+      .ui_in  (ui_in),
+      .uo_out (rtl_uo_out),
+      .uio_in (uio_in),
+      .uio_out(rtl_uio_out),
+      .uio_oe (rtl_uio_oe),
+      .ena    (ena),
+      .clk    (clk),
+      .rst_n  (rst_n)
+  );
+
+  reg     compare = 1'b0;
+  integer mismatches = 0;
+
+  // On the falling edge outputs have settled, and cocotb has not yet changed the inputs.
+  always @(negedge clk) begin
+    if (compare && {uo_out, uio_out, uio_oe} !== {rtl_uo_out, rtl_uio_out, rtl_uio_oe})
+      mismatches = mismatches + 1;
+  end
+`endif
+
 endmodule

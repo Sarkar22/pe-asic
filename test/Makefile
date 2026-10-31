@@ -11,7 +11,8 @@ SIM ?= icarus
 FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
-PROJECT_SOURCES = project.v uart_tx.v
+CORE_SOURCES = pe_pkg.sv pe_core.sv uart_tx.sv
+PROJECT_SOURCES = project.sv $(CORE_SOURCES)
 
 ifneq ($(GATES),yes)
 
@@ -32,6 +33,9 @@ VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilo
 
 # this gets copied in by the GDS action workflow
 VERILOG_SOURCES += $(PWD)/gate_level_netlist.v
+
+# The RTL core runs beside the netlist in test_netlist_matches_rtl:
+VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(CORE_SOURCES))
 
 endif
 
