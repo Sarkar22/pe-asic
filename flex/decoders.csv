@@ -1,0 +1,132 @@
+decoder,name,status,rule,reason
+ac97,Audio Codec '97,out,8,"12.288 Mbit/s, fixed"
+ad5626,Analog Devices AD5626,out,1,Stacked on spi
+ad79x0,Analog Devices AD79x0,out,1,Stacked on spi
+ade77xx,Analog Devices ADE77xx,out,1,Stacked on spi
+adf435x,Analog Devices ADF4350/1,out,1,Stacked on spi
+adns5020,Avago ADNS-5020,out,1,Stacked on spi
+adxl345,Analog Devices ADXL345,out,1,Stacked on spi
+am230x,Aosong AM230x/DHTxx/RHTxx,pool,,1 line. About 10 kbit/s
+amulet_ascii,Amulet LCD ASCII,out,1,Stacked on uart
+arm_etmv3,ARM Embedded Trace Macroblock v3,out,1,Stacked on uart
+arm_itm,ARM Instrumentation Trace Macroblock,out,1,Stacked on uart
+arm_tpiu,ARM Trace Port Interface Unit,out,1,Stacked on uart
+atsha204a,Microchip ATSHA204A,out,1,Stacked on i2c
+aud,Advanced User Debugger,out,8,"Real parts clock it at about 20 MHz, 4 bits per clock"
+avr_isp,AVR In-System Programming,out,1,Stacked on spi
+avr_pdi,Atmel Program and Debug Interface,out,5,Firmware exists
+caliper,Digital calipers,out,3,Clock and data that a stock SPI target reads
+can,Controller Area Network,out,4,Named in the brief
+cc1101,Texas Instruments CC1101,out,1,Stacked on spi
+cec,HDMI-CEC,out,5,Firmware exists
+cfp,100 Gigabit C form-factor pluggable,out,1,Stacked on mdio
+cjtag,Compact Joint Test Action Group (IEEE 1149.7),out,4,In the JTAG family
+counter,Edge counter,out,2,sigrok tags it Util or Encoding
+dali,Digital Addressable Lighting Interface,pool,,1 line. 1200 bit/s
+dcf77,DCF77 time protocol,pool,,1 line. 1 bit/s
+dmx512,Digital MultipleX 512,out,1,Stacked on uart
+ds1307,Dallas DS1307,out,1,Stacked on i2c
+ds2408,Maxim DS2408,out,1,Stacked on onewire_network
+ds243x,Maxim DS2432/3,out,1,Stacked on onewire_network
+ds28ea00,Maxim DS28EA00 1-Wire digital thermometer,out,1,Stacked on onewire_network
+dsi,Digital Serial Interface,pool,,1 line. 600 bit/s
+edid,Extended Display Identification Data,out,1,Stacked on i2c
+eeprom24xx,24xx I²C EEPROM,out,1,Stacked on i2c
+eeprom93xx,93xx Microwire EEPROM,out,1,Stacked on microwire
+em4100,RFID EM4100,pool,,1 line. About 2 kbit/s
+em4305,RFID EM4205/EM4305,pool,,2 lines through an RFID front end. About 4 kbit/s
+enc28j60,Microchip ENC28J60,out,1,Stacked on spi
+flexray,FlexRay,out,8,2.5 Mbit/s at its slowest
+graycode,Gray code and rotary encoder,out,2,sigrok tags it Util or Encoding
+guess_bitrate,Guess bitrate/baudrate,out,2,sigrok tags it Util or Encoding
+hdcp,HDCP over HDMI,out,1,Stacked on i2c
+i2c,Inter-Integrated Circuit,out,3,A starting protocol
+i2cdemux,I²C demultiplexer,out,1,Stacked on i2c
+i2cfilter,I²C filter,out,1,Stacked on i2c
+i2s,Integrated Interchip Sound,pool,,"3 lines. 256 kbit/s at 8 kHz, 2 channels, 16 bits"
+ieee488,IEEE-488 GPIB/HPIB/IEC,pool,,"3 lines in IEC serial form, 15 as listen-only or talk-only GPIB. The handshake sets the rate, with no minimum"
+ir_irmp,IR IRMP,out,2,"A front end for a library of many infrared formats, not one protocol"
+ir_nec,IR NEC,out,5,Firmware exists
+ir_rc5,IR RC-5,pool,,1 line. About 560 bit/s
+ir_rc6,IR RC-6,pool,,1 line. About 1.1 kbit/s
+ir_sirc,Sony IR (SIRC),pool,,1 line. About 600 to 800 bit/s
+jitter,Timing jitter calculation,out,2,sigrok tags it Util or Encoding
+jtag,Joint Test Action Group (IEEE 1149.1),out,4,Named in the brief
+jtag_ejtag,Joint Test Action Group / EJTAG (MIPS),out,1,Stacked on jtag
+jtag_stm32,Joint Test Action Group / ST STM32,out,1,Stacked on jtag
+lfast,NXP LFAST interface,out,8,5 Mbit/s at its slowest
+lin,Local Interconnect Network,out,1,Stacked on uart
+lm75,National LM75,out,1,Stacked on i2c
+lpc,Low Pin Count,out,8,33 MHz clock
+ltc242x,Linear Technology LTC242x,out,1,Stacked on spi
+ltc26x7,Linear Technology LTC26x7,out,1,Stacked on i2c
+maple_bus,SEGA Maple bus,pool,,"2 lines. About 2 Mbit/s from a real host, 0.5 to 1.3 Mbit/s from peripherals"
+max72xx,Maxim MAX7219/MAX7221,out,1,Stacked on spi
+mcp230xx,Microchip MCP230XX,out,1,Stacked on i2c
+mcs48,Intel MCS-48,pool,,14 lines as bus master. 0.53 Mbit/s at the slowest datasheet cycle
+mdio,Management Data Input/Output,out,4,In the Ethernet family
+microwire,Microwire,out,3,A subset of SPI
+midi,Musical Instrument Digital Interface,out,1,Stacked on uart
+miller,Miller encoding,out,2,sigrok tags it Util or Encoding
+mlx90614,Melexis MLX90614,out,1,Stacked on i2c
+modbus,Modbus RTU over RS232/RS485,out,1,Stacked on uart
+morse,Morse code,out,2,sigrok tags it Util or Encoding
+mrf24j40,Microchip MRF24J40,out,1,Stacked on spi
+mxc6225xu,MEMSIC MXC6225XU,out,1,Stacked on i2c
+nes_gamepad,Nintendo Entertainment System gamepad,out,1,Stacked on spi
+nrf24l01,Nordic Semiconductor nRF24L01(+),out,1,Stacked on spi
+nrf905,Nordic Semiconductor nRF905,out,1,Stacked on spi
+numbers_and_state,Interpret bit patters as numbers or state enums,out,2,sigrok tags it Util or Encoding
+nunchuk,Nintendo Wii Nunchuk,out,1,Stacked on i2c
+onewire_link,1-Wire serial communication bus (link layer),out,5,Firmware exists
+onewire_network,1-Wire serial communication bus (network layer),out,1,Stacked on onewire_link
+ook,On-off keying,out,2,sigrok tags it Util or Encoding
+ook_oregon,Oregon Scientific,out,1,Stacked on ook
+ook_vis,On-off keying visualisation,out,1,Stacked on ook
+pan1321,Panasonic PAN1321,out,1,Stacked on uart
+parallel,Parallel sync bus,out,2,sigrok tags it Util or Encoding
+pca9571,NXP PCA9571,out,1,Stacked on i2c
+pjdl,Padded Jittering Data Link,pool,,1 line. About 17 kbit/s in mode 1
+pjon,PJON,out,1,Stacked on pjon_link
+ps2,PS/2,out,4,Named in the brief
+pwm,Pulse-width modulation,out,2,sigrok tags it Util or Encoding
+qi,Qi charger protocol,pool,,1 line. 2 kbit/s
+rc_encode,Remote control encoder,pool,,1 line. About 1 kbit/s or lower
+rfm12,HopeRF RFM12,out,1,Stacked on spi
+rgb_led_spi,RGB LED string decoder (SPI),out,1,Stacked on spi
+rgb_led_ws281x,RGB LED string decoder (WS281x),out,5,Firmware exists
+rtc8564,Epson RTC-8564 JE/NB,out,1,Stacked on i2c
+sae_j1850_vpw,SAE J1850 VPW.,pool,,1 line. About 10.4 kbit/s
+sbus_futaba,Futaba SBUS (Serial bus),out,1,Stacked on uart
+sda2506,Siemens SDA 2506-5,pool,,3 lines. 133 kHz clock or lower
+sdcard_sd,Secure Digital card (SD mode),pool,,3 to 6 lines as host. 400 kHz clock
+sdcard_spi,Secure Digital card (SPI mode),out,1,Stacked on spi
+sdq,Texas Instruments SDQ,out,5,"TI's form has the signalling of 1-Wire, for which firmware exists"
+seven_segment,7-segment display,out,2,A pin pattern with no framing
+signature,Signature analysis,out,2,sigrok tags it Util or Encoding
+sipi,NXP SIPI interface,out,1,Stacked on lfast
+sle44xx,SLE44xx memory card,pool,,3 lines. About 27 kHz clock in sigrok's sample capture
+spdif,Sony/Philips Digital Interface Format,pool,,"1 line. 1.41 Mbit/s at 22.05 kHz, the slowest rate found on real parts"
+spi,Serial Peripheral Interface,out,3,A starting protocol
+spiflash,SPI flash/EEPROM chips,out,1,Stacked on spi
+ssi32,Synchronous Serial Interface (32bit),out,1,Stacked on spi
+st25r39xx_spi,STMicroelectronics ST25R39xx,out,1,Stacked on spi
+st7735,Sitronix ST7735,out,3,SPI plus a data or command pin
+stepper_motor,Stepper motor position / speed,out,2,A pin pattern with no framing
+swd,Serial Wire Debug,out,4,Named in the brief
+swim,STM8 SWIM bus,out,5,Firmware exists
+t55xx,RFID T55xx,pool,,2 lines through an RFID front end. About 2 to 8 kbit/s
+tca6408a,Texas Instruments TCA6408A,out,1,Stacked on i2c
+tdm_audio,Time division multiplex audio,pool,,"3 lines. From 64 kbit/s at 8 kHz, one 8-bit slot"
+timing,Timing calculation with frequency and averaging,out,2,sigrok tags it Util or Encoding
+tlc5620,Texas Instruments TLC5620,out,3,SPI plus a load pin
+uart,Universal Asynchronous Receiver/Transmitter,out,3,A starting protocol
+usb_packet,Universal Serial Bus (LS/FS) packet,out,1,Stacked on usb_signalling
+usb_power_delivery,USB Power Delivery,out,4,In the USB family
+usb_request,Universal Serial Bus (LS/FS) transaction/request,out,1,Stacked on usb_packet
+usb_signalling,Universal Serial Bus (LS/FS) signalling,out,4,Named in the brief
+wiegand,Wiegand interface,pool,,2 lines. About 250 bit/s at a 4 ms bit
+x2444m,Xicor X2444M/P,out,1,Stacked on spi
+xfp,10 Gigabit Small Form Factor Pluggable Module (XFP),out,1,Stacked on i2c
+xy2-100,XY2-100(E) and XY-200(E) galvanometer protocol,pool,,5 lines. 2 Mbit/s on each data line
+z80,Zilog Z80 CPU,out,6,A full bus needs 29 lines

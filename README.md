@@ -3,6 +3,7 @@
 # Tiny Tapeout Verilog Project Template
 
 - [Read the documentation for project](docs/info.md)
+- [Flexibility trial: the protocol pool and the draw](flex/README.md)
 
 ## What is Tiny Tapeout?
 
