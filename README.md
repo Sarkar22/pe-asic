@@ -3,6 +3,8 @@
 # Tiny Tapeout Verilog Project Template
 
 - [Read the documentation for project](docs/info.md)
+- [Instruction set: the full specification](docs/ISA.md)
+- [Simulator and assembler: run a program in Python](sim/README.md)
 - [Flexibility trial: the protocol pool and the draw](flex/README.md)
 
 ## What is Tiny Tapeout?
