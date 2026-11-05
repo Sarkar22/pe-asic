@@ -1,0 +1,24 @@
+name: setup
+
+# scripts/setup.sh on a clean machine: installs the pinned tools, then runs the tests
+on:
+  push:
+    paths:
+      - scripts/setup.sh
+      - test/requirements.txt
+      - .github/workflows/setup.yaml
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: One-command setup, then the program checks and the RTL tests
+        run: time scripts/setup.sh --install-iverilog
+
+      - name: Run again, with every step already done
+        run: time scripts/setup.sh --no-test

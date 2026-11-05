@@ -13,6 +13,10 @@ A Tiny Tapeout design for IHP SG13CMOS5L that emulates digital protocols after f
 - [Decisions and why](docs/DECISIONS.md)
 - [Flexibility trial: the protocol pool and the draw](flex/README.md)
 
+## Setup
+
+`scripts/setup.sh` installs the tool versions the online checks use, into `~/ttsetup` and `tt/`, then runs the program checks and the RTL tests. It needs Linux x86-64 and Python 3.11 or 3.12, and the first run takes about 15 minutes and 2 GB of disk. After it, `. ~/ttsetup/env.sh` prepares each new shell. `--install-iverilog` adds Icarus 13.0, which gate level needs, and `--harden` adds the container for a local build: `scripts/setup.sh --help` has the details.
+
 ## Tests
 
 `cd test && make` runs the cocotb tests at the pins under Icarus. It needs cocotb 2.0.1. `make GATES=yes` runs them on a netlist in `test/gate_level_netlist.v`, with the RTL core beside it for a pin-by-pin compare. [test/README.md](test/README.md) has the details.
