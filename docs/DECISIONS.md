@@ -1,0 +1,19 @@
+# Decisions
+
+Each decision with its date, the reason and where the evidence is. Newest last.
+
+| Date | Decision | Why | Evidence |
+|---|---|---|---|
+| 2026-10-15 | One person builds this entry, so the flexibility trial draws 3 protocols | Fits one author's time | [flex/README.md](../flex/README.md) |
+| 2026-10-30 | Tiny Tapeout on IHP SG13CMOS5L, 6x4 tiles, from the `cmos5l` template at `231f26a5`. Flow versions pinned: tt-gds-action `ihp-cmos5l`, tt-support-tools `ihp-sg13cmos5l` at `d66cf179`, LibreLane 3.1.0.dev3, cocotb 2.0.1 | 6x4 gives 902,417 µm² of core area, enough for four threads and an SRAM. Pinned versions keep the local and online builds identical | First template build: 4 min 49 s locally, every online check green |
+| 2026-10-30 | SystemVerilog, read by slang (`USE_SLANG`) | Tested which language features survive each tool in the flow. The default reader breaks arrays of structs, and slang drops a bit written only by reset, both without an error. The RTL avoids both, and `test_netlist_matches_rtl` compares a netlist with the RTL pin by pin, the one check that sees either | Small test designs for each feature, run through synthesis and simulation |
+| 2026-10-30 | Icarus 13.0 for gate level | Under Icarus 12.0 every IHP flop output stays X at gate level. The RTL tests run on both | The `gl_test` online job |
+| 2026-10-31 | A flexibility trial with a pool fixed in advance and a public random draw | Protocols chosen after the hardware freezes, by a draw nobody controls, test the design's flexibility better than a list we pick | [flex/README.md](../flex/README.md) |
+| 2026-10-31 | Instruction set: four threads in fixed rotation, one instruction per 4 cycles each, pin changes at exact cycles through deadline events, one memory for code and data, no protocol-specific hardware | Each protocol is a program, so a new protocol needs no new hardware | [ISA.md](ISA.md), [programs/](../programs/README.md) |
+| 2026-10-31 | A wait arms and PC moves on, so the next instruction runs in the first slot after the event | The slot after a wait used to do nothing, so firmware now reacts to an event one slot sooner | [ISA.md](ISA.md) |
+| 2026-11-01 | Publish the instruction set, a simulator and the assembler | So anyone can write and check a program before the chip exists | `docs/ISA.md`, `sim/` |
+| 2026-11-03 | Use the IHP SRAM macro `RM_IHPSG13_1P_512x16_c2_bm_bist` for the one memory | A full local build met timing in every corner with 0 DRC, LVS and antenna errors, its power grid passed a check of every macro power pin, and the gate-level test passed on the hardened netlist. A 128-word latch array stays in the instruction set as the fallback | [STATUS.md](STATUS.md), `tools/check_macro_power.py` |
+| 2026-11-03 | Keep the credit in `src/pdn_cfg.tcl` | Its power grid wrapper comes from another Tiny Tapeout project under Apache-2.0, which requires the notice | `src/pdn_cfg.tcl`, lines 20 to 21 |
+| 2026-11-05 | Four host link rules added to section 9.1: SCK high and low at least 2 cycles and CS high at least 3; bytes after a command's last argument are ignored; CS high or SCK low as reset ends; the host drives CS from a GPIO | Stress tests of the RTL showed a 1-cycle SCK phase or CS pulse fails once a pad edge lands a cycle late, which a 2-flop synchroniser can't prevent, and that the other three cases were unspecified | Section 9.1 and item 4 of the undefined list in section 10 |
+| 2026-11-05 | Leave the `STOPREQ` rule in `retire()` as it is | The case can't happen on the chip: a stepped `ld` or `st` ends long before the next host command can land. Zero-time simulators still reach it, and the RTL matches them | [ISA.md](ISA.md), `retire()` in section 3.6 |
+| 2026-11-05 | Publish the core RTL and the 47 programs with their benches | The design is complete for the instruction set and passes every online check | `src/`, `test/`, `programs/` |

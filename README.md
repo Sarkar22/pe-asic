@@ -9,6 +9,8 @@ A Tiny Tapeout design for IHP SG13CMOS5L that emulates digital protocols after f
 - [Simulator and assembler: run a program in Python](sim/README.md)
 - [Protocol programs: 47 programs and the benches that check them](programs/README.md)
 - [Architecture of the RTL and how to run the tests](docs/ARCHITECTURE.md)
+- [Status: chip numbers, tests and open items](docs/STATUS.md)
+- [Decisions and why](docs/DECISIONS.md)
 - [Flexibility trial: the protocol pool and the draw](flex/README.md)
 
 ## Tests
