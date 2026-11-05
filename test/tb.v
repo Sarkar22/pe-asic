@@ -1,17 +1,22 @@
 `default_nettype none
 `timescale 1ns / 1ps
 
-/* This testbench just instantiates the module and makes some convenient wires
-   that can be driven / tested by the cocotb test.py.
-*/
+/*
+ * Testbench for test.py: the top module and wires cocotb drives and reads. At gate level the RTL
+ * core also runs beside the netlist, and every cycle where an output pin differs is counted.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 module tb ();
 
+`ifndef GL_TEST
   // Dump the signals to a FST file. You can view it with gtkwave or surfer.
+  // A gate-level run is too long to dump.
   initial begin
     $dumpfile("tb.fst");
     $dumpvars(0, tb);
     #1;
   end
+`endif
 
   // Wire up the inputs and outputs:
   reg clk;

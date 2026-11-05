@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Makefile
 # See https://docs.cocotb.org/en/stable/quickstart.html for more info
 
@@ -11,7 +12,8 @@ SIM ?= icarus
 FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
-CORE_SOURCES = pe_pkg.sv pe_core.sv uart_tx.sv
+CORE_SOURCES = pe_pkg.sv pe_decode.sv pe_core.sv pe_thread.sv pe_exec.sv pe_regfile.sv \
+               pe_mailbox.sv pe_pins.sv pe_mem.sv pe_host.sv pe_spi.sv
 PROJECT_SOURCES = project.sv $(CORE_SOURCES)
 
 ifneq ($(GATES),yes)
@@ -19,6 +21,7 @@ ifneq ($(GATES),yes)
 # RTL simulation:
 SIM_BUILD				= sim_build/rtl
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
+VERILOG_SOURCES += $(PWD)/../verif/sram_model.v
 
 else
 
@@ -30,6 +33,8 @@ COMPILE_ARGS    += -DSIM
 VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_io/verilog/sg13cmos5l_io.v
 VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilog/sg13cmos5l_udp.v
 VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilog/sg13cmos5l_stdcell.v
+VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/verilog/RM_IHPSG13_1P_512x16_c2_bm_bist.v
+VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/verilog/RM_IHPSG13_1P_core_behavioral_bm_bist.v
 
 # this gets copied in by the GDS action workflow
 VERILOG_SOURCES += $(PWD)/gate_level_netlist.v

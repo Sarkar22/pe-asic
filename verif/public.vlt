@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+`verilator_config
+// Everything the wrapper reads or writes. All flops end in _q.
+public_flat_rw -module "pe_core" -var "*_q"
+public_flat_rw -module "pe_thread" -var "*_q"
+public_flat_rw -module "pe_regfile" -var "*_q"
+public_flat_rw -module "pe_mailbox" -var "*_q"
+public_flat_rw -module "pe_pins" -var "*_q"
+public_flat_rw -module "pe_host" -var "*_q"
+public_flat_rw -module "pe_spi" -var "stub_*"
+public_flat_rw -module "RM_IHPSG13_1P_512x16_c2_bm_bist" -var "memory"
+public_flat_rd -module "RM_IHPSG13_1P_512x16_c2_bm_bist" -var "dr_r"
+public_flat_rd -module "pe_exec" -var "x_go"
+public_flat_rd -module "pe_exec" -var "x_late_set"
+public_flat_rd -module "pe_host" -var "tx_byte"
+public_flat_rd -module "pe_thread" -var "run_post"
+public_flat_rd -module "pe_thread" -var "tick_fire"
+public_flat_rd -module "pe_core" -var "host_grant"
+public_flat_rd -module "pe_core" -var "sram_wen"
+public_flat_rd -module "pe_core" -var "sram_addr"
+public_flat_rd -module "pe_core" -var "sram_din"

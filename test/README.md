@@ -1,47 +1,29 @@
-# Sample testbench for a Tiny Tapeout project
+# Tests at the pins
 
-This is a sample testbench for a Tiny Tapeout project. It uses [cocotb](https://docs.cocotb.org/en/stable/) to drive the DUT and check the outputs.
-See below to get started or for more information, check the [website](https://tinytapeout.com/hdl/testing/).
+`test.py` drives the design through its pads with [cocotb](https://docs.cocotb.org/en/stable/) under Icarus Verilog. The host side speaks the SPI link of `docs/ISA.md` section 9 at the fastest legal rate, clk/6. `tb.v` holds the top module and the wires cocotb drives.
 
-## Setting up
+What the tests cover: reset state, CAPS, MISO timing, memory read and write with wrap at DEPTH, a UART frame sent by a program and decoded at the pad, RUN, STOP, STEP, SETPC and RDREG, the mailbox, BUSY, ABORT, commands cut at any byte, a STATUS cut short, a memory command that fails while all threads run, memory commands with one thread stopped, every unlisted command code, bytes sent past a reply, a reset in mid-run, what STEP and SETPC leave alone, an event firing on a stopped thread, WAITING through a second stop, deadlines 32,767 and 32,768 ahead, 16-bit compares, and the bypass lanes.
 
-1. Edit [Makefile](Makefile) and modify `PROJECT_SOURCES` to point to your Verilog files.
-2. Edit [tb.v](tb.v) and replace `tt_um_example` with your module name.
+`test_matches_simulator` runs at RTL only. It loads random programs, runs them on all four threads with random host traffic, and steps the simulator in `../sim/` beside the RTL, one cycle per clock. Every output pin except MISO must match on every cycle, and every MISO byte must be what its command returns. It fails too if the stimulus is weak: fewer than one instruction retired per 8 cycles, or fewer than one output change per 100 cycles.
+
+The tests need cocotb 2.0.1; the Makefile stops with a message on any other version.
 
 ## How to run
 
-To run the RTL simulation:
+RTL simulation:
 
 ```sh
 make -B
 ```
 
-To run gatelevel simulation, first harden your project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`.
-
-Then run:
+Gate-level simulation: harden the project, copy the netlist `../tt_submission/tt_um_sarkar22_pe.v` (the GDS action provides the same file) to `gate_level_netlist.v`, then:
 
 ```sh
 make -B GATES=yes
 ```
 
-If you wish to save the waveform in VCD format instead of FST format, edit tb.v to use `$dumpfile("tb.vcd");` and then run:
+At gate level `tb.v` also runs the RTL core beside the netlist, and `test_netlist_matches_rtl` runs firmware on all four threads, including bypass lanes and open-drain pins, and fails if any output pin differs on any cycle. The PDK's SRAM model samples on its clock net, so in a zero-delay run a clock tree that puts the SRAM clock many buffers behind the flops can make this test fail although the timing is fine.
 
-```sh
-make -B FST=
-```
+## Waveforms
 
-This will generate `tb.vcd` instead of `tb.fst`.
-
-## How to view the waveform file
-
-Using GTKWave
-
-```sh
-gtkwave tb.fst tb.gtkw
-```
-
-Using Surfer
-
-```sh
-surfer tb.fst
-```
+An RTL run writes `tb.fst`. View it with `gtkwave tb.fst tb.gtkw` or `surfer tb.fst`. A gate-level run is too long to dump.

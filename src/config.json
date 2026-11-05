@@ -34,6 +34,56 @@
   "//": "USE_SLANG - the default Yosys reader rejects `import` and silently breaks arrays of structs",
   "USE_SLANG": true,
 
+  "//": "The SRAM macro. The instance key is the flattened path, which is what the netlist calls it.",
+  "//": "FS puts the macro's signal pins on its top edge, facing the free rows above it, and keeps its",
+  "//": "Metal4 power columns vertical. x must stay 12 + 67.44 k so the columns stay under the stripes",
+  "//": "(src/pdn_cfg.tcl). The lib keys name the process corner, because every corner here is nom_*.",
+  "MACROS": {
+    "RM_IHPSG13_1P_512x16_c2_bm_bist": {
+      "instances": {
+        "core.mem.sram": {
+          "location": [12, 40],
+          "orientation": "FS"
+        }
+      },
+      "gds": ["pdk_dir::libs.ref/sg13cmos5l_sram/gds/RM_IHPSG13_1P_512x16_c2_bm_bist.gds"],
+      "lef": ["pdk_dir::libs.ref/sg13cmos5l_sram/lef/RM_IHPSG13_1P_512x16_c2_bm_bist.lef"],
+      "lib": {
+        "*_typ_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x16_c2_bm_bist_typ_1p20V_25C.lib"],
+        "*_fast_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x16_c2_bm_bist_fast_1p32V_m55C.lib"],
+        "*_slow_*": ["pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x16_c2_bm_bist_slow_1p08V_125C.lib"]
+      },
+      "nl": ["dir::../verif/sram_blackbox.v"],
+      "spice": ["pdk_dir::libs.ref/sg13cmos5l_sram/cdl/RM_IHPSG13_1P_512x16_c2_bm_bist.cdl"]
+    }
+  },
+
+  "//": "The macro's two supplies both go to VPWR, the only supply a block has.",
+  "PDN_MACRO_CONNECTIONS": [
+    "core.mem.sram VPWR VGND VDD! VSS!",
+    "core.mem.sram VPWR VGND VDDARRAY! VSS!"
+  ],
+
+  "//": "The default macro grid cannot power this macro. src/pdn_cfg.tcl runs the stripes through its",
+  "//": "power columns, checks them, and stops the step if the grid has an open.",
+  "PDN_CFG": "dir::pdn_cfg.tcl",
+  "ERROR_ON_PDN_VIOLATIONS": true,
+
+  "//": "Magic's rules lack the SRAM exceptions of the KLayout deck, and the KLayout deck is the sign-off.",
+  "ERROR_ON_MAGIC_DRC": false,
+  "MAGIC_MACRO_STD_CELL_SOURCE": "PDK",
+
+  "//": "Magic reads the macro from its LEF, where the POWER stripes cross a Metal4 OBS at the",
+  "//": "VDD!/VDDARRAY! split. tools/check_macro_power.py checks the real metal in the final GDS.",
+  "ERROR_ON_ILLEGAL_OVERLAPS": false,
+
+  "//": "LVS treats the macro as a black box, because its insides are not LVS clean.",
+  "MAGIC_EXT_ABSTRACT_CELLS": ["RM_IHPSG13_.*"],
+
+  "//": "Stop a stuck route early and leave a report of what it is stuck on.",
+  "DRT_OPT_ITERS": 30,
+  "DRT_SAVE_DRC_REPORT_ITERS": 5,
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
@@ -66,8 +116,11 @@
   "FP_IO_HLENGTH": 2,
   "FP_IO_VLENGTH": 2,
 
-  "FP_PDN_VPITCH": 50.0,
+  "//": "Stripes inside the SRAM's Metal4 power columns. src/pdn_cfg.tcl derives these numbers.",
+  "FP_PDN_VPITCH": 67.44,
   "FP_PDN_VWIDTH": 2.1,
+  "FP_PDN_VSPACING": 3.52,
+  "FP_PDN_VOFFSET": 26.36,
 
   "//": "Clock",
   "RUN_CTS": 1,
