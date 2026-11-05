@@ -1,6 +1,6 @@
 # ISA v0.1
 
-Draft, 2026-11-01. This instruction set can change until the hardware freezes.
+Draft, 2026-11-05. This instruction set can change until the hardware freezes.
 
 **Status of the evidence.** Where this document says something ran, it ran on Python simulators: two hand-written, and one compiled directly from the instruction table and code blocks of this file. They agree on every cycle compared. Sections 7 and 11.2 list what ran. Treat anything they don't list as not run. The cycle figures in section 9 come from an RTL design, which has only been simulated and synthesized. No real hardware is behind this document. One of the simulators is in `sim/`. The test benches and the RTL aren't published yet.
 
@@ -808,15 +808,17 @@ So after reset every `uio` pin is undriven, and every `uo` pin is low. A UART TX
 
 ### 9.1 Link
 
-The host is the RP2350 on the demo board, using SPI0 on `ui0` (CS), `ui1` (SCK), `ui2` (MOSI) and `uo3` (MISO). Mode 0, MSB first, with SCK at most clk/6. The chip oversamples SCK through the input synchroniser, so there is no second clock domain.
+The host is the RP2350 on the demo board, using SPI0 on `ui0` (CS), `ui1` (SCK), `ui2` (MOSI) and `uo3` (MISO). Mode 0, MSB first, with SCK at most clk/6. Each SCK high and each SCK low lasts at least 2 cycles, and CS stays high for at least 3 cycles between transactions. The chip oversamples SCK through the input synchroniser, so there is no second clock domain, and a pad edge may reach it one cycle late (section 10), which shorter phases can't absorb.
 
-A transaction is CS low, one command byte, its arguments, then CS high. A rising CS discards any partial byte and ends the command. A command cut before its last argument bit does nothing, and the arguments it had are dropped. MISO reads 0 except during the reply bytes listed.
+Drive CS from a plain GPIO, not from the SPI block's own chip select. In mode 0 the RP2350's SPI block can pulse its chip select high between bytes, which would end every command after its first byte.
+
+A transaction is CS low, one command byte, its arguments, then CS high. A rising CS discards any partial byte and ends the command. A command cut before its last argument bit does nothing, and the arguments it had are dropped. Bytes after a command's last argument, up to CS high, are ignored, a second command byte included. MISO reads 0 except during the reply bytes listed.
 
 A rising SCK first seen at the pad in cycle *p* reaches the link in cycle *p + 2*, and MISO changes at the pad in *p + 3*. That leaves the host a stable bit at the next rising edge, provided its hold time is under 3 cycles. MISO returns to 0 three cycles after CS rises at the pad.
 
 Cycle *h* is the cycle in which the last bit of a command's arguments reaches the link, so *h = p + 2* for that bit. The table in section 9.2 says which bit it is. A command takes effect after step 5 of cycle *h*, apart from a memory access (section 9.4) and the read of RDREG (section 9.2), which come later.
 
-`rst_n` passes a synchroniser, so cycle 0 starts 2 clock edges after the pad rises. *h* is never before cycle 0, because the link is held in reset with everything else.
+`rst_n` passes a synchroniser, so cycle 0 starts 2 clock edges after the pad rises. *h* is never before cycle 0, because the link is held in reset with everything else. Keep CS high or SCK low while `rst_n` is low and for 2 cycles after it rises: if CS is low and SCK high as reset ends, the link counts a rising SCK that never happened.
 
 ### 9.2 Commands
 
@@ -946,7 +948,7 @@ The rules above define every cycle, so two conforming simulators agree on every 
 1. Memory contents before the first write to each address.
 2. Exactly which cycle an asynchronous pad change is first sampled, and any metastability in the synchroniser. A cycle-level simulator takes the value presented for that cycle.
 3. Sub-cycle behaviour of a bypass path, and of its switch at a commit. A cycle-level simulator may lag it by one cycle, and must say so.
-4. Host SCK above clk/6, or CS moving while SCK is high. Commands may be misread.
+4. Host SCK above clk/6, an SCK high or low shorter than 2 cycles, CS high for less than 3 cycles, CS moving while SCK is high, or CS low with SCK high as reset ends (section 9.1). Commands may be misread.
 5. Everything before the first reset.
 6. The cycle in which a STATUS byte, a host memory access, its BUSY or an RDREG read is served, within the limits in section 9. A byte-level simulator may do all of them in cycle *h*, and must say so.
 
