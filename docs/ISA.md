@@ -2,7 +2,7 @@
 
 Draft, 2026-11-05. This instruction set can change until the hardware freezes.
 
-**Status of the evidence.** Where this document says something ran, it ran on Python simulators: two hand-written, and one compiled directly from the instruction table and code blocks of this file. They agree on every cycle compared. Sections 7 and 11.2 list what ran. Treat anything they don't list as not run. The cycle figures in section 9 come from an RTL design, which has only been simulated and synthesized. No real hardware is behind this document. One of the simulators is in `sim/`. The test benches and the RTL aren't published yet.
+**Status of the evidence.** Where this document says something ran, it ran on Python simulators: two hand-written, and one compiled directly from the instruction table and code blocks of this file. They agree on every cycle compared. Sections 7 and 11.2 list what ran. Treat anything they don't list as not run. The cycle figures in section 9 come from an RTL design, which has only been simulated and synthesized. No real hardware is behind this document. One of the simulators is in `sim/`. The programs of section 11.2 are in `programs/`, with benches that run each of them on that simulator: `python3 programs/check.py`. The RTL is in `src/`, with its tests in `test/`.
 
 ## 1. Overview
 
@@ -650,7 +650,7 @@ This table is the single source. Every row has the same six columns, so it conve
 | Written | Assembles to | Words |
 |---|---|---|
 | `li Rd, imm16` | `ldi Rd, low byte`, then `lui Rd, high byte` if the high byte isn't 0 | 1 or 2 |
-| `ret` | 1 |
+| `ret` | `jr R7` | 1 |
 | `tick Rn` | `edge -, 0, Rn` | 1 |
 
 A `li` whose value depends on a label defined later in the source always takes 2 words, because its size can't depend on an address that isn't known yet.
@@ -994,56 +994,56 @@ Three things need the 512-word memory. Device-side USB (194 words) and a full CA
 
 Every program below ran on the simulators. Programs with pins ran against device models that see only pad levels. The device models and decoders follow the protocol specs but were written alongside the firmware, so a shared misreading wouldn't show. No sigrok decoder was used. None has been run outside the simulators.
 
-A program name can appear more than once, as different code.
+Each program is the file named, under `programs/`. `programs/README.md` says what its bench checks. The published benches repeat the results below except the sweeps, which take too long for a routine run: the limit sweeps (12 cycles per bit for `trimmed/uart_tx.s`, half period 8 for `basic/spi.s` and `advanced/jtag.s`), the sender-error and jitter windows of `basic/uart_rx.s`, `advanced/manch_rx.s` and `advanced/usb_rx.s`, and the break-length and slow-host runs of `standard/uart_rx.s`. A name can appear in more than one folder, as different code.
 
 | Program | Words | Result |
 |---|---|---|
-| `uart_tx` | 15 | The example in section 11.3. 115200 baud and 1 Mbaud on 16 of 16 threads and alignments, 9600 baud, and 12, 434, 5208 and 32767 cycles per bit |
-| `uart_tx` | 14 | Trimmed: the stop bit is a ninth shifted bit. 13 and 434 cycles per bit in the bench, 12 cycles per bit on 16 of 16 in the limit sweep |
-| `uart_rx` | 22 | Mid-bit sampling exact at 8 phases. Glitch rejected, framing error flagged in bit 8. 31 of 31 break lengths clean. No false bytes with a slow host |
-| `uart_rx` | 23 | Reports a framing error as a separate word, which keeps frames abutting. 115200 baud and 1 Mbaud at 8 phases. Sender error -5% to +4.5% at 115200 baud, -5% to +2.5% at 1 Mbaud |
-| `uart_rx` | 20 | Trimmed: the host posts the half bit too. 50 and 434 cycles per bit, and the same mailbox traffic in the shared image as solo |
-| `spi` | 22 | All 4 modes, half periods 9, 10 and 25, 16 alignments each |
-| `spi` | 20 | 21 with CPOL = 1. All 4 modes x 4 threads x 4 alignments at half periods 8, 9, 25 and 250. Multi-byte frames. MOSI and MISO decoded at the pads |
-| `spit_c` | 17 | SPI target, mode 0, half period 10 on 12 start phases |
-| `i2c` | 76 | Controller against an EEPROM model. At 100 kHz: write, random read, wrong address, data NACK, stretching on every clock, SDA stuck, SCL stuck at STOP. At 400 kHz: write and random read |
-| `i2c_c` | 76 | Same source as `i2c`. Same cases, through a second bench |
-| `i2c` | 72 | Trimmed, same host interface. The same cases as `i2c` at 100 and 400 kHz, and write and random read in the shared image |
-| `i2c_write` | 42 | 100 and 400 kHz: target ACK, stretching on every clock and after each ACK, NACK on data, wrong address, 3 transactions, 16 of 16 threads and alignments. Every UM10204 interval in range, including tBUF, with rise at the spec maximum. No SCL timeout |
-| `i2c_write` | 42 | Write-only controller. 100 and 400 kHz on all four threads, stretching, NACK on address and data, stretch timeout reported |
-| `i2c_target` | 62 | 24C02 style, plus 256 words of storage, 512-word memory only. Against `i2c` on another thread of the same chip at 100 and 400 kHz: write, random read, wrong address |
-| `i2c_tgt` | 78 | Target with 32 bytes of storage, on 128 words. ACK depends on the address and lands 3 cycles pad to pad at 100 and 400 kHz, on all threads and alignments. Repeated START, pointer wrap, wrong addresses silent |
-| `i2c_fp` | 87 | 1 MHz build of the target. Bytes correct. Reaction 3 cycles at minimum tLOW, 3 to 5 at minimum tHIGH. Intervals not checked at this rate |
-| `ws2812` | 19 | T0H 360 ns, T1H 700 ns, 1240 ns per bit, no jitter, 72 bits on 16 of 16 threads and alignments, latch gap checked |
-| `ws2812` | 17 | Same bit timing, on all four threads |
-| `onewire` | 34 | Reset 490 us, presence, 5 bytes written, no-device case reported, 12 of 12 device timing corners, 16 of 16 threads and alignments. No read slots or search |
-| `onewire` | 28 | Reset 480.0 us, presence, write byte, no-device case. No read slots or search |
-| `jtag` | 37 | Host-driven scan engine on a 2-TAP chain: both IDCODEs, IR scan, 40 bits through BYPASS, Pause-DR mid-scan, with a pad decoder walking the TAP states. Half period 9 in the bench, 8 on 16 of 16 in the limit sweep |
-| `jtag` | 51 | Fixed sequence against a TAP model: IDCODE, IR load, BYPASS loop, half periods 25 and 16 on all four threads |
-| `swd` | 128 | Host with turnaround: line reset, JTAG-to-SWD, DPIDR, writes, posted AP reads, WAIT retry and limit, FAULT, no response, read and write parity. Contention checked every cycle. No words spare |
-| `swd_c` | 64 | Read of DPIDR, ACK and parity errors reported, no contention |
-| `mdio_sta` | 47 | Clause 22 station, read and write, 1.25 MHz, PHY output delay 0 to 300 ns, 16 of 16 threads and alignments |
-| `mdio_phy` | 60 | Plus 32 registers. Follows an external MDC, and MDIO moves exactly 3 cycles after MDC rises |
-| `manch_rx` | 28 | Clock recovery: preamble lock, start mark, end of frame, 4,800-bit frame, 4 threads x 8 phases. Sender clock error -20% to +24%, edge jitter 10% of a bit |
-| `manch_rx` | 13 | Fixed format. Sender clock +/-10% |
-| `dmx_tx` | 29 | DMX512 transmit. Full 512-slot universe decoded at the pad, break 110 us, MAB 16.2 us, clean through a 1.4 ms host stall |
-| `dmx_rx` | 52 | Slot windows 1, 250 and 509, shortest legal break and MAB, sender error 2%, 1 ms mark between slots, non-zero start code ignored. The universe streams through the mailbox |
-| `ps2_dev` | 114 | PS/2 device, both directions with parity and device ACK. Commands FF, F2, ED, EE and FE, bad parity answered, host inhibit and request-to-send handled, byte resent |
-| `usb_tx` | 43 | Low-speed transmit, NRZI and stuffing at 33 cycles per bit, every D+ edge on the grid |
-| `usb_rx` | 69 | Low-speed receive in 2 threads: stuffing-heavy packets, sender error 1.5%, D+/D- skew to 160 ns, 2-bit gaps, jitter to 60 ns. 80 ns loses 4 runs of 12, and 100 ns fails |
-| `usb_dev` | 194 | Device link in 3 threads, 512-word memory: SETUP with CRC-16 check, ACK, NAK, IN with DATA1, host ACK, address filter, bad CRC rejected. Worst turnaround 6.06 bit times against 6.5. No enumeration, data toggle or token CRC-5 check |
-| `can` | 166 | 3 threads, 512-word memory. 500 kbit/s, stuffing and CRC-15 in firmware, sender error 2%, 440 ns transceiver loop, ACK in the right slot, both arbitration outcomes. RX alone 92 words and TX alone 74 ran on 128. No error frames or retransmit |
-| `cec` | 50 | HDMI CEC initiator. All bit windows met, ACK and no-ACK reported. No arbitration |
-| `lin_c` | 52 | LIN responder header with auto-baud at +/-14%. Header only |
-| `nec_c` | 41 | NEC IR transmit. Carrier exact, 1316 cycles with 439 high |
-| `par_c` | 7 | 8-bit parallel capture. Data hold 0 cycles after the strobe, strobe period 28 |
-| `hdlc_tx` | 48 | NRZI, stuffing and CRC-16/X-25 in firmware, decoded from the pad trace |
-| `crc16` | 14 | CRC-16/CCITT, published check value |
-| `crc8` | 12 | CRC-8/MAXIM, published check value |
-| `crc32` | 26 | CRC-32, published check value |
-| `reflex` | 15 | The reaction test behind section 11.4. Pre-armed 3 cycles, firmware 9 to 12 |
-| `memstress` | 17 | Memory load for the timing-isolation check: a thread hammering `ld` and `st` changes nothing on another thread |
-| `memhog` | 8 | The same job in the concurrency runs |
+| `basic/uart_tx.s`, `standard/uart_tx.s` | 15 | The example in section 11.3. 115200 baud and 1 Mbaud on 16 of 16 threads and alignments, 9600 baud, and 12, 434, 5208 and 32767 cycles per bit |
+| `trimmed/uart_tx.s` | 14 | Trimmed: the stop bit is a ninth shifted bit. 13 and 434 cycles per bit in the bench, 12 cycles per bit on 16 of 16 in the limit sweep |
+| `standard/uart_rx.s` | 22 | Mid-bit sampling exact at 8 phases. Glitch rejected, framing error flagged in bit 8. 31 of 31 break lengths clean. No false bytes with a slow host |
+| `basic/uart_rx.s` | 23 | Reports a framing error as a separate word, which keeps frames abutting. 115200 baud and 1 Mbaud at 8 phases. Sender error -5% to +4.5% at 115200 baud, -5% to +2.5% at 1 Mbaud |
+| `trimmed/uart_rx.s` | 20 | Trimmed: the host posts the half bit too. 50 and 434 cycles per bit, and the same mailbox traffic in the shared image as solo |
+| `standard/spi.s` | 22 | All 4 modes, half periods 9, 10 and 25, 16 alignments each |
+| `basic/spi.s` | 20 | 21 with CPOL = 1. All 4 modes x 4 threads x 4 alignments at half periods 8, 9, 25 and 250. Multi-byte frames. MOSI and MISO decoded at the pads |
+| `extra/spi_target.s` | 17 | SPI target, mode 0, half period 10 on 12 start phases |
+| `standard/i2c.s` | 76 | Controller against an EEPROM model. At 100 kHz: write, random read, wrong address, data NACK, stretching on every clock, SDA stuck, SCL stuck at STOP. At 400 kHz: write and random read |
+| `extra/i2c.s` | 76 | Same source as `standard/i2c.s`. Same cases, through a second bench |
+| `trimmed/i2c.s` | 72 | Trimmed, same host interface. The same cases as `i2c` at 100 and 400 kHz, and write and random read in the shared image |
+| `basic/i2c_write.s` | 42 | 100 and 400 kHz: target ACK, stretching on every clock and after each ACK, NACK on data, wrong address, 3 transactions, 16 of 16 threads and alignments. Every UM10204 interval in range, including tBUF, with rise at the spec maximum. No SCL timeout |
+| `standard/i2c_write.s` | 42 | Write-only controller. 100 and 400 kHz on all four threads, stretching, NACK on address and data, stretch timeout reported |
+| `standard/i2c_target.s` | 62 | 24C02 style, plus 256 words of storage, 512-word memory only. Against `i2c` on another thread of the same chip at 100 and 400 kHz: write, random read, wrong address |
+| `advanced/i2c_tgt.s` | 78 | Target with 32 bytes of storage, on 128 words. ACK depends on the address and lands 3 cycles pad to pad at 100 and 400 kHz, on all threads and alignments. Repeated START, pointer wrap, wrong addresses silent |
+| `advanced/i2c_fp.s` | 87 | 1 MHz build of the target. Bytes correct. Reaction 3 cycles at minimum tLOW, 3 to 5 at minimum tHIGH. Intervals not checked at this rate |
+| `basic/ws2812.s` | 19 | T0H 360 ns, T1H 700 ns, 1240 ns per bit, no jitter, 72 bits on 16 of 16 threads and alignments, latch gap checked |
+| `standard/ws2812.s` | 17 | Same bit timing, on all four threads |
+| `basic/onewire.s` | 34 | Reset 490 us, presence, 5 bytes written, no-device case reported, 12 of 12 device timing corners, 16 of 16 threads and alignments. No read slots or search |
+| `standard/onewire.s` | 28 | Reset 480.0 us, presence, write byte, no-device case. No read slots or search |
+| `advanced/jtag.s` | 37 | Host-driven scan engine on a 2-TAP chain: both IDCODEs, IR scan, 40 bits through BYPASS, Pause-DR mid-scan, with a pad decoder walking the TAP states. Half period 9 in the bench, 8 on 16 of 16 in the limit sweep |
+| `standard/jtag.s` | 51 | Fixed sequence against a TAP model: IDCODE, IR load, BYPASS loop, half periods 25 and 16 on all four threads |
+| `advanced/swd.s` | 128 | Host with turnaround: line reset, JTAG-to-SWD, DPIDR, writes, posted AP reads, WAIT retry and limit, FAULT, no response, read and write parity. Contention checked every cycle. No words spare |
+| `extra/swd.s` | 64 | Read of DPIDR, ACK and parity errors reported, no contention |
+| `advanced/mdio_sta.s` | 47 | Clause 22 station, read and write, 1.25 MHz, PHY output delay 0 to 300 ns, 16 of 16 threads and alignments |
+| `advanced/mdio_phy.s` | 60 | Plus 32 registers. Follows an external MDC, and MDIO moves exactly 3 cycles after MDC rises |
+| `advanced/manch_rx.s` | 28 | Clock recovery: preamble lock, start mark, end of frame, 4,800-bit frame, 4 threads x 8 phases. Sender clock error -20% to +24%, edge jitter 10% of a bit |
+| `standard/manch_rx.s` | 13 | Fixed format. Sender clock +/-10% |
+| `advanced/dmx_tx.s` | 29 | DMX512 transmit. Full 512-slot universe decoded at the pad, break 110 us, MAB 16.2 us, clean through a 1.4 ms host stall |
+| `advanced/dmx_rx.s` | 52 | Slot windows 1, 250 and 509, shortest legal break and MAB, sender error 2%, 1 ms mark between slots, non-zero start code ignored. The universe streams through the mailbox |
+| `advanced/ps2_dev.s` | 114 | PS/2 device, both directions with parity and device ACK. Commands FF, F2, ED, EE and FE, bad parity answered, host inhibit and request-to-send handled, byte resent |
+| `advanced/usb_tx.s` | 43 | Low-speed transmit, NRZI and stuffing at 33 cycles per bit, every D+ edge on the grid |
+| `advanced/usb_rx.s` | 69 | Low-speed receive in 2 threads: stuffing-heavy packets, sender error 1.5%, D+/D- skew to 160 ns, 2-bit gaps, jitter to 60 ns. 80 ns loses 4 runs of 12, and 100 ns fails |
+| `advanced/usb_dev.s` | 194 | Device link in 3 threads, 512-word memory: SETUP with CRC-16 check, ACK, NAK, IN with DATA1, host ACK, address filter, bad CRC rejected. Worst turnaround 6.06 bit times against 6.5. No enumeration, data toggle or token CRC-5 check |
+| `advanced/can.s` | 166 | 3 threads, 512-word memory. 500 kbit/s, stuffing and CRC-15 in firmware, sender error 2%, 440 ns transceiver loop, ACK in the right slot, both arbitration outcomes. RX alone 92 words and TX alone 74 ran on 128. No error frames or retransmit |
+| `standard/cec.s` | 50 | HDMI CEC initiator. All bit windows met, ACK and no-ACK reported. No arbitration |
+| `extra/lin.s` | 52 | LIN responder header with auto-baud at +/-14%. Header only |
+| `extra/nec_tx.s` | 41 | NEC IR transmit. Carrier exact, 1316 cycles with 439 high |
+| `extra/parallel.s` | 7 | 8-bit parallel capture. Data hold 0 cycles after the strobe, strobe period 28 |
+| `standard/hdlc_tx.s` | 48 | NRZI, stuffing and CRC-16/X-25 in firmware, decoded from the pad trace |
+| `standard/crc16.s` | 14 | CRC-16/CCITT, published check value |
+| `standard/crc8.s` | 12 | CRC-8/MAXIM, published check value |
+| `standard/crc32.s` | 26 | CRC-32, published check value |
+| `standard/reflex.s` | 15 | The reaction test behind section 11.4. Pre-armed 3 cycles, firmware 9 to 12 |
+| `standard/memstress.s` | 17 | Memory load for the timing-isolation check: a thread hammering `ld` and `st` changes nothing on another thread |
+| `basic/memhog.s` | 8 | The same job in the concurrency runs |
 
 ### 11.3 Worked example: a UART transmitter
 

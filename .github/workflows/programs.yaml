@@ -1,0 +1,23 @@
+name: programs
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  programs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Python standard library only: nothing to install
+      - name: Run every program on the simulator
+        run: python3 programs/check.py
