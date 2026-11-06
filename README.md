@@ -15,7 +15,7 @@ A Tiny Tapeout design for IHP SG13CMOS5L that emulates digital protocols after f
 
 ## Setup
 
-`scripts/setup.sh` installs the tool versions the online checks use, into `~/ttsetup` and `tt/`, then runs the program checks and the RTL tests. It needs Linux x86-64, git, make, Python 3.11 or 3.12 with venv, and Icarus Verilog 12.0 or later unless you pass `--install-iverilog`. The first run downloads about 0.5 GB, takes about 6 minutes on a fast connection and uses 2 GB of disk. After it, `. ~/ttsetup/env.sh` prepares each new shell. `--install-iverilog` adds Icarus 13.0, which gate level needs, and `--harden` adds the container for a local build: `scripts/setup.sh --help` has the details.
+`scripts/setup.sh` installs the tool versions the online checks use, into `~/ttsetup` and `tt/`, then runs the program checks and the RTL tests. It needs Linux x86-64, git, make, Python 3.11 or 3.12 with venv, and Icarus Verilog 12.0 or later unless you pass `--install-iverilog`. The first run downloads about 0.6 GB, most of it the PDK, and takes about 6 minutes on a fast connection. After it, `. ~/ttsetup/env.sh` prepares each new shell. `--install-iverilog` adds Icarus 13.0, which gate level needs, and `--harden` adds the container for a local build: `scripts/setup.sh --help` has the details. Run a local build from a shell with `env.sh`: without its `PDK_ROOT`, LibreLane downloads the PDK again, into `~/.ciel`.
 
 ## Tests
 

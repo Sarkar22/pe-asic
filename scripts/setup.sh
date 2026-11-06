@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Installs the tool versions the online checks use, then runs the program checks and the RTL tests.
 #
-#   scripts/setup.sh                     install, then test: about 6 min and 2 GB of disk the first time
+#   scripts/setup.sh                     install, then test: about 6 min the first time
 #   scripts/setup.sh --no-test           install only
 #   scripts/setup.sh --install-iverilog  also install Icarus Verilog 13.0 (Debian, Ubuntu; uses sudo).
 #                                        Gate level needs 13.0; the RTL tests also run on 12.0
-#   scripts/setup.sh --harden            also pull the LibreLane container (6.6 GB) for a local build
+#   scripts/setup.sh --harden            also pull the LibreLane container (a 1.6 GB download) for a
+#                                        local build
 #
 # Everything goes into $TTSETUP (default ~/ttsetup) and tt/ in this repo, and pip keeps its
 # downloads in ~/.cache/pip. Nothing else on the machine changes, except the system iverilog
@@ -18,11 +19,13 @@
 set -euo pipefail
 unset CDPATH PYTHONPATH # an exported CDPATH redirects cd; pip counts packages on PYTHONPATH as installed
 
-# The versions behind the online build in docs/STATUS.md (tt-gds-action branch ihp-cmos5l at 3412659)
-TT_TOOLS_SHA=d66cf179e7bc4d296362ab7e2e3b344dc3c4f665   # tt-support-tools, branch ihp-sg13cmos5l
-PDK_SHA=2bbec755dc67ca3db0261c3d6163e15735d66710        # IHP-Open-PDK
-LIBRELANE=3.1.0.dev3
-LIBRELANE_DIGEST=sha256:d109140b8f17fc54f4fca998beb8124f4949404ec52e339eebd2250854a18b5a
+# The versions the online checks use: tt-gds-action tag ttihp27a (commit e7a50f8f), with tools-ref
+# pinned in the workflows to the same tt-support-tools commit
+TT_TOOLS_SHA=9d13ff3e3e6202090740110438c6a10c1d62ca0f   # tt-support-tools main, 2026-11-05
+PDK_SHA=89d42ee6d2fd9b50b86a1aada6fee6673c3e6008        # IHP-Open-PDK, the version LibreLane asks ciel for
+LIBRELANE=3.1.0.dev4
+LIBRELANE_DIGEST=sha256:af2405f5d48d8fe14d406ecce913811177a95e365e3b625859677307cace2469
+CIEL=3.2.0                                              # installs the PDK, as the online checks do
 COCOTB=2.0.1                                            # as in test/requirements.txt
 IVERILOG_DEB=https://github.com/TinyTapeout/iverilog/releases/download/v13.0/iverilog_13.0-1_amd64.deb
 IVERILOG_DEB_SHA256=888bca6b06289ea8b55368d43db38dc88932938319ab40d45a763ce5114e8505
@@ -111,9 +114,17 @@ fi
   die "$VENV exists and isn't from this script. Move it aside, or set TTSETUP to another folder. If you made it for this repo, run: touch $VENV/.pe-asic"
 [ ! -e "$TTSETUP/env.sh" ] || grep -q 'in each new shell, before the tests or a build' "$TTSETUP/env.sh" ||
   die "$TTSETUP/env.sh exists and isn't from this script. Move it aside, or set TTSETUP to another folder"
+if [ -e "$PDK_ROOT" ] && [ ! -e "$PDK_ROOT/.pe-asic" ]; then
+  # Before 2026-11-06 this script put a git checkout of the PDK here; ciel can't share the folder with it
+  [ "$(git -C "$PDK_ROOT" rev-parse --git-dir 2>/dev/null)" != .git ] ||
+    die "$PDK_ROOT is the PDK checkout an older version of this script made. The online checks now install the PDK with ciel. Move the checkout aside (mv $PDK_ROOT $PDK_ROOT-git) and run again"
+  [ -z "$(ls -A "$PDK_ROOT" 2>/dev/null)" ] ||
+    die "$PDK_ROOT exists and isn't from this script. Move it aside, or set TTSETUP to another folder"
+fi
 
 step "TT tools: tt-support-tools ${TT_TOOLS_SHA:0:8} in $REPO/tt"
-pin_checkout "$REPO/tt" https://github.com/TinyTapeout/tt-support-tools "$TT_TOOLS_SHA" ihp-sg13cmos5l
+# No branch: the online jobs check out the commit itself, so tt_tool.py stamps the build the same way
+pin_checkout "$REPO/tt" https://github.com/TinyTapeout/tt-support-tools "$TT_TOOLS_SHA"
 if git rev-parse --git-dir >/dev/null 2>&1 && [ -z "$(git rev-parse --show-prefix)" ]; then
   exclude=$(git rev-parse --git-path info/exclude)
   mkdir -p "$(dirname "$exclude")"
@@ -121,11 +132,13 @@ if git rev-parse --git-dir >/dev/null 2>&1 && [ -z "$(git rev-parse --show-prefi
 fi
 
 step "Python packages in $VENV"
-pins=$(cat tt/requirements.txt test/requirements.txt; echo "librelane==$LIBRELANE")
+pins=$(cat tt/requirements.txt test/requirements.txt; echo "librelane==$LIBRELANE"; echo "ciel==$CIEL")
+pip_version() { "$VENV/bin/python" -m pip show "$1" 2>/dev/null | sed -n 's/^Version: //p'; }
 venv_ok() {
   [ "$(cat "$VENV/.pe-asic" 2>/dev/null)" = "$pins" ] &&
     [ "$("$VENV/bin/cocotb-config" --version 2>/dev/null)" = "$COCOTB" ] &&
-    [ "$("$VENV/bin/python" -m pip show librelane 2>/dev/null | sed -n 's/^Version: //p')" = "$LIBRELANE" ] &&
+    [ "$(pip_version librelane)" = "$LIBRELANE" ] &&
+    [ "$(pip_version ciel)" = "$CIEL" ] &&
     "$VENV/bin/python" -m pip check >/dev/null 2>&1
 }
 if venv_ok; then
@@ -138,7 +151,7 @@ else
   [ -x "$VENV/bin/pip" ] || "$PY" -m venv "$VENV" ||
     die "python -m venv failed. On Debian or Ubuntu: sudo apt install python$PYV-venv"
   "$VENV/bin/python" -m pip install -q -r tt/requirements.txt
-  "$VENV/bin/python" -m pip install -q "librelane==$LIBRELANE"
+  "$VENV/bin/python" -m pip install -q "librelane==$LIBRELANE" "ciel==$CIEL"
   "$VENV/bin/python" -m pip install -q -r test/requirements.txt
   "$VENV/bin/python" -m pip check
   printf '%s\n' "$pins" >"$VENV/.pe-asic"
@@ -148,9 +161,31 @@ fi
 "$VENV/bin/cocotb-config" --libpython >/dev/null 2>&1 ||
   die "cocotb can't find Python's shared library. On Debian or Ubuntu: sudo apt install libpython$PYV"
 
-step "IHP PDK ${PDK_SHA:0:8} in $PDK_ROOT (a 380 MB download the first time)"
-pin_checkout "$PDK_ROOT" https://github.com/IHP-GmbH/IHP-Open-PDK.git "$PDK_SHA"
-echo "IHP-Open-PDK $PDK_SHA" >"$PDK_ROOT/ihp-sg13cmos5l/SOURCES"
+step "IHP PDK ${PDK_SHA:0:8} in $PDK_ROOT (a 480 MB download the first time)"
+# ciel unpacks the same release the online jobs and LibreLane use, then links ihp-sg13cmos5l to it.
+# The folder's .pe-asic lists each PDK version that finished installing.
+PDK_MARK="IHP-Open-PDK $PDK_SHA" # also the SOURCES line that tt_tool.py reads after a build
+pdk_version_dir=$PDK_ROOT/ciel/ihp-sg13/versions/$PDK_SHA
+pdk_ok() {
+  grep -qxF "$PDK_MARK" "$PDK_ROOT/.pe-asic" 2>/dev/null &&
+    [ "$(cat "$PDK_ROOT/ciel/ihp-sg13/current" 2>/dev/null)" = "$PDK_SHA" ] &&
+    [ "$(readlink "$PDK_ROOT/ihp-sg13cmos5l")" = "ciel/ihp-sg13/versions/$PDK_SHA/ihp-sg13cmos5l" ] &&
+    [ "$(cat "$PDK_ROOT/ihp-sg13cmos5l/SOURCES" 2>/dev/null)" = "$PDK_MARK" ]
+}
+if pdk_ok; then
+  echo "already at the pin"
+else
+  mkdir -p "$PDK_ROOT"
+  touch "$PDK_ROOT/.pe-asic"
+  # ciel takes a version folder that is there as complete, so a download cut short has to go first
+  ! [ -e "$pdk_version_dir" ] || grep -qxF "$PDK_MARK" "$PDK_ROOT/.pe-asic" ||
+    die "$pdk_version_dir is left from an install that didn't finish. Delete it and run again"
+  # --pdk-root and PDK_ROOT both: ciel's default is ~/.ciel
+  PDK_ROOT=$PDK_ROOT "$VENV/bin/ciel" enable --pdk-root "$PDK_ROOT" --pdk ihp-sg13cmos5l \
+    --data-source static-web:https://fossi-foundation.github.io/ciel-releases "$PDK_SHA"
+  grep -qxF "$PDK_MARK" "$PDK_ROOT/.pe-asic" || echo "$PDK_MARK" >>"$PDK_ROOT/.pe-asic"
+  pdk_ok || die "ciel finished, but $PDK_ROOT/ihp-sg13cmos5l isn't IHP-Open-PDK $PDK_SHA"
+fi
 
 step "Icarus Verilog"
 iverilog_version() { iverilog -V 2>/dev/null | sed -n '1s/^Icarus Verilog version \([0-9.]*\).*/\1/p'; }
@@ -222,10 +257,12 @@ Done. In each new shell, first:
 Then, from $REPO:
   python3 programs/check.py           every program on the simulator
   (cd test && make -B)                RTL tests at the pins
-A local build needs a git clone with a remote, which tt_tool.py records, and setup.sh --harden
-first. It takes about 20 min and 3 GB of memory:
-  ./tt/tt_tool.py --create-user-config --ihp && ./tt/tt_tool.py --harden --ihp
-  ./tt/tt_tool.py --create-tt-submission --ihp
+A local build needs a git clone, whose commit tt_tool.py records, and setup.sh --harden first.
+It takes about 20 min and 3 GB of memory. Run it in a shell with env.sh: without PDK_ROOT,
+LibreLane downloads the PDK again, into ~/.ciel.
+  ./tt/tt_tool.py --create-user-config --pdk ihp-sg13cmos5l
+  ./tt/tt_tool.py --harden --pdk ihp-sg13cmos5l
+  ./tt/tt_tool.py --create-tt-submission --pdk ihp-sg13cmos5l
   cp tt_submission/tt_um_sarkar22_pe.v test/gate_level_netlist.v
   (cd test && make -B GATES=yes)      gate-level tests on that netlist, with Icarus 13.0
 EOF
