@@ -62,11 +62,19 @@
 #   VSPACING 3.52   The GROUND stripe sits (spacing + width) = 5.62 um from POWER,
 #                   the macro's POWER to GROUND column distance.
 #   VPITCH   67.44  6 x 11.24, the smallest multiple that steps over the middle band.
-#   VOFFSET  26.36  From the core xMin of 2.88: 2.88 + 26.36 = 29.24 = 12.0 (macro x)
-#                   + 17.24, which splits the 0.67 um offset between the macro's two
-#                   halves, so both halves' stripes sit inside their columns.
-# The macro's x must stay 12 + 67.44 k, or VOFFSET must be recomputed. Do not add
+#   VOFFSET  25.40  pdngen centres the first POWER stripe at core xMin + VOFFSET:
+#                   2.88 + 25.40 = 28.28 = 11.04 (macro x) + 17.24, which splits the
+#                   0.67 um offset between the macro's two halves, so both halves'
+#                   stripes sit inside their columns.
+# The macro's x must stay 11.04 + 67.44 k, or VOFFSET must be recomputed. Do not add
 # -snap_to_grid: Metal4 tracks do not line up with the columns.
+#
+# On the 8x4 tile (core x 2.88 to 1721.28) this gives 26 POWER/GROUND pairs, the
+# last GROUND stripe at x 1718.85 to 1720.95. The 6x4 numbers (macro x 12, VOFFSET
+# 26.36) would put that stripe at 1719.81 to 1721.91, 0.63 um past the core edge,
+# which pdngen allows because the stripe's centre is inside the core. Moving the
+# macro and every stripe 0.96 um (two sites) left keeps all of them inside, and
+# leaves each stripe where it was relative to the macro.
 
 source $::env(SCRIPTS_DIR)/openroad/common/io.tcl
 source $::env(SCRIPTS_DIR)/openroad/common/set_global_connections.tcl

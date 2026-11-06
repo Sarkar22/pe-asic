@@ -35,14 +35,15 @@
   "USE_SLANG": true,
 
   "//": "The SRAM macro. The instance key is the flattened path, which is what the netlist calls it.",
-  "//": "FS puts the macro's signal pins on its top edge, facing the free rows above it, and keeps its",
-  "//": "Metal4 power columns vertical. x must stay 12 + 67.44 k so the columns stay under the stripes",
-  "//": "(src/pdn_cfg.tcl). The lib keys name the process corner, because every corner here is nom_*.",
+  "//": "It sits at the bottom left, under the block's pins in the top left corner. FS puts its signal",
+  "//": "pins on its top edge, facing the free rows above it, and keeps its Metal4 power columns vertical.",
+  "//": "x must stay 11.04 + 67.44 k so the columns stay under the stripes (src/pdn_cfg.tcl). The lib",
+  "//": "keys name the process corner, because every corner here is nom_*.",
   "MACROS": {
     "RM_IHPSG13_1P_512x16_c2_bm_bist": {
       "instances": {
         "core.mem.sram": {
-          "location": [12, 40],
+          "location": [11.04, 40],
           "orientation": "FS"
         }
       },
@@ -121,7 +122,7 @@
   "FP_PDN_VPITCH": 67.44,
   "FP_PDN_VWIDTH": 2.1,
   "FP_PDN_VSPACING": 3.52,
-  "FP_PDN_VOFFSET": 26.36,
+  "FP_PDN_VOFFSET": 25.40,
 
   "//": "Clock",
   "RUN_CTS": 1,
