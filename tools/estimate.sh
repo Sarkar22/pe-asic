@@ -9,7 +9,7 @@ set -e
 OUT=$(realpath "$1")
 ROOT=$(realpath "$(dirname "$0")/..")
 PDK=$(realpath "${PDK_ROOT:?set PDK_ROOT}")
-IMAGE=ghcr.io/librelane/librelane:3.1.0.dev3
+IMAGE=ghcr.io/librelane/librelane:3.1.0.dev4 # the image of the flow, as in scripts/setup.sh
 mkdir -p "$OUT"
 
 LIB=/pdk/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/lib/sg13cmos5l_stdcell_slow_1p08V_125C.lib

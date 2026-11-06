@@ -14,4 +14,6 @@ jobs:
           submodules: recursive
 
       - name: Build docs
-        uses: TinyTapeout/tt-gds-action/docs@ihp-cmos5l
+        uses: TinyTapeout/tt-gds-action/docs@ttihp27a
+        with:
+          tools-ref: 9d13ff3e3e6202090740110438c6a10c1d62ca0f # tt-support-tools main on 2026-11-05, the same pin as scripts/setup.sh

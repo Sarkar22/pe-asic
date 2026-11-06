@@ -25,10 +25,10 @@
 #
 # PDN for the RM_IHPSG13_1P_512x16_c2_bm_bist macro on sg13cmos5l.
 #
-# Below this comment is LibreLane 3.1.0.dev3's scripts/openroad/common/pdn_cfg.tcl
-# with one change: its macro grid, the last ten lines, is replaced by the pdngen
-# wrapper at the end of this file. Stripe geometry comes from the FP_PDN_* keys
-# in src/config.json.
+# Below this comment is LibreLane 3.1.0.dev4's scripts/openroad/common/pdn_cfg.tcl
+# (the same as 3.1.0.dev3's) with one change: its macro grid, the last ten lines,
+# is replaced by the pdngen wrapper at the end of this file. Stripe geometry comes
+# from the FP_PDN_* keys in src/config.json.
 #
 # Why the default macro grid cannot work here. It connects a macro to the block
 # grid with a Metal4 to TopMetal1 via, but a block has no TopMetal1: that layer

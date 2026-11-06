@@ -95,7 +95,8 @@
   "RUN_KLAYOUT_DRC": 1,
   "RUN_MAGIC_DRC": 0,
 
-  "//": "LibreLane 3.1.0.dev3 runs every OpenROAD step single-threaded unless this is set",
+  "//": "Fixed thread counts. LibreLane 3.1.0.dev3 ran every OpenROAD step single-threaded without this;",
+  "//": "OpenROAD caps it at the core count, so the online build gets 4",
   "OPENROAD_THREADS": 8,
   "KLAYOUT_DRC_THREADS": 8,
 
