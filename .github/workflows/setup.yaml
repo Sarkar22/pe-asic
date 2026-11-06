@@ -1,6 +1,6 @@
 name: setup
 
-# scripts/setup.sh on a clean machine: installs the pinned tools, then runs the tests
+# scripts/setup.sh on a fresh GitHub runner: installs the pinned tools, then runs the tests
 on:
   push:
     paths:
@@ -20,5 +20,11 @@ jobs:
       - name: One-command setup, then the program checks and the RTL tests
         run: time scripts/setup.sh --install-iverilog
 
+      - name: Disk used
+        run: du -sh ~/ttsetup/venv ~/ttsetup/pdk tt
+
       - name: Run again, with every step already done
-        run: time scripts/setup.sh --no-test
+        shell: bash
+        run: |
+          time scripts/setup.sh --no-test | tee rerun.log
+          test "$(grep -c -x -E 'already (at the pin|set up)' rerun.log)" = 3

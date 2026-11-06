@@ -32,7 +32,7 @@ From the online build of `d00ddaa` (6x4 tiles, IHP SG13CMOS5L, 20 ns clock):
 | Gate level, on the hardened netlist with the RTL beside it, pin by pin | 23 pass, 1 skipped |
 | `programs/check.py`: every program on the simulator | 458 checks pass |
 | TT precheck | pass |
-| `scripts/setup.sh` on a clean Ubuntu 24.04: the pinned tools, then the program checks and the RTL tests | pass |
+| `scripts/setup.sh` on GitHub's ubuntu-24.04 runner, which already has make, git, curl and Python with venv: the pinned tools, then the program checks and the RTL tests | pass |
 
 The pin-level tests catch 50 of 81 bugs planted in the RTL to test them. The other 31 are caught by slower development benches that compare hidden state with the simulator every cycle. Those benches are not in this repo yet.
 
