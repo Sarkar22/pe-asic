@@ -1,9 +1,10 @@
 # Status
 
-Updated 2026-11-05.
+Updated 2026-11-06.
 
 ## Where the design is
 
+- **Chip:** 8x4 tiles on IHP SG13CMOS5L, with the March shuttle's flow, since 2026-11-06 ([DECISIONS.md](DECISIONS.md)).
 - **Core RTL:** complete for the published instruction set, in `src/`. Four threads, the pin layer with bypass and open drain, the SPI host link, and one 512x16 SRAM for code and data.
 - **Specification:** [ISA.md](ISA.md), sections 1 to 11. Changes until the hardware freezes are listed in [DECISIONS.md](DECISIONS.md).
 - **Programs:** 47 programs for 17 protocols in [`programs/`](../programs/README.md), each checked on the simulator in `sim/`.
@@ -11,7 +12,9 @@ Updated 2026-11-05.
 
 ## Chip build
 
-From the online build of `d00ddaa` (6x4 tiles, IHP SG13CMOS5L, 20 ns clock):
+The table below, and the gate-level, precheck and setup results under Tests, are from the last build on 6x4 tiles with the old flow. The first 8x4 online run replaces them.
+
+From the online build of `d00ddaa` (6x4 tiles, IHP SG13CMOS5L, LibreLane 3.1.0.dev3, 20 ns clock):
 
 | Measure | Value |
 |---|---|
@@ -49,6 +52,7 @@ The pin-level tests catch 50 of 81 bugs planted in the RTL to test them. The oth
 |---|---|
 | 2026-10-30 | Template design builds and passes every online check |
 | 2026-11-05 | Core RTL with the SRAM on `main`, every online check green |
+| 2026-11-06 | Move to 8x4 tiles and the March shuttle's flow |
 | 2026-11-22 | Chip warnings above fixed, slow-corner timing enforced |
 | 2026-12-06 | Hardware freeze, tag `hw-freeze` ([flexibility trial](../flex/README.md)) |
 | 2026-12-07 | Three protocols drawn for the flexibility trial |
