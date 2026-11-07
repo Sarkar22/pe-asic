@@ -37,6 +37,7 @@ The flow now stops the build on a setup or hold violation in any of the three co
 | `programs/check.py`: every program on the simulator | 458 checks pass |
 | TT precheck: 10 checks, among them KLayout DRC, the boundary and the Verilog syntax | pass |
 | `scripts/setup.sh` on GitHub's ubuntu-24.04 runner, which already has make, git, curl and Python with venv: the pinned tools, then the program checks and the RTL tests | pass: 5 min 40 s, 1.45 GB of disk (venv 463 MB, PDK 982 MB, `tt/` 9.4 MB) |
+| Local build of the same design with the TT flow, after `scripts/setup.sh --harden`, on a 22-thread laptop | `metrics.json` identical to the online build's, all 196 values; 16 min, 3.4 GB of memory; gate level on its netlist 23 pass, 1 skipped |
 
 The pin-level tests catch 50 of 81 bugs planted in the RTL to test them. The other 31 are caught by slower development benches that compare hidden state with the simulator every cycle. Those benches are not in this repo yet.
 
