@@ -16,15 +16,15 @@ TARGETS := $(foreach k,stub pins,$(foreach d,128 512,$(BUILD)/$(k)_$(d)/libpe.so
 
 all: $(TARGETS)
 
-$(BUILD)/stub_%/libpe.so: $(RTL) pe_spi_stub.sv sram_model.v public.vlt shim.cpp
+$(BUILD)/stub_%/libpe.so: $(RTL) pe_spi_stub.sv sram_model.v cells_rtl.v public.vlt shim.cpp
 	mkdir -p $(dir $@)
 	verilator $(FLAGS) +define+PE_DEPTH=$* --Mdir $(dir $@)obj -o ../libpe.so \
-	  $(RTL) pe_spi_stub.sv sram_model.v public.vlt $(abspath shim.cpp)
+	  $(RTL) pe_spi_stub.sv sram_model.v cells_rtl.v public.vlt $(abspath shim.cpp)
 
-$(BUILD)/pins_%/libpe.so: $(RTL) $(SRC)/pe_spi.sv sram_model.v public.vlt shim.cpp
+$(BUILD)/pins_%/libpe.so: $(RTL) $(SRC)/pe_spi.sv sram_model.v cells_rtl.v public.vlt shim.cpp
 	mkdir -p $(dir $@)
 	verilator $(FLAGS) +define+PE_DEPTH=$* -CFLAGS -DPE_PINS --Mdir $(dir $@)obj -o ../libpe.so \
-	  $(RTL) $(SRC)/pe_spi.sv sram_model.v public.vlt $(abspath shim.cpp)
+	  $(RTL) $(SRC)/pe_spi.sv sram_model.v cells_rtl.v public.vlt $(abspath shim.cpp)
 
 clean:
 	rm -rf $(BUILD)

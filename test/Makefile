@@ -22,6 +22,7 @@ ifneq ($(GATES),yes)
 SIM_BUILD				= sim_build/rtl
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
 VERILOG_SOURCES += $(PWD)/../verif/sram_model.v
+VERILOG_SOURCES += $(PWD)/../verif/cells_rtl.v
 
 else
 

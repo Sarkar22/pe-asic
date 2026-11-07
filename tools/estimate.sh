@@ -1,7 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # Area and timing estimate. Synthesis with Yosys and slang in the LibreLane image, against the
-# slow-corner liberty, with the SRAM as a black box and no placement: no wires, ideal clock.
+# slow-corner liberty, with the SRAM as a black box and no placement: no wires, ideal clock. The
+# liberty is read first, so the standard cells that src/ instantiates by name resolve.
 #
 # Usage: tools/estimate.sh <output folder>
 # Needs PDK_ROOT. Writes flat.v, flat.txt, hier.txt and sta.txt there.
@@ -26,7 +27,7 @@ CONSTR
 
 synth_script() {
   cat <<YS
-plugin -i slang
+read_liberty -lib $LIB
 read_slang --top $TOP $3 $(echo $FILES)
 hierarchy -check -top $TOP
 $1

@@ -21,7 +21,7 @@ A thread touches the outside world only at an event. It writes pin values into a
 | `pe_regfile.sv` | `pe_regfile` | R0..R7 of all threads, 32x16 flops, 2 reads in stage 3 and 1 write in stage 4 |
 | `pe_mailbox.sv` | `pe_mailbox` | Eight mailbox words and full flags |
 | `pe_pins.sv` | `pe_pins` | Output flops, shadows, ownership and the pad equations |
-| `pe_mem.sv` | `pe_mem` | The 512x16 SRAM macro, with BIST pins tied off |
+| `pe_mem.sv` | `pe_mem` | The 512x16 SRAM macro, with BIST pins tied off and a buffer at each signal pin, placed next to the pin by `src/config.json` |
 | `pe_host.sv` | `pe_host` | Host commands, byte by byte |
 | `pe_spi.sv` | `pe_spi` | The bit level of the host link |
 
