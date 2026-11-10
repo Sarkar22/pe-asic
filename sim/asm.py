@@ -11,6 +11,18 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOC = os.path.join(HERE, '..', 'docs', 'ISA.md')
 
+# 6.2: operand types written as words. Each word is read as a word only in an operand of its type (6.6).
+FLAG_WORD = {'flag': 'inbox', 'lflag': 'last'}      # the word, or nothing
+SLOTS = ('TXMODE', 'TXMAP', 'TXPER', 'TXTAIL', 'RXMODE', 'RXPER', 'RXFIRST', 'RXEND', 'RXCNT', 'RXSYNC', 'RXOPT',
+         'POLYHI', 'POLYLO', 'CHKHI', 'CHKLO', 'CODING')
+WORD_TYPES = {
+    'sslot': {w: i for i, w in enumerate(SLOTS)},
+    'sdir': {'tx': 1, 'rx': 2, 'txrx': 3},
+    'sout': {'-': 0, 'A': 1, 'B': 2},
+    'tkind': {'stuff': 1, 'crc': 2, 'fcs': 3},      # nothing is 0
+    'sreg': {'lo': 0, 'hi': 1, 'end': 2},
+}
+
 
 class Row:
     def __init__(self, syntax, enc, fields, slots, w, sem):
@@ -29,6 +41,17 @@ class Row:
             raise ValueError('field letters differ from encoding: ' + syntax)
         self.has_inbox = '[, inbox]' in syntax
         text = syntax.replace(' [, inbox]', '')
+        # other optional operands, `[, k]` or `[, last]`, in the order written (6.6: txw's kind before last)
+        self.opt = []                   # ('F', letter) for a field written as a word or left out,
+        for o in re.findall(r'\s*\[,\s*([^\]]+?)\s*\]', text):    # ('W', letter, word) for a flag word
+            if o in fields:
+                self.opt.append(('F', o))
+            else:
+                k = [x for x, ty in fields.items() if FLAG_WORD.get(ty) == o]
+                if len(k) != 1:
+                    raise ValueError('optional operand %s matches no field: %s' % (o, syntax))
+                self.opt.append(('W', k[0], o))
+        text = re.sub(r'\s*\[,\s*[^\]]+\]', '', text)
         parts = text.split(None, 1)
         self.mn = parts[0]
         ops = [o.strip() for o in parts[1].split(',')] if len(parts) > 1 else []
@@ -84,6 +107,10 @@ def legal_value(v, ty):
     if ty == 'lane':
         return v in (0, 4, 5, 6, 7)
     if ty == 'wmode':
+        return v in (0, 1, 2)
+    if ty == 'sdir':
+        return v in (1, 2, 3)
+    if ty in ('sout', 'sreg'):
         return v in (0, 1, 2)
     return True                         # every other type: all values
 
@@ -240,6 +267,15 @@ def parse_pin(tok, ty, ctx):
 def parse_field(tok, ty, ctx, bits):
     if ty in ('opin', 'opin-', 'ipin', 'ipin-', 'iopin', 'lane'):
         return parse_pin(tok, ty, ctx)
+    if ty in WORD_TYPES:                # 6.6: such an operand takes nothing else
+        if tok not in WORD_TYPES[ty]:
+            raise NoMatch('%s is not one of %s' % (tok, ', '.join(WORD_TYPES[ty])))
+        return WORD_TYPES[ty][tok]
+    if ty == 'nbits':                   # 6.2: written 1..16, the field holds n mod 16
+        v = evaluate(tok, ctx)
+        if ctx.final and not 1 <= v <= 16:
+            raise AsmError('bit count %d is not 1 to 16' % v)
+        return v % 16
     if ty == 'obank':
         return {'uo': 0, 'io': 1}[tok] if tok in ('uo', 'io') else _nomatch(tok)
     if ty == 'ibank':
@@ -289,6 +325,13 @@ def match_row(row, ops, ctx):
         if toks and toks[-1] == 'inbox':
             f['m'] = 1
             toks.pop()
+    for o in reversed(row.opt):         # from the end, so a later optional operand is taken first
+        name = o[1]
+        f[name] = 0                     # left out
+        if len(toks) > len(row.tmpl):
+            words = {o[2]: 1} if o[0] == 'W' else WORD_TYPES[row.ftypes[name]]
+            if toks[-1] in words:
+                f[name] = words[toks.pop()]
     if len(toks) != len(row.tmpl):
         raise NoMatch('operand count')
     for (kind, name), tok in zip(row.tmpl, toks):   # literals pick the row first
@@ -359,7 +402,7 @@ def _written_pin(word):
     if d is None:
         return None
     row, f = d
-    if row.mn in ('put', 'oe'):
+    if row.mn in ('put', 'oe', 'smap'):      # 6.6: the warning also covers smap
         return f['p']
     if row.mn == 'edge':
         return None if f['p'] == 3 else f['p']
@@ -515,6 +558,9 @@ def disasm(word):
             ops.append('R%d' % f[name])
         else:
             ops.append(_field_text(f[name], row.ftypes[name]))
+    for o in row.opt:                   # a field at 0 is left out
+        if f[o[1]]:
+            ops.append(o[2] if o[0] == 'W' else _field_text(f[o[1]], row.ftypes[o[1]]))
     if row.has_inbox and f['m']:
         ops.append('inbox')
     return row.mn + (' ' + ', '.join(ops) if ops else '')
@@ -541,6 +587,10 @@ def _field_text(v, ty):
         return ['eq', 'ne', 'chg'][v]
     if ty == 'eact':
         return ['0', '1', 'T', '!T'][v]
+    if ty in WORD_TYPES:
+        return {x: w for w, x in WORD_TYPES[ty].items()}[v]
+    if ty == 'nbits':
+        return str(v if v else 16)
     return str(v)
 
 

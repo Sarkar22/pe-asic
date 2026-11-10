@@ -3,6 +3,11 @@
 
 Names follow the document so each function can be read against its code block.
 The order inside one cycle is section 3.2. Row semantics are hand-written here.
+
+The shift units of section 5.9 are not in this model yet. Their eight rows raise
+NotImplementedError, and nothing else differs: while no unit runs, no pin is on a
+shift output and every unit reads as after reset, so RDREG 12 to 31 read 0 here
+and ABORT has nothing of a unit to stop.
 """
 import random
 
@@ -842,6 +847,15 @@ def _shr16(c, t, f, a):
     t.R[r] = (v >> 1) | (t.T << 15)
     t.T = out
     c.shadow(t, f['o'], t.T)
+
+
+PENDING = ('txw Rs, n [, k] [, last]', 'scfg Rs, k', 'smap p, l', 'rxw Rd', 'sstat Rd', 'srd Rd, s', 'sgo m',
+           'sstop m')                   # section 5.9.4: the shift unit's rows
+
+
+@op(*PENDING)
+def _shift_unit(c, t, f, a):
+    raise NotImplementedError('shift unit: hand-written model pending')
 
 
 for _r in ROWS:
