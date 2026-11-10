@@ -1,18 +1,19 @@
 # Status
 
-Updated 2026-11-06.
+Updated 2026-11-10.
 
 ## Where the design is
 
 - **Chip:** 8x4 tiles on IHP SG13CMOS5L, with the March shuttle's flow, since 2026-11-06 ([DECISIONS.md](DECISIONS.md)).
 - **Core RTL:** complete for the published instruction set, in `src/`. Four threads, the pin layer with bypass and open drain, the SPI host link, and one 512x16 SRAM for code and data.
+- **Shift units:** one per thread, in `src/pe_shift.sv` (section 5.9): sending and receiving with their own bit timing, CRC up to 32 bits, bit stuffing, USB's end of packet and a Manchester decoder, for low-speed USB and 10 Mbit Ethernet at 50 MHz. The simulator in `sim/` models them.
 - **Specification:** [ISA.md](ISA.md), sections 1 to 11. Changes until the hardware freezes are listed in [DECISIONS.md](DECISIONS.md).
 - **Programs:** 47 programs for 17 protocols in [`programs/`](../programs/README.md), each checked on the simulator in `sim/`.
 - **No person has read the RTL yet.** [AI_USE.md](AI_USE.md) says what was checked by machine.
 
 ## Chip build
 
-From the online build of `913813a` (8x4 tiles, IHP SG13CMOS5L, LibreLane 3.1.0.dev4, IHP-Open-PDK `89d42ee6`, 20 ns clock):
+These numbers are for the core without the shift units; the first build with them is an open item. From the online build of `913813a` (8x4 tiles, IHP SG13CMOS5L, LibreLane 3.1.0.dev4, IHP-Open-PDK `89d42ee6`, 20 ns clock):
 
 | Measure | Value |
 |---|---|
@@ -32,7 +33,7 @@ The flow now stops the build on a setup or hold violation in any of the three co
 
 | Check | Result |
 |---|---|
-| `test/`: cocotb at the pins, over the real SPI link | 23 pass, 1 skipped (an RTL-only test) on Icarus 12.0 and 13.0 |
+| `test/`: cocotb at the pins, over the real SPI link | 32 pass, 1 skipped (an RTL-only test) on Icarus 12.0 and 13.0, with nine tests of the shift units |
 | Gate level, on the hardened 8x4 netlist with the RTL beside it, pin by pin | 23 pass, 1 skipped |
 | `programs/check.py`: every program on the simulator | 458 checks pass |
 | TT precheck: 10 checks, among them KLayout DRC, the boundary and the Verilog syntax | pass |
@@ -43,6 +44,7 @@ The pin-level tests catch 50 of 81 bugs planted in the RTL to test them. The oth
 
 ## Open items
 
+- The first chip build with the shift units. It needs an area-oriented synthesis setting: with the flow's default (`DELAY 4`) the design synthesizes to about 565,000 µm² of cells, with `AREA 0` to about 430,000 µm². A trial layout of the core beside four units, synthesized with `AREA 0`, used about 48% of the core, met timing at 20 ns with about 2.3 ns to spare, and failed only the enforced slew check, on one net, by 9%.
 - The flow reports 101 max-fanout warnings against a limit of 8: 98 on clock buffers that drive 9 to 16 flops, and 3 on buffers it inserted itself, with 9 to 12 loads. It reports no max-capacitance or max-slew warnings in any corner. The last 6x4 build had 3 max-capacitance warnings on the SRAM's `A_DOUT[0..2]` and 15 max-slew warnings in the slow corner; the SRAM's LEF and timing files did not change, so those went with the new layout. The template's config doesn't enforce slew, capacitance or fanout. Before the next milestone the slew and capacitance checks get enforced, and the fanout warnings get fixed or explained.
 - No SRAM of this kind is known to us to have been built on this process yet. The instruction set keeps a 128-word option for a latch array, which isn't built.
 - The CAN bench can't see a wrong sample point: its transceiver model's longest loop delay is 22 cycles.

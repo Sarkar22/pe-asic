@@ -8,6 +8,8 @@ The chip is one programmable core. Four hardware threads take turns in a fixed r
 
 A thread touches the outside world only at an event. It writes pin values into a shadow copy, then names a cycle, or an input pattern, with `tick`, `edge`, `now` or a wait. Comparators watch for that on every clock, on all four threads, whatever the pipeline is doing. When an event fires, the thread's shadow pins commit, all inputs are snapshotted and the cycle is recorded, all in that one cycle.
 
+Each thread also has a shift unit (section 5.9 of the specification), for protocols faster than one instruction every 4 cycles allows, such as low-speed USB and 10BASE-T. It has a send half and a receive half, which run on every clock, whatever the pipeline is doing. A send starts at its thread's commit, so it lines up with the thread's events to the cycle. A pin shows the unit's output only when its owner switches it there, with `smap` and a commit. The thread feeds the send half and empties the receive half one word of up to 16 bits at a time, and its other instructions keep running.
+
 ## Blocks
 
 | File | Block | Job |
@@ -20,7 +22,8 @@ A thread touches the outside world only at an event. It writes pin values into a
 | `pe_exec.sv` | `pe_exec` | Stage 4, combinational: what the slot does |
 | `pe_regfile.sv` | `pe_regfile` | R0..R7 of all threads, 32x16 flops, 2 reads in stage 3 and 1 write in stage 4 |
 | `pe_mailbox.sv` | `pe_mailbox` | Eight mailbox words and full flags |
-| `pe_pins.sv` | `pe_pins` | Output flops, shadows, ownership and the pad equations |
+| `pe_pins.sv` | `pe_pins` | Output flops, shadows, ownership, the output switches (SEL and its shadow SHSEL) and the pad equations |
+| `pe_shift.sv` | `pe_shift`, 4 of them | One thread's shift unit: the send and receive halves, their bit timing, the CRC or LFSR, the bit stuffer and destuffer, and the 16 setting slots |
 | `pe_mem.sv` | `pe_mem` | The 512x16 SRAM macro, with BIST pins tied off and a buffer at each signal pin, placed next to the pin by `src/config.json` |
 | `pe_host.sv` | `pe_host` | Host commands, byte by byte |
 | `pe_spi.sv` | `pe_spi` | The bit level of the host link |
@@ -48,7 +51,8 @@ Everything happens at one rising clock edge: events, the slot, the memory access
 |---|---|
 | Per thread, in `pe_thread` | PC, T, D, S, LATE, STALE, ILL, RUN, P, KIND, DUE, WAITING, the armed wait (MASK, PAT, BANK, NE, TIMED, INBOX), MEM, MEM_DONE, MEM_KIND, MEM_REG, STOPREQ, STEPPING |
 | Per thread, in `pe_regfile` | R0..R7 |
-| Shared, one copy | TB, SYNC1, SYNC2, the pins, the mailbox, the host block |
+| Per thread, in `pe_shift` | The unit's state of section 5.9.2, and its 16 setting slots |
+| Shared, one copy | TB, SYNC1, SYNC2, SYNC3, the pins and their output switches, the mailbox, the host block |
 | Shared, because each stage holds one thread | The word and its valid bit at each stage (the specification's IR and IV), the operands, and `ls_addr_q` and `ls_data_q` (MEM_ADDR and MEM_DATA for the one cycle they are needed) |
 
 Load data takes the path of an instruction word, from the SRAM through `ir3_q` and `ir4_q`, and reaches stage 4 in the load's second slot, where it is written to the register.
@@ -75,7 +79,7 @@ Which bit is the last, and what happens at *h*:
 | STEP | `thread8` | Starts the step, or sets BUSY |
 | POST | `data16` | Fills the word, or refuses. The result is the next reply byte |
 | TAKE | The command byte | Takes the word into the reply register |
-| ABORT | The command byte | Stops threads, releases `uio` pins |
+| ABORT | The command byte | Stops threads and both halves of every shift unit, releases `uio` pins and takes them off the shift outputs |
 | STATUS | The fourth dummy byte | Clears BUSY |
 | RDREG | `reg8` | Asks for the value, or sets BUSY |
 | WRMEM | Each data word | Asks for a memory cycle |
@@ -93,7 +97,7 @@ Sections 9.1 to 9.4 of the specification fix the link down to the cycle. This is
 - **BUSY from a memory command sets one cycle late.** The test is RUN in cycle *h + 1*, which is the state cycle *h* left.
 - **A memory command that fails is dead until CS rises.** No later word in that transaction is written or read.
 - **RDMEM reads ahead.** It asks for its first word as soon as `addr16` arrives, so the BUSY test is there, and for each later word as the low byte of the one before starts to shift out. Reading has no side effect, so nothing outside the link can see this.
-- **RDREG takes up to 6 cycles.** It borrows port A in the stopped thread's stage 3, and takes D, S, PC and flags in that thread's stage 4. The value is in the reply register by *h + 6*, long before the reply starts, and it is the state of that cycle, not of *h*. A stopped thread can still move: STALE sets, and an event a STEP left pending fires.
+- **RDREG takes up to 6 cycles.** It borrows port A in the stopped thread's stage 3, and takes D, S, PC, flags or the shift unit's registers 12 to 31 in that thread's stage 4. The value is in the reply register by *h + 6*, long before the reply starts, and it is the state of that cycle, not of *h*. A stopped thread can still move: STALE sets, and an event a STEP left pending fires.
 - **Reset.** `rst_n` is synchronised, so internal reset ends 2 clock edges after the pad rises. Cycle 0 is the first cycle after that.
 - **After CS rises** MISO returns to 0 three cycles later.
 
@@ -107,7 +111,7 @@ What the real 128-word build still needs is a latch array in `pe_mem`, chosen by
 
 | Where | What | How to run |
 |---|---|---|
-| `test/test.py` | Tests at the pins from reset under Icarus, over the real SPI link: load, start, a UART frame decoded at the pad, every host command, cut commands, BUSY and the dead memory command, all unlisted codes, bytes past a reply, a reset in mid-run, STEP and SETPC against a pending event, deadline limits and the bypass lanes. At RTL, `test_matches_simulator` runs random programs on all four threads beside the simulator in `sim/` and compares every output pin on every cycle and every reply byte. It sees only the pins, so a fault that changes hidden state without reaching a pin or a reply, such as a read taken one pipeline stage early, can pass it. At gate level, `test_netlist_matches_rtl` also runs firmware on all four threads, bypass lanes and open drain included, and compares every output pin with `pe_core` | `cd test && make`, or `make GATES=yes` with a netlist in `gate_level_netlist.v` |
+| `test/test.py` | Tests at the pins from reset under Icarus, over the real SPI link: load, start, a UART frame decoded at the pad, every host command, cut commands, BUSY and the dead memory command, all unlisted codes, bytes past a reply, a reset in mid-run, STEP and SETPC against a pending event, deadline limits and the bypass lanes. Nine `test_unit_*` tests drive the shift units: UART from a unit, one thread's send received by another thread's unit, CRC-32 frames, USB with NRZI, bit stuffing and CRC-16, ABORT, the output switch, `sstat`, the wait of a world instruction, and RDREG 12 to 31. At RTL, `test_matches_simulator` runs random programs on all four threads beside the simulator in `sim/` and compares every output pin on every cycle and every reply byte. It sees only the pins, so a fault that changes hidden state without reaching a pin or a reply, such as a read taken one pipeline stage early, can pass it. At gate level, `test_netlist_matches_rtl` also runs firmware on all four threads, bypass lanes and open drain included, and compares every output pin with `pe_core` | `cd test && make`, or `make GATES=yes` with a netlist in `gate_level_netlist.v` |
 | `verif/rtl_chip.py` | The RTL behind the class interface of the Python cycle simulator in `sim/`, so one bench can run on either. `ChipV2` gives the same model an env-object interface with `xfer()`; its `xfer()` is Python over the flops, and `ChipV2Pads` runs `xfer()` through the real link at the pads | `cd verif && make`, then import it from the bench. `PE_BUILD` points it at another build folder |
 | `verif/tb_decode.sv` | Prints the decoder's answer for all 65,536 words, for a check against the table | `iverilog -g2012 -s tb_decode src/pe_decode.sv verif/tb_decode.sv` then `vvp` |
 | `tools/gen_decode.py` | Regenerates `src/pe_decode.sv` from the table | `python3 tools/gen_decode.py docs/ISA.md` |
