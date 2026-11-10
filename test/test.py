@@ -1621,13 +1621,6 @@ CLAIMS = ((0, 1, 8, 9), (2, 4, 10, 11), (5, 6, 12, 13), (7, 14, 15))     # pins 
 FIXED = ('caps', 'run', 'setpc', 'status', 'step', 'rdreg', 'post', 'take', 'abort')
 
 
-def reg_value(t, reg):
-    """What RDREG returns for a stopped thread, from the simulator's state (9.2)."""
-    if reg < 8:
-        return t.R[reg]
-    return {8: t.D, 9: t.S, 10: t.PC, 11: t.T | t.LATE << 1 | t.STALE << 2 | t.WAITING << 3}.get(reg, 0)
-
-
 def status_bytes(sim):
     def nib(name):
         return sum(getattr(t, name) << t.TID for t in sim.th)
@@ -1782,7 +1775,7 @@ class Lock:
         if self.rdreg is not None:
             txn, first = self.rdreg
             if sim.c >= first:
-                txn.rdreg.append(reg_value(sim.th[txn.a & 3], txn.b))
+                txn.rdreg.append(sim.rdreg(sim.th[txn.a & 3], txn.b))
             if len(txn.rdreg) == 4:
                 self.rdreg = None
 
@@ -1798,9 +1791,10 @@ async def test_matches_simulator(dut):
     import sim as simulator
     from asm import ROWS, decode, encode, legal_value
 
-    rare = {'halt': .85, 'st': .85, 'stp': .85, 'wrd': .85, 'recv': .7, 'send': .7, 'until': .8, 'untilm': .9}
-    # The rows the simulator runs, in table order. Until it has the shift units of section 5.9, it lists their rows
-    # in PENDING and the images leave them out, so they draw what they drew before those rows existed.
+    rare = {'halt': .85, 'st': .85, 'stp': .85, 'wrd': .85, 'recv': .7, 'send': .7, 'until': .8, 'untilm': .9,
+            'txw': .9, 'rxw': .95}
+    # The rows the simulator runs, in table order: all of them, the shift units' rows of section 5.9 included. A
+    # simulator that lacks some rows lists them in PENDING, and the images leave those out.
     pending = set(getattr(simulator, 'PENDING', ()))
     rows = [r for r in ROWS if r.syntax not in pending]
 
