@@ -13,7 +13,7 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
 CORE_SOURCES = pe_pkg.sv pe_decode.sv pe_core.sv pe_thread.sv pe_exec.sv pe_regfile.sv \
-               pe_mailbox.sv pe_pins.sv pe_mem.sv pe_host.sv pe_spi.sv
+               pe_mailbox.sv pe_pins.sv pe_shift.sv pe_mem.sv pe_host.sv pe_spi.sv
 PROJECT_SOURCES = project.sv $(CORE_SOURCES)
 
 ifneq ($(GATES),yes)

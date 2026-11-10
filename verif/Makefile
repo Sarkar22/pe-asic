@@ -8,7 +8,8 @@ BUILD ?= build
 JOBS  ?= 2
 SRC   := ../src
 RTL   := $(SRC)/pe_pkg.sv $(SRC)/pe_decode.sv $(SRC)/pe_core.sv $(SRC)/pe_thread.sv $(SRC)/pe_exec.sv \
-         $(SRC)/pe_regfile.sv $(SRC)/pe_mailbox.sv $(SRC)/pe_pins.sv $(SRC)/pe_mem.sv $(SRC)/pe_host.sv
+         $(SRC)/pe_regfile.sv $(SRC)/pe_mailbox.sv $(SRC)/pe_pins.sv $(SRC)/pe_shift.sv $(SRC)/pe_mem.sv \
+         $(SRC)/pe_host.sv
 FLAGS := --cc --exe --build -j $(JOBS) -O3 --x-assign 0 --x-initial 0 -Wno-fatal -Wno-lint --top-module pe_core \
          -CFLAGS "-O2 -fPIC" -LDFLAGS "-shared"
 

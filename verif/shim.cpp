@@ -16,6 +16,7 @@
 
 #define R(x) pe_core__DOT__##x
 #define TH(i, x) pe_core__DOT__gen_thread__BRA__##i##__KET____DOT__thread__DOT__##x
+#define SH(i, x) pe_core__DOT__gen_shift__BRA__##i##__KET____DOT__shift__DOT__##x
 
 namespace {
 
@@ -75,6 +76,8 @@ void add4(Chip *c, const char *name, T *p0, T *p1, T *p2, T *p3) {
 }
 
 #define ADD4(name) add4(c, #name, &r->TH(0, name), &r->TH(1, name), &r->TH(2, name), &r->TH(3, name))
+// A shift unit's flop, named u_<flop> for thread 0 and u_<flop>#1 to #3 for the others.
+#define ADDU(name) add4(c, "u_" #name, &r->SH(0, name), &r->SH(1, name), &r->SH(2, name), &r->SH(3, name))
 
 void build_fields(Chip *c) {
   auto r = c->r;
@@ -143,6 +146,82 @@ void build_fields(Chip *c) {
   for (int i = 0; i < 8; i++) {
     add(c, ("m" + std::to_string(i)).c_str(), &r->R(mailbox__DOT__m_q)[i]);
   }
+  // Section 5.9: SYNC3, the output switches, and every flop of each thread's shift unit.
+  add(c, "sync3_q", &r->R(sync3_q));
+  add(c, "sel_q", &r->R(pins__DOT__sel_q));
+  add(c, "shsel_q", &r->R(pins__DOT__shsel_q));
+  ADDU(tx_arm_q);
+  ADDU(tx_run_q);
+  ADDU(tx_tl_q);
+  ADDU(tx_sr_q);
+  ADDU(tx_n_q);
+  ADDU(tx_lw_q);
+  ADDU(tx_buf_q);
+  ADDU(tx_bn_q);
+  ADDU(tx_bl_q);
+  ADDU(tx_full_q);
+  ADDU(tx_sym_q);
+  ADDU(tx_cd_q);
+  ADDU(tx_acc_q);
+  ADDU(la_q);
+  ADDU(lb_q);
+  ADDU(tx_ur_q);
+  ADDU(tx_k_q);
+  ADDU(tx_bk_q);
+  ADDU(tx_b_q);
+  ADDU(tx_stf_q);
+  ADDU(tx_an_q);
+  ADDU(tx_rl_q);
+  ADDU(tx_rv_q);
+  ADDU(rx_arm_q);
+  ADDU(rx_hunt_q);
+  ADDU(rx_run_q);
+  ADDU(rx_ep_q);
+  ADDU(rx_sr_q);
+  ADDU(rx_n_q);
+  ADDU(rx_tot_q);
+  ADDU(rx_syn_q);
+  ADDU(rx_kind_q);
+  ADDU(rx_ph_q);
+  ADDU(rx_g_q);
+  ADDU(rx_open_q);
+  ADDU(rx_cand_q);
+  ADDU(rx_ic_q);
+  ADDU(rx_last_q);
+  ADDU(rx_win_q);
+  ADDU(rx_buf_q);
+  ADDU(rx_bn_q);
+  ADDU(rx_bl_q);
+  ADDU(rx_full_q);
+  ADDU(rx_pn_q);
+  ADDU(rx_ovr_q);
+  ADDU(rx_seen_q);
+  ADDU(rx_rl_q);
+  ADDU(rx_rv_q);
+  ADDU(rx_vio_q);
+  ADDU(rx_cov_q);
+  ADDU(rx_ef_q);
+  ADDU(rx_be_q);
+  ADDU(rx_pe_q);
+  ADDU(crc_q);
+  ADDU(txmode_q);
+  ADDU(txmap_q);
+  ADDU(txper_q);
+  ADDU(txtail_q);
+  ADDU(rxmode_q);
+  ADDU(rxper_q);
+  ADDU(rxfirst_q);
+  ADDU(rxend_q);
+  ADDU(rxcnt_q);
+  ADDU(rxsync_q);
+  ADDU(rxopt_q);
+  ADDU(polyhi_q);
+  ADDU(polylo_q);
+  ADDU(chkhi_q);
+  ADDU(chklo_q);
+  ADDU(coding_q);
+  ADDU(pwq_q);
+  ADDU(pwh_q);
 }
 
 inline uint32_t read_field(const Field &f) {

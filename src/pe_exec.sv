@@ -1,6 +1,6 @@
 /*
  * Stage 4: what the thread that owns this cycle does in its slot. Combinational. The flops it
- * writes are in pe_thread, pe_regfile, pe_mailbox and pe_pins.
+ * writes are in pe_thread, pe_regfile, pe_mailbox, pe_pins and the thread's pe_shift.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -54,6 +54,23 @@ module pe_exec
     output logic               pin_oe,
     output logic               pin_oe8,
     output logic               pin_cfg,
+    output logic               pin_smap,   // shadow_sel(pin, l), section 5.9.4
+    // The shift unit of this thread (section 5.9.4), as its flops were at the start of the cycle.
+    input  logic               u_txfull,
+    input  logic               u_rxfull,
+    input  logic [15:0]        u_rxbuf,
+    input  logic               u_rxbl,
+    input  logic [15:0]        u_status,
+    input  logic [15:0]        u_srd,      // what srd reads for its register s
+    // Its instructions. A strobe is set only in the cycle its row runs.
+    output logic               u_cfg,      // scfg: set_cfg(k, Rs)
+    output logic               u_push,     // txw with TXFULL 0: tx_push(Rs, n, last, kind)
+    output logic               u_pop,      // rxw with RXFULL 1: rx_pop()
+    output logic               u_sstat,    // sstat: clear the sticky bits read as 1
+    output logic               u_sgo_tx,
+    output logic               u_sgo_rx,
+    output logic               u_sstop_tx,
+    output logic               u_sstop_rx,
     // Register write.
     output logic               rf_we,
     output logic [2:0]         rf_reg,
@@ -196,6 +213,18 @@ module pe_exec
   logic        row_m_take;
   logic        row_due_we;
   logic        row_tlate;
+  logic        row_smap;
+  logic        row_scfg;
+  logic        row_push;
+  logic        row_pop;
+  logic        row_sstat;
+  logic        row_sgo;
+  logic        row_sstop;
+
+  // sstat's T: TXUR or RXOVR, bits 7 and 10 of the status word (section 5.9.4).
+  logic        sstat_t;
+
+  assign sstat_t = u_status[7] | u_status[10];
 
   always_comb begin
     row_hold   = 1'b0;
@@ -224,6 +253,13 @@ module pe_exec
     row_m_take = 1'b0;
     row_due_we = 1'b0;
     row_tlate  = 1'b0;
+    row_smap   = 1'b0;
+    row_scfg   = 1'b0;
+    row_push   = 1'b0;
+    row_pop    = 1'b0;
+    row_sstat  = 1'b0;
+    row_sgo    = 1'b0;
+    row_sstop  = 1'b0;
 
     case (op)
       OP_HALT: row_halt = 1'b1;
@@ -455,6 +491,34 @@ module pe_exec
         row_due_we = 1'b1;
         sched      = 1'b1;
       end
+      // The shift unit's rows (section 5.9.4). txw and rxw block like send and recv.
+      OP_TXW: begin
+        row_hold = u_txfull;
+        row_push = ~u_txfull;
+      end
+      OP_SCFG: row_scfg = 1'b1;
+      OP_SMAP: row_smap = 1'b1;
+      OP_RXW: begin
+        row_hold = ~u_rxfull;
+        row_rf   = u_rxfull;
+        row_data = u_rxbuf;
+        row_t_we = u_rxfull;
+        row_t    = u_rxbl;
+        row_pop  = u_rxfull;
+      end
+      OP_SSTAT: begin
+        row_rf    = 1'b1;
+        row_data  = u_status;
+        row_t_we  = 1'b1;
+        row_t     = sstat_t;
+        row_sstat = 1'b1;
+      end
+      OP_SRD: begin
+        row_rf   = 1'b1;
+        row_data = u_srd;
+      end
+      OP_SGO:   row_sgo   = 1'b1;
+      OP_SSTOP: row_sstop = 1'b1;
       OP_EDGE_I, OP_EDGE_RR: begin
         row_arm    = 1'b1;
         row_due_we = 1'b1;
@@ -485,19 +549,31 @@ module pe_exec
     end
   end
 
-  // shadow() ignores pin 3, which is how "no pin" works.
-  logic is_shift;
+  // shadow() ignores pin 3, which is how "no pin" works. smap has its pin in bits 8:5.
+  logic is_shift, is_unit;
 
   assign is_shift  = ir[15:12] == 4'b1111;
-  assign pin       = is_shift ? ir[3:0] : ir[11:8];
+  assign is_unit   = ir[15:12] == 4'b1101;
+  assign pin       = is_shift ? ir[3:0] : is_unit ? ir[8:5] : ir[11:8];
   assign pin_put   = x_go & row_put & (pin != 4'd3);
   assign pin_value = row_value;
   assign pin_put8  = x_go & row_put8;
   assign pin_oe    = x_go & row_oe;
   assign pin_oe8   = x_go & row_oe8;
   assign pin_cfg   = x_go & row_cfg;
+  assign pin_smap  = x_go & row_smap;
   assign m_put     = x_go & row_m_put;
   assign m_take    = x_go & row_m_take;
+
+  // The shift unit's strobes. sgo and sstop name the halves in m: bit 0 send, bit 1 receive.
+  assign u_cfg      = x_go & row_scfg;
+  assign u_push     = x_go & row_push;
+  assign u_pop      = x_go & row_pop;
+  assign u_sstat    = x_go & row_sstat;
+  assign u_sgo_tx   = x_go & row_sgo & ir[4];
+  assign u_sgo_rx   = x_go & row_sgo & ir[5];
+  assign u_sstop_tx = x_go & row_sstop & ir[4];
+  assign u_sstop_rx = x_go & row_sstop & ir[5];
 
   // The retire of a row, and of a wait in the slot after its event.
   logic row_retires;

@@ -2,6 +2,8 @@
  * The protocol engine: four threads in fixed rotation sharing one four-stage pipeline.
  * With phase = TB[1:0], thread phase is in stage 4 (execute), phase + 1 in stage 3 (decode, read
  * registers), phase + 2 in stage 2 (capture the word) and phase + 3 in stage 1 (memory cycle).
+ * Each thread has a shift unit (section 5.9), which runs every cycle and starts at its thread's
+ * commit; its instructions reach it from stage 4.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -31,9 +33,10 @@ module pe_core
   end
   assign rst_n_sync = rst_sync[1];
 
-  // Timebase and input synchroniser.
+  // Timebase and input synchroniser. SYNC3 is SYNC2 one cycle older, so the shift units see an
+  // edge on any pin as SYNC2 ^ SYNC3 (section 5.9.2).
   logic [15:0] tb_q, tb_next;
-  logic [15:0] sync1_q, sync2_q;
+  logic [15:0] sync1_q, sync2_q, sync3_q;
 
   assign tb_next = tb_q + 16'd1;
 
@@ -42,19 +45,23 @@ module pe_core
       tb_q    <= 16'h0000;
       sync1_q <= 16'h0000;
       sync2_q <= 16'h0000;
+      sync3_q <= 16'h0000;
     end else begin
       tb_q    <= tb_next;
       sync1_q <= {uio_in, ui_in};
       sync2_q <= sync1_q;
+      sync3_q <= sync2_q;
     end
   end
 
   // Which thread owns which stage in this cycle.
   logic [1:0] th4, th3, th1;
+  logic [3:0] ex_one;       // th4, one-hot
 
-  assign th4 = tb_q[1:0];
-  assign th3 = th4 + 2'd1;
-  assign th1 = th4 + 2'd3;
+  assign th4    = tb_q[1:0];
+  assign th3    = th4 + 2'd1;
+  assign th1    = th4 + 2'd3;
+  assign ex_one = 4'b0001 << th4;
 
   // Per-thread state, as pe_thread shows it.
   logic [8:0]  th_pc [0:3];
@@ -188,7 +195,15 @@ module pe_core
   logic [15:0] m_data;
   logic [7:0]  full;
   logic [3:0]  pin;
-  logic        pin_put, pin_value, pin_put8, pin_oe, pin_oe8, pin_cfg, shd_pin;
+  logic        pin_put, pin_value, pin_put8, pin_oe, pin_oe8, pin_cfg, pin_smap, shd_pin;
+
+  // The shift units' outputs, and the strobes of the instruction in stage 4.
+  logic [3:0]  u_la, u_lb, u_txfull, u_rxfull, u_rxbl;
+  logic [15:0] u_rxbuf [0:3];
+  logic [15:0] u_status [0:3];
+  logic [15:0] u_srd [0:3];
+  logic [15:0] u_rd [0:3];
+  logic        u_cfg, u_push, u_pop, u_sstat, u_sgo_tx, u_sgo_rx, u_sstop_tx, u_sstop_rx;
 
   logic        x_stop, x_step_end, x_wake, x_ill;
   logic        x_pc_we, x_t_we, x_t, x_d_we, x_late_set, x_late_clr;
@@ -239,6 +254,21 @@ module pe_core
       .pin_oe    (pin_oe),
       .pin_oe8   (pin_oe8),
       .pin_cfg   (pin_cfg),
+      .pin_smap  (pin_smap),
+      .u_txfull  (u_txfull[th4]),
+      .u_rxfull  (u_rxfull[th4]),
+      .u_rxbuf   (u_rxbuf[th4]),
+      .u_rxbl    (u_rxbl[th4]),
+      .u_status  (u_status[th4]),
+      .u_srd     (u_srd[th4]),
+      .u_cfg     (u_cfg),
+      .u_push    (u_push),
+      .u_pop     (u_pop),
+      .u_sstat   (u_sstat),
+      .u_sgo_tx  (u_sgo_tx),
+      .u_sgo_rx  (u_sgo_rx),
+      .u_sstop_tx(u_sstop_tx),
+      .u_sstop_rx(u_sstop_rx),
       .rf_we     (rf_we),
       .rf_reg    (rf_reg),
       .rf_data   (rf_data),
@@ -340,6 +370,48 @@ module pe_core
     );
   end
 
+  // The shift units, one per thread, on the core's reset. The unit starts at its thread's commit,
+  // which arrives late in the cycle, so cmt is the thread's commit with nothing in between.
+  // scfg's slot k and txw's n share bits 9:6 of the word; Rs comes from port B. srd's s is in
+  // bits 5:4. Every output comes from the unit's flops.
+  logic [4:0] rd_unit;
+
+  for (genvar i = 0; i < 4; i = i + 1) begin : gen_shift
+    pe_shift shift (
+        .clk     (clk),
+        .rst_n   (rst_n_sync),
+        .sync2   (sync2_q),
+        .sync3   (sync3_q),
+        .cmt     (th_commit[i]),
+        .cfg_we  (u_cfg & ex_one[i]),
+        .cfg_slot(ir4_q[9:6]),
+        .cfg_data(b4_q),
+        .push    (u_push & ex_one[i]),
+        .push_v  (b4_q),
+        .push_n  (ir4_q[9:6]),
+        .push_l  (ir4_q[10]),
+        .push_k  (ir4_q[2:1]),
+        .sgo_tx  (u_sgo_tx & ex_one[i]),
+        .sstop_tx(u_sstop_tx & ex_one[i]),
+        .sgo_rx  (u_sgo_rx & ex_one[i]),
+        .sstop_rx(u_sstop_rx & ex_one[i]),
+        .pop     (u_pop & ex_one[i]),
+        .sstat_rd(u_sstat & ex_one[i]),
+        .h_abort (h_abort),
+        .srd_sel (ir4_q[5:4]),
+        .rd_reg  (rd_unit),
+        .la      (u_la[i]),
+        .lb      (u_lb[i]),
+        .txfull  (u_txfull[i]),
+        .rxfull  (u_rxfull[i]),
+        .rxbuf   (u_rxbuf[i]),
+        .rxbl    (u_rxbl[i]),
+        .status  (u_status[i]),
+        .srd_data(u_srd[i]),
+        .rd_data (u_rd[i])
+    );
+  end
+
   // Mailbox.
   logic [2:0]  hm_idx;
   logic        hm_post, hm_take, hm_full;
@@ -386,7 +458,11 @@ module pe_core
       .oe8     (pin_oe8),
       .cfg     (pin_cfg),
       .cfg_mode(ir4_q[4:3]),
+      .smap    (pin_smap),
+      .smap_l  (ir4_q[4:3]),
       .shd_pin (shd_pin),
+      .la      (u_la),
+      .lb      (u_lb),
       .h_abort (h_abort)
   );
 
@@ -425,12 +501,14 @@ module pe_core
       .rd_req   (rd_req),
       .rd_thread(rd_thread),
       .rd_reg   (rd_reg),
+      .rd_unit  (rd_unit),
       .rd_here  (rd_here),
       .ex_a     (a4_q),
       .ex_d     (th_d[th4]),
       .ex_s     (th_s[th4]),
       .ex_pc    (th_pc[th4]),
-      .ex_flags ({th_waiting[th4], th_stale[th4], th_late[th4], th_t[th4]})
+      .ex_flags ({th_waiting[th4], th_stale[th4], th_late[th4], th_t[th4]}),
+      .ex_unit  (u_rd[th4])
   );
 
   // List all unused inputs to prevent warnings

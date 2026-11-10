@@ -16,8 +16,8 @@ mkdir -p "$OUT"
 LIB=/pdk/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/lib/sg13cmos5l_stdcell_slow_1p08V_125C.lib
 SRAM=/pdk/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_512x16_c2_bm_bist_slow_1p08V_125C.lib
 FILES="src/project.sv src/pe_pkg.sv src/pe_decode.sv src/pe_core.sv src/pe_thread.sv src/pe_exec.sv
-       src/pe_regfile.sv src/pe_mailbox.sv src/pe_pins.sv src/pe_mem.sv src/pe_host.sv src/pe_spi.sv
-       verif/sram_blackbox.v"
+       src/pe_regfile.sv src/pe_mailbox.sv src/pe_pins.sv src/pe_shift.sv src/pe_mem.sv src/pe_host.sv
+       src/pe_spi.sv verif/sram_blackbox.v"
 TOP=tt_um_sarkar22_pe
 
 cat > "$OUT/abc.constr" <<CONSTR

@@ -27,6 +27,7 @@ project:
     - "pe_regfile.sv"
     - "pe_mailbox.sv"
     - "pe_pins.sv"
+    - "pe_shift.sv"
     - "pe_mem.sv"
     - "pe_host.sv"
     - "pe_spi.sv"

@@ -82,8 +82,10 @@ def illegal_test(r):
             tests.append("!%s" % ('word[%d]' % r.fields[letter][0]))
         elif ty == 'lane':
             tests.append("word[%d] || (%s != 4'd0 && %s < 4'd4)" % (r.fields[letter][0], v, v))
-        elif ty == 'wmode':
+        elif ty in ('wmode', 'sout', 'sreg'):
             tests.append("%s == 2'd3" % v)
+        elif ty == 'sdir':
+            tests.append("%s == 2'd0" % v)
     return ' || '.join(tests) if tests else None
 
 

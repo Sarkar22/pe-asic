@@ -35,6 +35,24 @@ FIELDS = ('pc_q', 't_q', 'd_q', 's_q', 'late_q', 'stale_q', 'ill_q', 'run_q', 'p
           'shbyp_q', 'own_q', 'full_q', 'idx_q', 'cmd_q', 'n_q', 'arg_q', 'thread_q', 'addr_q', 'hold_q', 'mem_req_q',
           'mem_write_q', 'mem_read_q', 'rd_req_q', 'rd_cap_q', 'busy_q', 'tx_byte', 'reg0', 'm0')
 
+# Section 5.9.2: every flop of a thread's shift unit, by its name there and its flop in pe_shift.sv. shim.cpp names
+# them u_<flop>. CFG is the 16 slots; PWQ and PWH are the window points of section 5.9.6's implementation note.
+UNIT = (('TXARM', 'tx_arm_q'), ('TXRUN', 'tx_run_q'), ('TXTL', 'tx_tl_q'), ('TXSR', 'tx_sr_q'), ('TXN', 'tx_n_q'),
+        ('TXLW', 'tx_lw_q'), ('TXBUF', 'tx_buf_q'), ('TXBN', 'tx_bn_q'), ('TXBL', 'tx_bl_q'), ('TXFULL', 'tx_full_q'),
+        ('TXSYM', 'tx_sym_q'), ('TXCD', 'tx_cd_q'), ('TXACC', 'tx_acc_q'), ('LA', 'la_q'), ('LB', 'lb_q'),
+        ('TXUR', 'tx_ur_q'), ('TXK', 'tx_k_q'), ('TXBK', 'tx_bk_q'), ('TXB', 'tx_b_q'), ('TXSTF', 'tx_stf_q'),
+        ('TXAN', 'tx_an_q'), ('TXRL', 'tx_rl_q'), ('TXRV', 'tx_rv_q'), ('RXARM', 'rx_arm_q'), ('RXHUNT', 'rx_hunt_q'),
+        ('RXRUN', 'rx_run_q'), ('RXEP', 'rx_ep_q'), ('RXSR', 'rx_sr_q'), ('RXN', 'rx_n_q'), ('RXTOT', 'rx_tot_q'),
+        ('RXSYN', 'rx_syn_q'), ('RXKIND', 'rx_kind_q'), ('RXPH', 'rx_ph_q'), ('RXG', 'rx_g_q'), ('RXOPEN', 'rx_open_q'),
+        ('RXCAND', 'rx_cand_q'), ('RXIC', 'rx_ic_q'), ('RXLAST', 'rx_last_q'), ('RXWIN', 'rx_win_q'),
+        ('RXBUF', 'rx_buf_q'), ('RXBN', 'rx_bn_q'), ('RXBL', 'rx_bl_q'), ('RXFULL', 'rx_full_q'), ('RXPN', 'rx_pn_q'),
+        ('RXOVR', 'rx_ovr_q'), ('RXSEEN', 'rx_seen_q'), ('RXRL', 'rx_rl_q'), ('RXRV', 'rx_rv_q'), ('RXVIO', 'rx_vio_q'),
+        ('RXCOV', 'rx_cov_q'), ('RXEF', 'rx_ef_q'), ('RXBE', 'rx_be_q'), ('RXPE', 'rx_pe_q'), ('CRC', 'crc_q'),
+        ('PWQ', 'pwq_q'), ('PWH', 'pwh_q'))
+SLOTS = ('txmode_q', 'txmap_q', 'txper_q', 'txtail_q', 'rxmode_q', 'rxper_q', 'rxfirst_q', 'rxend_q', 'rxcnt_q',
+         'rxsync_q', 'rxopt_q', 'polyhi_q', 'polylo_q', 'chkhi_q', 'chklo_q', 'coding_q')
+FIELDS += ('sync3_q', 'sel_q', 'shsel_q') + tuple('u_' + f for _, f in UNIT) + tuple('u_' + f for f in SLOTS)
+
 _libs = {}
 
 
@@ -166,6 +184,76 @@ def _flop(field):
     return property(get, put)
 
 
+class Slots:
+    """A list view of one unit's 16 configuration slots."""
+
+    def __init__(self, chip, tid):
+        self.chip, self.tid = chip, tid
+
+    def __len__(self):
+        return 16
+
+    def __getitem__(self, k):
+        if isinstance(k, slice):
+            return list(self)[k]
+        c = self.chip
+        return c._get(c._h, c._f['u_' + SLOTS[k]] + self.tid)
+
+    def __setitem__(self, k, v):
+        c = self.chip
+        c._set(c._h, c._f['u_' + SLOTS[k]] + self.tid, v & 0xFFFF)
+
+    def __iter__(self):
+        return iter([self[k] for k in range(16)])
+
+    def __eq__(self, other):
+        return list(self) == list(other)
+
+    def __repr__(self):
+        return repr(list(self))
+
+
+class Unit:
+    """One thread's shift unit, by the names of section 5.9.2. RXPH reads as its 25 bits, unsigned. CMT is not a
+    flop: it lasts one cycle, so between cycles it reads 0, as after step 5."""
+    CMT = 0
+
+    def __init__(self, chip, tid):
+        self._c = chip
+        self.TID = tid
+        self._CFG = Slots(chip, tid)
+
+    CFG = property(lambda s: s._CFG, lambda s, v: [s._CFG.__setitem__(k, x) for k, x in enumerate(v)])
+
+    def status(self):
+        """The status word of section 5.9.4, with nothing cleared."""
+        tb = self.TXARM | self.TXRUN | self.TXTL
+        rw = self.RXARM | self.RXHUNT | self.RXEP
+        return (self.RXPN | tb << 5 | self.TXFULL << 6 | self.TXUR << 7 | self.RXRUN << 8 | self.RXFULL << 9 |
+                self.RXOVR << 10 | self.RXSYN << 11 | self.RXSEEN << 12 | self.LA << 13 | self.LB << 14 | rw << 15)
+
+    def stop(self):
+        """tx_stop() and rx_stop() of sections 5.9.5 and 5.9.6, on the flops."""
+        for name in ('TXARM', 'TXRUN', 'TXTL', 'TXN', 'TXFULL', 'TXSYM', 'TXSTF', 'TXAN',
+                     'RXARM', 'RXHUNT', 'RXRUN', 'RXEP', 'RXFULL', 'RXVIO'):
+            setattr(self, name, 0)
+        self.LA = (self.CFG[0] >> 5) & 1
+        self.LB = (self.CFG[0] >> 6) & 1
+
+
+def _uflop(field):
+    def get(self):
+        return self._c._get(self._c._h, self._c._f[field] + self.TID)
+
+    def put(self, v):
+        self._c._set(self._c._h, self._c._f[field] + self.TID, int(v))
+    return property(get, put)
+
+
+for _name, _flop_name in UNIT:
+    setattr(Unit, _name, _uflop('u_' + _flop_name))
+
+
 class Thread:
     """One thread's flops, by the names the simulators use."""
 
@@ -173,6 +261,7 @@ class Thread:
         self._c = chip
         self.TID = tid
         self._R = Words(chip, chip._f['reg0'] + 8 * tid, 8)
+        self.u = Unit(chip, tid)
 
     R = property(lambda s: s._R, lambda s, v: [s._R.__setitem__(i, x) for i, x in enumerate(v)])
     PC = _flop('pc_q')
@@ -247,6 +336,8 @@ class Chip:
         self._BYP = Bits(self, f['byp_q'], 8)
         self._SHBYP = Bits(self, f['shbyp_q'], 8)
         self._OWN = Own(self, f['own_q'], 16)
+        self._SEL = Own(self, f['sel_q'], 16)
+        self._SHSEL = Own(self, f['shsel_q'], 16)
         self._log = None
         self.host_miso = 0
 
@@ -273,6 +364,8 @@ class Chip:
     BYP = _view('_BYP')
     SHBYP = _view('_SHBYP')
     OWN = _view('_OWN')
+    SEL = _view('_SEL')
+    SHSEL = _view('_SHSEL')
     del _view
 
     @property
@@ -292,6 +385,10 @@ class Chip:
     @property
     def SYNC2(self):
         return self._get(self._h, self._f['sync2_q'])
+
+    @property
+    def SYNC3(self):
+        return self._get(self._h, self._f['sync3_q'])
 
     @property
     def BUSY(self):
@@ -427,6 +524,10 @@ class Chip:
             return 0
         if reg < 8:
             return t.R[reg]
+        if 12 <= reg < 32:              # section 9.2: the shift unit
+            u = t.u
+            return {12: u.status(), 13: u.CRC & 0xFFFF, 14: u.CRC >> 16, 15: u.RXPE}.get(reg, None) \
+                if reg < 16 else u.CFG[reg - 16]
         return {8: t.D, 9: t.S, 10: t.PC,
                 11: t.T | (t.LATE << 1) | (t.STALE << 2) | (t.WAITING << 3)}.get(reg, 0)
 
@@ -472,9 +573,12 @@ class Chip:
             t.WAITING = 0
             if t.RUN:
                 t.STOPREQ = 1
+            t.u.stop()
         for i in range(8):
             self.OE[i] = 0
             self.SHOE[i] = 0
+            self.SEL[8 + i] = 0
+            self.SHSEL[8 + i] = 0
             if self.OD[i]:
                 self.OUT[8 + i] = 1
                 self.SHD[8 + i] = 1
@@ -490,6 +594,7 @@ class ThreadV2:
     def __init__(self, t):
         self._t = t
         self.id = t.TID
+        self.u = t.u
 
     r = property(lambda s: s._t.R, lambda s, v: setattr(s._t, 'R', v))
     pc = property(lambda s: s._t.PC, lambda s, v: setattr(s._t, 'PC', v))
@@ -534,6 +639,9 @@ class ChipV2:
     sh_byp = property(lambda s: _bits(s.chip.SHBYP))
     busy = property(lambda s: s.chip.BUSY)
     sync2 = property(lambda s: s.chip.SYNC2)
+    sync3 = property(lambda s: s.chip.SYNC3)
+    sel = property(lambda s: s.chip.SEL)
+    shsel = property(lambda s: s.chip.SHSEL)
 
     @property
     def illegal(self):

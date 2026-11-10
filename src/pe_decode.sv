@@ -85,12 +85,20 @@ package pe_op_pkg;
   localparam logic [6:0] OP_UNTILM    = 7'd72;
   localparam logic [6:0] OP_UNTILM_RT = 7'd73;
   localparam logic [6:0] OP_TICK      = 7'd74;
-  localparam logic [6:0] OP_EDGE_I    = 7'd75;
-  localparam logic [6:0] OP_EDGE_RR   = 7'd76;
-  localparam logic [6:0] OP_SHL8      = 7'd77;
-  localparam logic [6:0] OP_SHL16     = 7'd78;
-  localparam logic [6:0] OP_SHR8      = 7'd79;
-  localparam logic [6:0] OP_SHR16     = 7'd80;
+  localparam logic [6:0] OP_TXW       = 7'd75;
+  localparam logic [6:0] OP_SCFG      = 7'd76;
+  localparam logic [6:0] OP_SMAP      = 7'd77;
+  localparam logic [6:0] OP_RXW       = 7'd78;
+  localparam logic [6:0] OP_SSTAT     = 7'd79;
+  localparam logic [6:0] OP_SRD       = 7'd80;
+  localparam logic [6:0] OP_SGO       = 7'd81;
+  localparam logic [6:0] OP_SSTOP     = 7'd82;
+  localparam logic [6:0] OP_EDGE_I    = 7'd83;
+  localparam logic [6:0] OP_EDGE_RR   = 7'd84;
+  localparam logic [6:0] OP_SHL8      = 7'd85;
+  localparam logic [6:0] OP_SHL16     = 7'd86;
+  localparam logic [6:0] OP_SHR8      = 7'd87;
+  localparam logic [6:0] OP_SHR16     = 7'd88;
 
 endpackage
 
@@ -548,6 +556,51 @@ module pe_decode
       16'b1100????????????: begin  // tick i
         op      = OP_TICK;
         illegal = 1'b0;
+        world   = 1'b1;
+      end
+      16'b11010??????????0: begin  // txw Rs, n [, k] [, last]
+        op      = OP_TXW;
+        illegal = 1'b0;
+        world   = 1'b0;
+        rb      = word[5:3];
+      end
+      16'b110110???????000: begin  // scfg Rs, k
+        op      = OP_SCFG;
+        illegal = 1'b0;
+        world   = 1'b1;
+        rb      = word[5:3];
+      end
+      16'b1101110??????000: begin  // smap p, l
+        op      = OP_SMAP;
+        illegal = word[4:3] == 2'd3 || word[8:5] == 4'd3;
+        world   = 1'b1;
+      end
+      16'b1101111000???000: begin  // rxw Rd
+        op      = OP_RXW;
+        illegal = 1'b0;
+        world   = 1'b0;
+        ra      = word[5:3];
+      end
+      16'b1101111001???000: begin  // sstat Rd
+        op      = OP_SSTAT;
+        illegal = 1'b0;
+        world   = 1'b0;
+        ra      = word[5:3];
+      end
+      16'b1101111010?????0: begin  // srd Rd, s
+        op      = OP_SRD;
+        illegal = word[5:4] == 2'd3;
+        world   = 1'b0;
+        ra      = word[3:1];
+      end
+      16'b1101111100??0000: begin  // sgo m
+        op      = OP_SGO;
+        illegal = word[5:4] == 2'd0;
+        world   = 1'b1;
+      end
+      16'b1101111101??0000: begin  // sstop m
+        op      = OP_SSTOP;
+        illegal = word[5:4] == 2'd0;
         world   = 1'b1;
       end
       16'b1110??????0?????: begin  // edge p, v, i

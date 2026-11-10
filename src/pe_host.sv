@@ -49,12 +49,14 @@ module pe_host
     output logic        rd_req,
     output logic [1:0]  rd_thread,
     output logic [2:0]  rd_reg,
+    output logic [4:0]  rd_unit,    // reg8 bits 4:0, for the shift units' RDREG 12 to 31
     input  logic        rd_here,    // stage 3 serves the request in this cycle
     input  logic [15:0] ex_a,
     input  logic [15:0] ex_d,
     input  logic [15:0] ex_s,
     input  logic [8:0]  ex_pc,
-    input  logic [3:0]  ex_flags
+    input  logic [3:0]  ex_flags,
+    input  logic [15:0] ex_unit     // what the unit of the thread in stage 4 reads for rd_unit
 );
 
   // What the transaction is doing. C_NONE ignores everything until CS rises.
@@ -109,8 +111,8 @@ module pe_host
   logic [2:0]  n_q;         // mailbox word of POST
   logic [7:0]  arg_q;       // the byte before this one
   logic [1:0]  thread_q;
-  logic [3:0]  reg_q;
-  logic        reg_ok_q;
+  logic [4:0]  reg_q;
+  logic        reg_ok_q;    // reg8 is below 32
   logic [8:0]  addr_q;
   logic [15:0] hold_q;      // reply word, or the word WRMEM is writing
   logic        mem_req_q;
@@ -170,6 +172,7 @@ module pe_host
   assign rd_req    = rd_req_q;
   assign rd_thread = thread_q;
   assign rd_reg    = reg_q[2:0];
+  assign rd_unit   = reg_q;
 
   // The reply byte for the byte that follows this one. MISO must move in this very cycle, so a
   // reply that depends on the command byte is worked out from the byte still arriving.
@@ -211,16 +214,20 @@ module pe_host
     endcase
   end
 
-  // RDREG flags: T, LATE, STALE and WAITING from low to high.
+  // RDREG flags: T, LATE, STALE and WAITING from low to high. 12 to 31 are the shift unit's
+  // (section 9.2), and 32 and up read 0.
   logic [15:0] rd_value;
+  logic        rd_of_unit;
+
+  assign rd_of_unit = reg_q[4] | reg_q[3];    // 12 to 31, with 8 to 11 taken below
 
   always_comb begin
     case (reg_q)
-      4'd8:    rd_value = ex_d;
-      4'd9:    rd_value = ex_s;
-      4'd10:   rd_value = {7'd0, ex_pc};
-      4'd11:   rd_value = {12'd0, ex_flags};
-      default: rd_value = ex_a;
+      5'd8:    rd_value = ex_d;
+      5'd9:    rd_value = ex_s;
+      5'd10:   rd_value = {7'd0, ex_pc};
+      5'd11:   rd_value = {12'd0, ex_flags};
+      default: rd_value = rd_of_unit ? ex_unit : ex_a;
     endcase
     if (!reg_ok_q) rd_value = 16'h0000;
   end
@@ -232,7 +239,7 @@ module pe_host
       n_q         <= 3'd0;
       arg_q       <= 8'h00;
       thread_q    <= 2'd0;
-      reg_q       <= 4'd0;
+      reg_q       <= 5'd0;
       reg_ok_q    <= 1'b0;
       addr_q      <= 9'd0;
       hold_q      <= 16'h0000;
@@ -290,8 +297,8 @@ module pe_host
 
       // RDREG waits for its thread's stage 3, and takes the result in stage 4.
       if (do_rdreg) begin
-        reg_q    <= rx_byte[3:0];
-        reg_ok_q <= rx_byte < 8'd12;
+        reg_q    <= rx_byte[4:0];
+        reg_ok_q <= rx_byte < 8'd32;
         rd_req_q <= ~rd_fail;
       end
       if (rd_here) rd_req_q <= 1'b0;
