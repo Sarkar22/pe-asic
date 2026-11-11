@@ -1832,7 +1832,7 @@ Three things need the 512-word memory. Device-side USB (194 words) and a full CA
 
 ### 11.2 All programs run on v0.1
 
-Every program below ran on the simulators. Programs with pins ran against device models that see only pad levels. The device models and decoders follow the protocol specs but were written alongside the firmware, so a shared misreading wouldn't show. No sigrok decoder was used. None has been run outside the simulators.
+Every program below ran on the simulators. Programs with pins ran against device models that see only pad levels. The device models and decoders follow the protocol specs but were written alongside the firmware, so a shared misreading wouldn't show in them alone. `programs/sigrok/` also decodes the buses of 38 programs with sigrok's protocol decoders, which other people wrote from the protocol documents, on the simulator and on the RTL. It found two firmware bugs, in `i2c` and `cec`, fixed in the rows below. None has run on hardware yet.
 
 Each program is the file named, under `programs/`. `programs/README.md` says what its bench checks. The published benches repeat the results below except the sweeps, which take too long for a routine run: the limit sweeps (12 cycles per bit for `trimmed/uart_tx.s`, half period 8 for `basic/spi.s` and `advanced/jtag.s`), the sender-error and jitter windows of `basic/uart_rx.s`, `advanced/manch_rx.s` and `advanced/usb_rx.s`, and the break-length and slow-host runs of `standard/uart_rx.s`. A name can appear in more than one folder, as different code.
 
@@ -1846,7 +1846,7 @@ Each program is the file named, under `programs/`. `programs/README.md` says wha
 | `standard/spi.s` | 22 | All 4 modes, half periods 9, 10 and 25, 16 alignments each |
 | `basic/spi.s` | 20 | 21 with CPOL = 1. All 4 modes x 4 threads x 4 alignments at half periods 8, 9, 25 and 250. Multi-byte frames. MOSI and MISO decoded at the pads |
 | `extra/spi_target.s` | 17 | SPI target, mode 0, half period 10 on 12 start phases |
-| `standard/i2c.s` | 76 | Controller against an EEPROM model. At 100 kHz: write, random read, wrong address, data NACK, stretching on every clock, SDA stuck, SCL stuck at STOP. At 400 kHz: write and random read |
+| `standard/i2c.s` | 76 | Controller against an EEPROM model. At 100 kHz: write, random read, wrong address, data NACK, stretching on every clock, SDA stuck, SCL stuck at STOP, and a good transaction after a wrong address and after a bus fault: a write that ends early still takes its data word. At 400 kHz: write and random read |
 | `extra/i2c.s` | 76 | Same source as `standard/i2c.s`. Same cases, through a second bench |
 | `trimmed/i2c.s` | 72 | Trimmed, same host interface. The same cases as `i2c` at 100 and 400 kHz, and write and random read in the shared image |
 | `basic/i2c_write.s` | 42 | 100 and 400 kHz: target ACK, stretching on every clock and after each ACK, NACK on data, wrong address, 3 transactions, 16 of 16 threads and alignments. Every UM10204 interval in range, including tBUF, with rise at the spec maximum. No SCL timeout |
@@ -1873,7 +1873,7 @@ Each program is the file named, under `programs/`. `programs/README.md` says wha
 | `advanced/usb_rx.s` | 69 | Low-speed receive in 2 threads: stuffing-heavy packets, sender error 1.5%, D+/D- skew to 160 ns, 2-bit gaps, jitter to 60 ns. 80 ns loses 4 runs of 12, and 100 ns fails |
 | `advanced/usb_dev.s` | 194 | Device link in 3 threads, 512-word memory: SETUP with CRC-16 check, ACK, NAK, IN with DATA1, host ACK, address filter, bad CRC rejected. Worst turnaround 6.06 bit times against 6.5. No enumeration, data toggle or token CRC-5 check |
 | `advanced/can.s` | 166 | 3 threads, 512-word memory. 500 kbit/s, stuffing and CRC-15 in firmware, sender error 2%, 440 ns transceiver loop, ACK in the right slot, both arbitration outcomes. RX alone 92 words and TX alone 74 ran on 128. No error frames or retransmit |
-| `standard/cec.s` | 50 | HDMI CEC initiator. All bit windows met, ACK and no-ACK reported. No arbitration |
+| `standard/cec.s` | 50 | HDMI CEC initiator. All bit windows met. A start bit falls only after 7 bit periods of free line, so another initiator's frame is waited out. Each block's ACK is judged by the frame's destination, inverted for a broadcast; a block that fails ends the frame, and its later blocks are taken unsent. No arbitration or retransmission |
 | `extra/lin.s` | 52 | LIN responder header with auto-baud at +/-14%. Header only |
 | `extra/nec_tx.s` | 41 | NEC IR transmit. Carrier exact, 1316 cycles with 439 high |
 | `extra/parallel.s` | 7 | 8-bit parallel capture. Data hold 0 cycles after the strobe, strobe period 28 |

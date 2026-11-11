@@ -40,7 +40,8 @@ The last build without the shift units (online build of `913813a`) had 10,645 ce
 |---|---|
 | `test/`: cocotb at the pins, over the real SPI link | 32 pass, 1 skipped (an RTL-only test) on Icarus 12.0 and 13.0, with nine tests of the shift units |
 | Gate level, on the hardened netlist with the shift units and the RTL beside it, pin by pin | 32 pass, 1 skipped (the RTL-only test), on Icarus 13.0 |
-| `programs/check.py`: every program on the simulator | 458 checks pass |
+| `programs/check.py`: every program on the simulator | 487 checks pass |
+| `programs/sigrok/`: each program's bus as a logic analyzer on the board would see it, decoded by sigrok's protocol decoders, which other people wrote from the protocol documents | 38 of 47 programs decoded. 175 checks pass on the simulator and 291 on the RTL, whose pads and board levels equal the simulator's on every cycle. 11 planted bugs caught. It found two firmware bugs, now fixed: in the I2C controller and the CEC initiator. See [programs/sigrok/README.md](../programs/sigrok/README.md) |
 | `formal/`: SymbiYosys proofs on the RTL, read with slang as the flow reads it | Proved for every state reachable from reset, by k-induction: an open-drain pin can't drive high; all 24 pads follow section 5.2's equations; a bypass lane has no flop; thread pin isolation, 114 rules; each shift unit's timing, 10 checks for every TPER, TFRAC and TAIL; every flop's reset value; no pad drives until a program asks. A cover reaches each property's trigger, and 14 planted bugs are caught. See [formal/README.md](../formal/README.md) |
 | `formal/chip.eqy`: the synthesized netlist against the RTL | Partly proved: 90 of 109 pieces, among them every output pin but uo3. The pieces holding the units, the threads and the pin flops don't close yet |
 | TT precheck: 10 checks, among them KLayout DRC, the boundary and the Verilog syntax | pass |

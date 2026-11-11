@@ -175,6 +175,30 @@ def timing(trace):
     return {k: v * 20 for k, v in m.items()}
 
 
+def after_nack(rel):
+    """A write to an absent device, then a write and a random read that must succeed. The NACKed write's data
+    word must leave MIN unsent, not run as a transaction of its own. Returns (ok, detail)."""
+    W, RD, BAD = (0xA0, 0x10, 0x5A), (0xA1, 0x20, 0), (0xB0, 0x10, 0x5A)
+    res, d, r, tr, bus = run(rel, [BAD, W, RD])
+    ok = res[:1] == [1] and res[2:] == [0, 0x5A, 0, 0x3C] and d.mem[0x10] == 0x5A and d.starts == 4 \
+        and d.stops == 3 and r.late() == 0 and bus.contention == 0 and not r.chip.full[0]
+    return ok, '%s, starts %d, stops %d' % ([hex(x) for x in res], d.starts, d.stops)
+
+
+def after_fault(rel, until=40000):
+    """SDA held low from reset to cycle until, past the bus-free timeout (30000 cycles): a write ends in a bus
+    fault, and its data word must leave MIN unsent. The next write, once SDA is free, must succeed."""
+    def hold(c, bus, dev, lvl):
+        if c < until:
+            bus.ext_low |= 1 << SDA
+        elif c == until:
+            bus.ext_low &= ~(1 << SDA)
+    res, d, r, tr, bus = run(rel, [(0xA0, 0x10, 0x5A), (0xA0, 0x11, 0xA5)], hook=hold)
+    ok = res[:1] == [2] and res[2:] == [0, 0xA5] and d.mem[0x11] == 0xA5 and d.mem[0x10] == 0xC3 \
+        and d.falls == 28 and r.late() == 0 and bus.contention == 0 and not r.chip.full[0]   # one write: START + 27
+    return ok, '%s, SCL falls %d' % ([hex(x) for x in res], d.falls)
+
+
 # UM10204 bus timing table, minimums in ns, for the intervals timing() measures
 UM10204 = {'Sm': dict(low=4700, high=4000, su_sta=4700, su_sto=4000, hd_sta=4000),
            'Fm': dict(low=1300, high=600, su_sta=600, su_sto=600, hd_sta=600)}

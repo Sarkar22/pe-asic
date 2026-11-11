@@ -23,7 +23,7 @@ class Batch:
 
     def __init__(self, runner, title, unit='bytes'):
         self.runner, self.title, self.unit = runner, title, unit
-        self.n = self.items = 0
+        self.n = self.items = self.nbad = 0         # nbad: decodes that failed, of the n made
         self.bad, self.xn, self.xbad, self.pn, self.pbad = [], 0, [], 0, []
         self.known = []
         self.changes = self.cycles = 0
@@ -103,6 +103,7 @@ class Batch:
         self.items += count(got)
         if not ok:
             self.bad.append('%s: %s' % (name, detail))
+            self.nbad += 1
         if bench is not NOBENCH:
             self.xn += 1
             if bench != got:
@@ -128,7 +129,7 @@ class Batch:
                                                                 ', '.join(v for v, _ in self.known[:4])))
         if self.n:
             LOG.check('%s: sigrok decodes what the stimulus says, no error annotations' % self.title, not self.bad,
-                      '%d of %d runs, %d %s' % (self.n - len(self.bad), self.n, self.items, self.unit)
+                      '%d of %d runs, %d %s' % (self.n - self.nbad, self.n, self.items, self.unit)
                       + ('; ' + ' | '.join(self.bad[:3]) if self.bad else ''))
         if self.xn:
             LOG.check('%s: the bench\'s decoder agrees with sigrok' % self.title, not self.xbad,
@@ -622,38 +623,13 @@ def usb_expect(packet):
     return name
 
 
-# Firmware findings: runs where sigrok shows the bus doing something the stimulus doesn't ask for. Reported on
-# DIFF lines and in the README, not failed, until the programs or their mailbox contracts change.
-FINDING = {
-    'i2c_left': 'firmware: after the address byte of a write is NACKed, its data word stays in MIN and the program '
-                'runs it as the next transaction (device byte 0x5A: address 0x2D)',
-    'cec_rest': 'firmware: after a NACKed block the rest of the frame stays in MIN and goes out as a new frame, '
-                'with no signal free time before its start bit',
-}
 # Decoder findings: where sigrok 0.5.3 reads a bus differently from the protocol document.
 DECODER = {
     'jtag_pause': 'sigrok 0.5.3 jtag takes a bit on the Exit1-DR to Pause-DR clock, where IEEE 1149.1 shifts '
                   'nothing: the scan through Pause-DR shows one bit too many',
-    'can_7ff': 'bench stimulus: identifier 0x7FF, whose bits ID-10 to ID-4 are all recessive, which Bosch CAN 2.0 '
-               'part A 3.1.1 forbids; sigrok warns, and decodes the frame as sent',
-    'dmx_88': 'ANSI E1.11 has receivers take a break of 88 us and a mark between slots of 0; sigrok 0.5.3 dmx512 '
-              'wants a break of more than 88 us and at least one sample of mark between slots',
+    'dmx_88': 'ANSI E1.11 has receivers take a break of 88 us; sigrok 0.5.3 dmx512 wants a break of more than 88 us, '
+              'so it never finds this one and decodes nothing in the window',
 }
-
-
-def left_data_word(want):
-    """For a controller whose stimulus ends with a write to an absent device (words 0xB010, 0x5A00): the stray
-    transaction, or as much of it as the bench's run lasts."""
-    ev, ops = want
-    stray = ['S', 'AW:2D', 'NACK', 'P']
-
-    def f(got, errs):
-        g_ev, g_ops = got
-        extra = g_ev[len(ev):]
-        if g_ev[:len(ev)] == ev and extra and extra == stray[:len(extra)] and \
-                g_ops in (ops, ops + ['Warning: No reply from slave!']) and not errs:
-            return FINDING['i2c_left']
-    return f
 
 
 def presence_at_limit(want):
@@ -937,19 +913,76 @@ def std_cec_four():
 
 
 def std_cec_alone():
-    """cec_run(9, 0): no follower at 4. The bench's host posts both blocks at once, so after the NACKed header the
-    second block goes out as a frame of its own; run until the program reports that one too."""
+    """cec_run(9, 0): no follower at 4, so the header is not acknowledged. The bench's host posts both blocks at
+    once, and the program must take the second unsent. The run goes on past 7 bit periods and a start bit, the
+    soonest the program could start another frame, to show that it starts none."""
     import standard
     chip, b, dev, res, n = standard.cec_run(9, 0)
     got = [res]
-    for _ in range(80 * standard.MS):
+    for _ in range(int(21.5 * standard.MS)):
         chip.cycle(b)
         v = chip.take(1)
         if v is not None:
             got.append(v)
-            break
     chip.run(5 * standard.MS, b)
+    return got, chip.full[0]
+
+
+def std_cec_frames(frames, refuse=(), other=None, more=()):
+    """bench/standard.py cec_frames: four threads at once, a follower at 4 on each line (and more). The tail lets
+    sigrok close the last ACK bit (4.1 ms of idle line)."""
+    import standard
+    chip, b, nodes, ans, queue, n = standard.cec_frames(frames, refuse=refuse, other=other, more=more)
+    return ans, [chip.full[t] for t in range(4)]
+
+
+CEC_BIT = 120000                        # HDMI CEC's nominal data bit period, 2.4 ms, in cycles at 50 MHz
+CEC_FREE7, CEC_FREE5 = 7 * CEC_BIT, 5 * CEC_BIT
+
+
+def cec_free_time(chip, line, d, got, mine):
+    """HDMI CEC 1.4, CEC 9.1, signal free time, measured on the record (the VCD's samples), not by a bench decoder.
+    For each start bit sigrok's cec decoder found in a frame from initiator mine (the high nibble of its header):
+    how long the line had been high before it fell (from the start of the record if it never fell before), and how
+    long after the nominal end of the frame before it (the fall of sigrok's last ACK annotation before it, plus one
+    bit period). Returns (start, line high, after, needed after) per start bit: 7 bit periods of high line always,
+    and after a frame, 7 bit periods if it was the same initiator's and 5 if another's."""
+    w = trace_of(chip).wave('io' if line.startswith('uio') else line[:-1], int(line[-1]))   # VCD name to record
+    rises = [t for t, v in w.edges() if v == 1]
+    first = chip.rec_t[0] if chip.rec_t else 0
+    acks = sorted(a.cycle for a in d.of('cec', 'ack', 'nack'))
+    out = []
+    for k, st in enumerate(sorted(a.cycle for a in d.of('cec', 'st'))):
+        if k >= len(got) or not got[k] or got[k][0][0] >> 4 != mine:
+            continue
+        before = [r for r in rises if r < st]
+        prev = [a for a in acks if a < st]
+        same = k > 0 and got[k - 1] and got[k - 1][0][0] >> 4 == mine
+        out.append((st, st - (before[-1] if before else first), st - (prev[-1] + CEC_BIT) if prev else None,
+                    CEC_FREE7 if same else CEC_FREE5))
+    return out
+
+
+def cec_check(b, ctx, line, want, free, mine=1, tag=''):
+    """sigrok's frames on line against want; the signal free time of the frames from initiator mine goes into
+    free, for cec_free_check."""
+    got, errs, d = b.sigrok(ctx, cec(line), cec_frames, want, tag=tag)
+    for st, high, after, need in cec_free_time(ctx.chip, line, d, got, mine):
+        free.append(('%s%s' % (ctx.name, '_' + tag if tag else ''), st, high, after, need))
     return got
+
+
+def cec_free_check(title, free, starts):
+    bad = [x for x in free if x[2] < CEC_FREE7 or (x[3] is not None and x[3] < x[4])]
+    ms = lambda c: None if c is None else round(c / 50000.0, 2)
+    LOG.check('%s: signal free time on the record: each of the program\'s start bits after 7 bit periods (16.8 '
+              'ms) of high line, and 7 after its own last frame or 5 after another initiator\'s' % title,
+              not bad and len(free) == starts,
+              '%d of %d start bits; line high at least %s ms, after the last frame at least %s ms' % (
+                  len(free) - len(bad), starts, ms(min(x[2] for x in free)) if free else None,
+                  ms(min(x[3] for x in free if x[3] is not None)) if any(x[3] is not None for x in free) else None)
+              + ('; ' + ' | '.join('%s start %d: high %s ms, after %s ms' % (n, st, ms(h), ms(a))
+                                   for n, st, h, a, _ in bad[:3]) if bad else ''))
 
 
 def std_feed(name, msg, answers, tid=0):
@@ -1052,19 +1085,59 @@ def g_standard(runner, log):
             b.sigrok(ctx, jtag('uo1', 'uo2', 'uo5', 'ui4'), jtag_scans, jtag_match(want))
         b.close()
 
-    log.group('standard/cec.s', title='HDMI CEC initiator, bench/standard.py cec_four and cec_run')
+    log.group('standard/cec.s', title='HDMI CEC initiator, bench/standard.py cec_four, cec_run and cec_frames')
+    free = []
     b = Batch(runner, 'four threads at once, each on its own pin io0 to io3, follower at 4 on each', 'frames')
     ctx = b.run('std_cec_four', std_cec_four)
     one = [[(0x14, 0, 'ACK'), (0x36, 1, 'ACK')]]
     for tid in range(4):
-        b.sigrok(ctx, cec('uio%d' % tid), cec_frames, one, tag='io%d' % tid)
+        cec_check(b, ctx, 'uio%d' % tid, one, free, tag='io%d' % tid)
+    if ctx.value != [0] * 4:
+        b.fail(ctx.name, 'the firmware answered %s' % short(ctx.value))
     b.close()
-    b = Batch(runner, 'no follower at the destination: the header is not acknowledged', 'frames')
+    b = Batch(runner, 'no follower at the destination: the header is not acknowledged, the frame\'s second block is '
+              'taken unsent, and no other frame follows', 'frames')
     ctx = b.run('std_cec_alone', std_cec_alone)
-    want = [[(0x14, 0, 'NACK')]]
-    b.sigrok(ctx, cec('uio3'), cec_frames, want,
-             known=lambda got, errs: FINDING['cec_rest'] if got == want + [[(0x36, 1, 'NACK')]] else None)
+    cec_check(b, ctx, 'uio3', [[(0x14, 0, 'NACK')]], free)
+    if ctx.value != ([1], 0):
+        b.fail(ctx.name, 'the firmware answered %s, MIN full %s' % ctx.value)
     b.close()
+    b = Batch(runner, 'four threads: the follower refuses the second block of three, then a frame of two goes out '
+              'whole', 'frames')
+    a = [0x14 << 8 | 0x40, 0x36 << 8 | 0x40, 0x55 << 8 | 0xC0]
+    ctx = b.run('std_cec_refused', std_cec_frames, [a, [0x14 << 8 | 0x40, 0x83 << 8 | 0xC0]], {(0, 1)})
+    want = [[(0x14, 0, 'ACK'), (0x36, 0, 'NACK')], [(0x14, 0, 'ACK'), (0x83, 1, 'ACK')]]
+    for tid in range(4):
+        cec_check(b, ctx, 'uio%d' % tid, want, free, tag='io%d' % tid)
+    if ctx.value != ([[1, 0]] * 4, [0] * 4):
+        b.fail(ctx.name, 'the firmware answered %s, MIN full %s' % ctx.value)
+    b.close()
+    b = Batch(runner, 'four threads, followers at 4 and 5: a broadcast both accept; a broadcast 5 rejects in its second '
+              'block, then a direct frame (sigrok inverts the ACK bit for a broadcast, as HDMI CEC 1.4 does)', 'frames')
+    ctx = b.run('std_cec_bcast', std_cec_frames, [[0x1F << 8 | 0x40, 0x36 << 8 | 0xC0]], (), None, [(5, ())])
+    for tid in range(4):
+        cec_check(b, ctx, 'uio%d' % tid, [[(0x1F, 0, 'ACK'), (0x36, 1, 'ACK')]], free, tag='io%d' % tid)
+    if ctx.value != ([[0]] * 4, [0] * 4):
+        b.fail(ctx.name, 'the firmware answered %s, MIN full %s' % ctx.value)
+    a = [0x1F << 8 | 0x40, 0x36 << 8 | 0x40, 0x55 << 8 | 0xC0]
+    ctx = b.run('std_cec_bcast_rejected', std_cec_frames, [a, [0x14 << 8 | 0x40, 0x83 << 8 | 0xC0]], (), None,
+                [(5, {(0, 1)})])
+    want = [[(0x1F, 0, 'ACK'), (0x36, 0, 'NACK')], [(0x14, 0, 'ACK'), (0x83, 1, 'ACK')]]
+    for tid in range(4):
+        cec_check(b, ctx, 'uio%d' % tid, want, free, tag='io%d' % tid)
+    if ctx.value != ([[1, 0]] * 4, [0] * 4):
+        b.fail(ctx.name, 'the firmware answered %s, MIN full %s' % ctx.value)
+    b.close()
+    b = Batch(runner, 'four threads: another initiator\'s frame, from 3 to 5, starts 5 ms into the program\'s count',
+              'frames')
+    ctx = b.run('std_cec_other', std_cec_frames, [[0x14 << 8 | 0x40, 0x36 << 8 | 0xC0]], (), (5 * 50000, [(0x35, 1)]))
+    want = [[(0x35, 1, 'NACK')], [(0x14, 0, 'ACK'), (0x36, 1, 'ACK')]]
+    for tid in range(4):
+        cec_check(b, ctx, 'uio%d' % tid, want, free, tag='io%d' % tid)
+    if ctx.value != ([[0]] * 4, [0] * 4):
+        b.fail(ctx.name, 'the firmware answered %s, MIN full %s' % ctx.value)
+    b.close()
+    cec_free_check('standard/cec.s', free, 4 + 1 + 8 + 4 + 4 + 8)
 
     log.group('standard/crc16.s', title='CRC-16/CCITT-FALSE: no sigrok decoder, checked against binascii.crc_hqx')
     LOG.row('standard/crc16.s').note = 'no decoder: binascii.crc_hqx'
@@ -1108,15 +1181,20 @@ def g_standard_pairs(runner, log):
               title='I2C controller (io0, io1) and target (io2, io3) on two threads, wired together, '
                     'bench/standard.py run')
     ops = [[0xA010, 0x5A00], [0xA110], [0xA120], [0xB010, 0x5A00]]
+    ops2 = [[0xB010, 0x5A00], [0xA010, 0x5A00], [0xA110]]
     mem = {r: 0xEE for r in range(256)}
     mem[0x20] = 0x3C
     want = eeprom_expect([(0xA0, 0x10, 0x5A), (0xA1, 0x10, 0), (0xA1, 0x20, 0), (0xB0, 0x10, 0x5A)], mem)
+    want2 = eeprom_expect([(0xB0, 0x10, 0x5A), (0xA0, 0x10, 0x5A), (0xA1, 0x10, 0)], mem)
     for name, cfg in (('100 kHz', (250, 210)), ('400 kHz', (45, 37))):
-        b = Batch(runner, '%s: write, random read of it, random read of a stored byte, wrong address' % name,
-                  'events')
+        b = Batch(runner, '%s: write, random read of it, random read of a stored byte, wrong address; then a wrong '
+                  'address first' % name, 'events')
         ctx = b.run('std_i2c_pair_%s' % name.split()[0], std_i2c_pair, cfg, ops)
-        b.sigrok(ctx, i2c('uio1', 'uio0', ('eeprom24xx', {}, {})), i2c_eeprom_events, want,
-                 known=left_data_word(want))
+        b.sigrok(ctx, i2c('uio1', 'uio0', ('eeprom24xx', {}, {})), i2c_eeprom_events, want)
+        ctx = b.run('std_i2c_pair_bad_%s' % name.split()[0], std_i2c_pair, cfg, ops2)
+        b.sigrok(ctx, i2c('uio1', 'uio0', ('eeprom24xx', {}, {})), i2c_eeprom_events, want2)
+        if [r[:1] for r in ctx.value] != [[1], [0], [0]] or ctx.value[2][1:] != [0x5A]:
+            b.fail(ctx.name, 'the firmware answered %s' % ctx.value)
         b.close()
 
     log.group('standard/uart_tx.s', 'standard/uart_rx.s', 'standard/spi.s', 'standard/i2c_write.s',
@@ -1176,6 +1254,13 @@ def eeprom_run(rel, ops, **kw):
     return res
 
 
+def eeprom_words(case, rel):
+    """bench/i2c_eeprom.py after_nack (a wrong address, then a write and a read) or after_fault (SDA held low past
+    the bus-free timeout under a write, then a write once it is let go): (ok, detail) of the bench's own check."""
+    import i2c_eeprom
+    return getattr(i2c_eeprom, case)(rel)
+
+
 def g_eeprom_controller(runner, log, rel):
     """The host-driven I2C controllers against bench/i2c_eeprom.py's EEPROM: SDA io0, SCL io1."""
     W, RD, BAD = (0xA0, 0x10, 0x5A), (0xA1, 0x20, 0), (0xB0, 0x10, 0x5A)
@@ -1188,10 +1273,19 @@ def g_eeprom_controller(runner, log, rel):
         b.sigrok(ctx, st, i2c_eeprom_events, eeprom_expect(ops, EEPROM))
     State.thread = 0
     b.close()
-    b = Batch(runner, '100 kHz: wrong address; data NACKed; 8 us stretch after every SCL fall; SDA stuck low', 'events')
+    b = Batch(runner, '100 kHz: wrong address; data NACKed; 8 us stretch after every SCL fall; SDA stuck low; '
+              'what follows a wrong address and a bus fault', 'events')
     ctx = b.run('%s_bad' % rel.split('/')[0], eeprom_run, rel, [BAD])
     want = eeprom_expect([BAD], EEPROM)
-    b.sigrok(ctx, st, i2c_eeprom_events, want, known=left_data_word(want))
+    b.sigrok(ctx, st, i2c_eeprom_events, want)
+    ctx = b.run('%s_bad_then' % rel.split('/')[0], eeprom_words, 'after_nack', rel)
+    b.sigrok(ctx, st, i2c_eeprom_events, eeprom_expect([BAD, W, RD], EEPROM))
+    if not ctx.value[0]:
+        b.fail(ctx.name, 'the firmware answered %s' % ctx.value[1])
+    ctx = b.run('%s_fault_then' % rel.split('/')[0], eeprom_words, 'after_fault', rel)
+    b.sigrok(ctx, st, i2c_eeprom_events, eeprom_expect([(0xA0, 0x11, 0xA5)], EEPROM))
+    if not ctx.value[0]:
+        b.fail(ctx.name, 'the firmware answered %s' % ctx.value[1])
     ctx = b.run('%s_nack_data' % rel.split('/')[0], eeprom_run, rel, [W], nack_data=True)
     b.sigrok(ctx, st, i2c_eeprom_events, (['S', 'AW:50', 'ACK', 'DW:10', 'ACK', 'DW:5A', 'NACK', 'P'], []))
     ctx = b.run('%s_stretch' % rel.split('/')[0], eeprom_run, rel, [RD], stretch=400)
@@ -1382,21 +1476,35 @@ def windows(chip, starts, back=2):
     return out
 
 
-def dmx_by_packet(b, ctx, line, want, known=None):
+def dmx_by_packet(b, ctx, line, want, known_at=None):
     """sigrok's dmx512 0.5.3 goes back to its break search only after slot 512 (or a bad second stop bit), so a
-    run with shorter packets is decoded one window per packet, each from just before its break."""
+    run with shorter packets is decoded one window per packet, each from just before its break. known_at(lo, hi),
+    for a run that differs in a documented way, gives each window's known function."""
     sig, n = line[:-1], int(line[-1])
     brk = long_lows(ctx.chip, sig, n, 88 * CLK // 1000000)
     got = []
     for k, (lo, hi) in enumerate(windows(ctx.chip, brk)):
         g, _, _ = b.sigrok(ctx, dmx_stack(line), dmx_packets, want[k:k + 1] if k < len(want) else [], tag='p%d' % k,
-                           lo=lo, hi=hi, known=known)
+                           lo=lo, hi=hi, known=known_at(lo, hi) if known_at else None)
         got += g
     if len(brk) != len(want):
         b.fail(ctx.name, '%d breaks on the line, %d packets wanted' % (len(brk), len(want)))
-    if not known:
+    if not known_at:
         b.cross(ctx.name, bench_dmx(ctx.chip, sig, n), got)
     return got
+
+
+def dmx_88_missed(chip, line, lo, hi):
+    """The one way sigrok 0.5.3's dmx512 misreads the bench's own receive timing. The window's break lasts exactly
+    88 us on the record, 4400 cycles; sigrok wants more than 88 us, never leaves its break search, and so gives no
+    break, no slot and no error in the whole window. Any other difference fails."""
+    ed = trace_of(chip).wave(line[:-1], int(line[-1])).edges(lo, hi)
+    lows = [nxt - t for (t, v), (nxt, _) in zip(ed, ed[1:]) if v == 0]
+
+    def f(got, errs):
+        if got == [] and not errs and lows[:1] == [88 * CLK // 1000000]:
+            return DECODER['dmx_88']
+    return f
 
 
 def bench_dmx(chip, sig, n):
@@ -1485,7 +1593,9 @@ def g_dmx(runner, log):
     b = Batch(runner, 'the bench\'s own timing: an 88 us break, no mark between slots', 'slots')
     f = [[0] + [rng.randrange(256) for _ in range(24)] for _ in range(3)]
     ctx = b.run('dmx_rx_brk88', dmx_rx, f, 3, 4)
-    dmx_by_packet(b, ctx, 'ui4', f, known=lambda got, errs: DECODER['dmx_88'] if got != f else None)
+    dmx_by_packet(b, ctx, 'ui4', f, known_at=lambda lo, hi: dmx_88_missed(ctx.chip, 'ui4', lo, hi))
+    if ctx.value != sum((x[3:7] for x in f), []):
+        b.fail(ctx.name, 'the firmware read %s' % short(ctx.value))
     b.close()
 
 
@@ -1996,21 +2106,13 @@ def can_tx_run(ident, data, nodes=None, **kw):
     return st
 
 
-def id_7ff(want):
-    def f(got, errs):
-        if (got == want if not callable(want) else want(got, [])[0]) and errs and \
-                all(e.startswith('Identifier bits 10..4 must not be all recessive') for e in errs):
-            return DECODER['can_7ff']
-    return f
-
-
 def can_check(b, ctx, want, bit=100, err=0.0, tag=''):
     """sigrok from bus integration on, and bench/can_wire.py's decoder on the same line as a cross-check: id, data,
     ACK, and whether the CRC field is right (sigrok's field against the frame's CRC-15)."""
     import can_wire as C
     lo = bus_integrated(ctx.chip, 'ui', 6, bit)
     got, errs, d = b.sigrok(ctx, can_stack('ui6', round(CLK / (bit * (1 + err))), 75.0), can_frames, want, lo=lo,
-                            tag=tag, known=id_7ff(want))
+                            tag=tag)
     fr = C.decode(trace_of(ctx.chip).wave('ui', 6), bit * (1 + err), lo=2000)
     bench = [(f['id'], f['data'], f['ack'], f['crc_ok']) for f in fr]
     mine = [(i, dd, a, c == can_expect(i, dd)[2]) for i, dd, c, a in got]
@@ -2023,7 +2125,7 @@ def g_can(runner, log):
     import can_wire as C
     log.group('advanced/can.s', title='CAN 2.0A node: TX uo5, RX ui6 (the bus through the transceiver model), '
               'bench/can.py; sigrok from bus integration on')
-    frames = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), (0x7FF, [0xFF] * 8), (0x2A5, [])]
+    frames = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), (0x7EF, [0xFF] * 8), (0x2A5, [])]
     want = [can_expect(i, d) for i, d in frames]
     b = Batch(runner, 'receive 5 frames, all-zero and all-one stuffing: the sender model\'s frames and the chip\'s '
               'ACK', 'frames')
@@ -2049,7 +2151,7 @@ def g_can(runner, log):
     can_check(b, ctx, w2)
     b.close()
     b = Batch(runner, 'transmit 6 frames, ACKed by another node; 4 alignments x 3 loop delays', 'frames')
-    for ident, data in [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), (0x7FF, [0xFF] * 8),
+    for ident, data in [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), (0x7EF, [0xFF] * 8),
                         (0x2A5, []), (0x0F0, [0xF0, 0x0F, 0xFF, 0x00])]:
         ctx = b.run('can_tx_%03x_%d' % (ident, len(data)), can_tx_run, ident, data)
         can_check(b, ctx, [can_expect(ident, data)])

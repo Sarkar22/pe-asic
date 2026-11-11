@@ -261,6 +261,10 @@ def check_i2c(log):
     check('100 kHz intervals at the pad inside UM10204 Standard-mode', i2c_eeprom.within(t, 'Sm'), t)
     res, d, r, tr, bus = i2c_eeprom.run(rel, [BAD])
     check('wrong address: NACK reported, STOP sent', res[0] == 1 and d.stops == 1 and r.late() == 0, res)
+    check('wrong address, then a write and a random read: the NACKed write\'s data word is taken, not run',
+          *i2c_eeprom.after_nack(rel))
+    check('bus fault on a write (SDA held low past the timeout), then a write: the first one\'s data word is taken',
+          *i2c_eeprom.after_fault(rel))
     res, d, r, tr, bus = i2c_eeprom.run(rel, [W], nack_data=True)
     check('data NACK: reported, STOP sent', res[0] == 1 and d.stops == 1 and r.late() == 0, res)
     res, d, r, tr, bus = i2c_eeprom.run(rel, [(0xA1, 0x20, 0)], stretch=400)

@@ -625,6 +625,9 @@ def test_jtag():
 
 
 MS = 50000      # cycles per ms at 50 MHz
+BIT = int(2.4 * MS)     # HDMI CEC nominal data bit period
+FREE7 = 7 * BIT         # HDMI CEC 1.4, CEC 9.1: signal free time before an initiator's own next frame
+FREE5 = 5 * BIT         # and before a new initiator's frame, after another initiator's
 
 
 class CecFollower:
@@ -693,7 +696,7 @@ def cec_run(addr, tid):
     words = [header << 8 | 0x40, data << 8 | 0xC0]
     chip.run(40, b)
     res, i = None, 0
-    for _ in range(60 * MS):
+    for _ in range(100 * MS):               # the frame waits out 7 bit periods of free line first
         chip.cycle(b)
         if i < 2 and chip.post(0, words[i]):
             i += 1
@@ -723,7 +726,7 @@ def cec_four(addr):
     blocks = [header << 8 | 0x40, data << 8 | 0xC0]
     chip.run(40, b)
     sent, res = [0] * 4, [None] * 4
-    for _ in range(60 * MS):
+    for _ in range(100 * MS):               # the frame waits out 7 bit periods of free line first
         chip.cycle(b)
         for tid in range(4):
             if sent[tid] < 2 and chip.post(tid, blocks[sent[tid]]):
@@ -738,6 +741,147 @@ def cec_four(addr):
     return chip, b, devs, res, n
 
 
+class CecNode:
+    """A follower at addr that reads every frame on its line, whoever sends it. A start bit is a low of 3.5 to
+    3.9 ms in a pulse of 4.3 to 4.7 ms; every bit after it must meet the windows CecFollower checks. It holds the
+    line low from an ACK bit's fall to 1.5 ms to acknowledge each block of a frame addressed to it, except the
+    blocks named in refuse as (frame, block), counted from 0. A frame to destination 15 is a broadcast, where
+    HDMI CEC 1.4 inverts the ACK bit: there it pulls the slot low only to reject, the blocks in refuse. frames: one
+    dict per frame with the start bit's fall, how long the line had been high before it (from cycle 0 if it never
+    fell), the nominal end of its last bit, and its blocks as (byte, EOM, ACK bit), the ACK bit being the line's
+    level: 0 acknowledges a direct block and rejects a broadcast one."""
+
+    def __init__(self, pin, addr, refuse=()):
+        self.pin, self.addr, self.refuse = pin, addr, set(refuse)
+        self.prev, self.rise, self.fall, self.low, self.free = 1, 0, None, None, None
+        self.frames, self.errors = [], []
+        self.cur, self.bits, self.release_at = None, [], None
+
+    def step(self, c, b):
+        lvl = (b.io >> self.pin) & 1
+        if self.release_at == c:
+            b.io_low &= ~(1 << self.pin)
+            self.release_at = None
+        if self.prev and not lvl:
+            self.pulse(c)
+            self.fall, self.low, self.free = c, None, c - self.rise
+            if self.cur is not None and len(self.bits) == 9 and self.pulls():
+                b.io_low |= 1 << self.pin
+                self.release_at = c + int(1.5 * MS)
+        elif not self.prev and lvl:
+            self.rise = c
+            if self.fall is not None and self.low is None:
+                self.low = c - self.fall
+        self.prev = lvl
+
+    def pulls(self):
+        blocks = self.cur['blocks']
+        head = blocks[0][0] if blocks else sum(x << (7 - i) for i, x in enumerate(self.bits[:8]))
+        refused = (len(self.frames) - 1, len(blocks)) in self.refuse
+        return refused if head & 15 == 15 else (head & 15) == self.addr and not refused
+
+    def pulse(self, nxt):
+        """Reads the pulse from the last fall to nxt, the next fall (None at the end of the run)."""
+        if self.fall is None or self.low is None:
+            return
+        low, total = self.low / MS, None if nxt is None else (nxt - self.fall) / MS
+        if 3.5 <= low <= 3.9 and (total is None or 4.3 <= total <= 4.7):
+            if self.cur is not None:
+                self.errors.append(('start bit inside a frame', self.fall))
+            self.cur = dict(start=self.fall, free=self.free, end=None, blocks=[])
+            self.frames.append(self.cur)
+            self.bits = []
+            return
+        if self.cur is None:
+            self.errors.append(('pulse outside a frame', self.fall, low, total))
+            return
+        val = 1 if low < 1.0 else 0
+        blocks = self.cur['blocks']
+        head = blocks[0][0] if blocks else sum(x << (7 - i) for i, x in enumerate(self.bits[:8]))
+        last = len(self.bits) == 9 and (self.bits[8] or val != (head & 15 == 15))  # EOM, or the block failed
+        if len(self.bits) < 9:                                      # the ACK slot's low time is the follower's
+            lim = (0.4, 0.8) if val else (1.3, 1.7)
+            if not lim[0] <= low <= lim[1]:
+                self.errors.append(('low', self.fall, val, low))
+        if total is not None and not last and not 2.05 <= total <= 2.75:
+            self.errors.append(('total', self.fall, total))
+        self.bits.append(val)
+        if len(self.bits) == 10:
+            byte = sum(x << (7 - i) for i, x in enumerate(self.bits[:8]))
+            self.cur['blocks'].append((byte, self.bits[8], self.bits[9]))
+            self.bits = []
+            if last:
+                self.cur['end'] = self.fall + BIT
+                self.cur = None
+
+    def finish(self):
+        self.pulse(None)
+
+
+class CecSender:
+    """Another initiator on the same line: one frame of blocks [(byte, EOM)] from cycle t0 at the nominal HDMI
+    CEC timing, with its ACK slots released. It doesn't look at the line, and moves it only at its own edges."""
+
+    def __init__(self, pin, t0, blocks):
+        self.bit, self.edges, t = 1 << pin, {}, t0
+        bits = [None] + [x for byte, eom in blocks for x in [(byte >> (7 - i)) & 1 for i in range(8)] + [eom, 1]]
+        for v in bits:
+            self.edges[t] = 1
+            self.edges[t + int((3.7 if v is None else 0.6 if v else 1.5) * MS)] = 0
+            t += int(4.5 * MS) if v is None else BIT
+
+    def step(self, c, b):
+        e = self.edges.get(c)
+        if e == 1:
+            b.io_low |= self.bit
+        elif e == 0:
+            b.io_low &= ~self.bit
+
+
+def cec_frames(frames, refuse=(), other=None, tail=6 * MS, more=()):
+    """The program on all four threads at once, thread t on io<t> with MIN t and MOUT 4 + t, and a CecNode at 4
+    on each line, refusing the blocks in refuse; more: (address, refuse) of further followers on each line. The
+    host posts each thread the blocks of frames in order, each as soon as MIN is empty, and takes the answers.
+    other: (cycle, blocks) of another initiator's frame on every line. Runs until each thread has answered once
+    per frame, then tail cycles more. nodes[t] is the follower at 4 on line t."""
+    words, n = {}, 0
+    for tid in range(4):
+        img = assemble(read('standard/cec.s'), defines={'CEC': 'io%d' % tid, 'MIN': tid, 'MOUT': 4 + tid},
+                       base=64 * tid, depth=512)
+        words.update(img.words)
+        n = img.size
+    chip, b = Chip(words, 512), Board()
+    nodes = [CecNode(tid, 4, refuse) for tid in range(4)]
+    b.devs += nodes
+    b.devs += [CecNode(tid, a, r) for a, r in more for tid in range(4)]
+    if other:
+        b.devs += [CecSender(tid, *other) for tid in range(4)]
+    for tid in range(4):
+        chip.start(tid, 64 * tid)
+    queue = [[w for fr in frames for w in fr] for _ in range(4)]
+    answers = [[] for _ in range(4)]
+    for _ in range(180 * MS):
+        chip.cycle(b)
+        for tid in range(4):
+            if queue[tid] and chip.post(tid, queue[tid][0]):
+                queue[tid].pop(0)
+            v = chip.take(4 + tid)
+            if v is not None:
+                answers[tid].append(v)
+        if all(len(a) >= len(frames) for a in answers):
+            break
+    chip.run(tail, b)
+    for nd in nodes:
+        nd.finish()
+    return chip, b, nodes, answers, queue, n
+
+
+def free_before(b, pin, t):
+    """How long the line had been high before the fall at cycle t, from cycle 0 if it never fell before."""
+    rises = [c for c, v in b.edges('io%d' % pin) if v and c < t]
+    return t - (rises[-1] if rises else 0)
+
+
 def test_cec():
     LOG.group(*P('cec'), title='HDMI CEC initiator')
     chip, b, devs, res, n = cec_four(4)
@@ -750,9 +894,73 @@ def test_cec():
         check(f'cec frame acknowledged, all bit windows met, thread={tid} on io{tid}, all four threads at once',
               ok and spans == {int(2.4 * MS)},
               f'{n} words, res={res[tid]}, blocks={dev.blocks[:2]}, bit spans {spans} cycles, late {chip.t[tid].latecount}')
+    free = [free_before(b, tid, ([c for c, v in b.edges('io%d' % tid) if not v] or [0])[0]) for tid in range(4)]
+    check('cec signal free time: the start bit follows 7 bit periods (16.8 ms) of high line, on all four threads',
+          all(f >= FREE7 for f in free), 'line high %s ms before each start bit' % [round(f / MS, 2) for f in free])
     chip, b, dev, res, n = cec_run(9, 0)
     check('cec no follower: reports not acknowledged, stops after the header', res == 1 and len(dev.blocks) >= 1,
           f'res={res}, blocks={dev.blocks}')
+
+    # A NACK in the middle of a frame: the follower refuses the frame's second block. The third, with EOM, must
+    # leave MIN unsent, and the next frame must go out whole, after the signal free time.
+    a = [0x14 << 8 | 0x40, 0x36 << 8 | 0x40, 0x55 << 8 | 0xC0]
+    b2 = [0x14 << 8 | 0x40, 0x83 << 8 | 0xC0]
+    chip, b, nodes, ans, queue, n = cec_frames([a, b2], refuse={(0, 1)})
+    want = [[(0x14, 0, 0), (0x36, 0, 1)], [(0x14, 0, 0), (0x83, 1, 0)]]
+    for tid in range(4):
+        nd = nodes[tid]
+        fr = [f['blocks'] for f in nd.frames]
+        gap = nd.frames[1]['start'] - nd.frames[0]['end'] if len(nd.frames) == 2 and nd.frames[0]['end'] else None
+        ok = fr == want and ans[tid] == [1, 0] and not nd.errors and not queue[tid] and not chip.full[tid] \
+            and chip.t[tid].latecount == 0 and b.chip_high_on_od == 0
+        check(f'cec block refused mid-frame, thread={tid}: answer 1, the frame\'s last block taken unsent, '
+              'then the next frame whole and acknowledged', ok,
+              f'frames {fr}, answers {ans[tid]}, errors {nd.errors[:2]}, late {chip.t[tid].latecount}')
+        check(f'cec signal free time, thread={tid}: 7 bit periods of high line before both start bits, and 7 '
+              'after the end of the refused frame', gap is not None and gap >= FREE7
+              and all(f['free'] >= FREE7 for f in nd.frames),
+              'line high %s ms; %s ms after the first frame' % ([round(f['free'] / MS, 2) for f in nd.frames],
+                                                                 gap and round(gap / MS, 2)))
+
+    # Broadcast (destination 15): HDMI CEC 1.4 inverts the ACK bit, and a follower pulls the slot low to reject.
+    # Two followers, at 4 and 5, on each line. First a frame both accept, then one that 5 rejects in its second
+    # block, whose last block must leave MIN unsent, then a direct frame, which 4 acknowledges by pulling low.
+    bc = [0x1F << 8 | 0x40, 0x36 << 8 | 0xC0]
+    chip, b, nodes, ans, queue, n = cec_frames([bc], more=[(5, ())])
+    for tid in range(4):
+        nd = nodes[tid]
+        fr = [f['blocks'] for f in nd.frames]
+        ok = fr == [[(0x1F, 0, 1), (0x36, 1, 1)]] and ans[tid] == [0] and not nd.errors and not chip.full[tid] \
+            and all(f['free'] >= FREE7 for f in nd.frames) and chip.t[tid].latecount == 0 and b.chip_high_on_od == 0
+        check(f'cec broadcast that every follower accepts (slots left high), thread={tid}: answer 0, the frame whole',
+              ok, f'frames {fr}, answers {ans[tid]}, errors {nd.errors[:2]}, late {chip.t[tid].latecount}')
+    a = [0x1F << 8 | 0x40, 0x36 << 8 | 0x40, 0x55 << 8 | 0xC0]
+    chip, b, nodes, ans, queue, n = cec_frames([a, [0x14 << 8 | 0x40, 0x83 << 8 | 0xC0]], more=[(5, {(0, 1)})])
+    for tid in range(4):
+        nd = nodes[tid]
+        fr = [f['blocks'] for f in nd.frames]
+        ok = fr == [[(0x1F, 0, 1), (0x36, 0, 0)], [(0x14, 0, 0), (0x83, 1, 0)]] and ans[tid] == [1, 0] \
+            and not nd.errors and not queue[tid] and not chip.full[tid] and all(f['free'] >= FREE7 for f in nd.frames) \
+            and chip.t[tid].latecount == 0 and b.chip_high_on_od == 0
+        check(f'cec broadcast that a follower rejects in its second block, thread={tid}: answer 1, the last block '
+              'taken unsent; then a direct frame whole', ok,
+              f'frames {fr}, answers {ans[tid]}, errors {nd.errors[:2]}, late {chip.t[tid].latecount}')
+
+    # Another initiator's frame (from 3 to 5, nobody acknowledges) starts 5 ms into the program's count: the
+    # program's start bit must follow 7 bit periods of high line after it, and 5 after its end (CEC 9.1).
+    other = (5 * MS, [(0x35, 1)])
+    chip, b, nodes, ans, queue, n = cec_frames([[0x14 << 8 | 0x40, 0x36 << 8 | 0xC0]], other=other)
+    for tid in range(4):
+        nd = nodes[tid]
+        fr = [f['blocks'] for f in nd.frames]
+        ok = fr == [[(0x35, 1, 1)], [(0x14, 0, 0), (0x36, 1, 0)]] and ans[tid] == [0] and not nd.errors \
+            and chip.t[tid].latecount == 0 and b.chip_high_on_od == 0
+        mine = nd.frames[1] if len(nd.frames) == 2 and nd.frames[0]['end'] else None
+        after = mine and mine['start'] - nd.frames[0]['end']
+        check(f'cec another initiator\'s frame during the count, thread={tid}: the program waits it out, then its '
+              'frame goes out whole', ok and mine and mine['free'] >= FREE7 and after >= FREE5,
+              f'frames {fr}, answers {ans[tid]}, errors {nd.errors[:2]}, line high '
+              f'{mine and round(mine["free"] / MS, 2)} ms, {mine and round(after / MS, 2)} ms after the other frame')
 
 
 class Wire:
@@ -798,7 +1006,9 @@ def run(cfg, ops, seed=1):
     res = []
     for op in ops:
         for w in op:
-            while not chip.post(0, w):
+            for _ in range(60000):          # a program that no longer takes words: the op gets no replies
+                if chip.post(0, w):
+                    break
                 chip.cycle(env)
         got = []
         for _ in range(60000):
@@ -830,6 +1040,21 @@ def check_target(log):
         check(f'{name}: write, random read of it, random read of a stored byte, wrong address NACK',
               ok and not any(late) and env.highs == 0, (res, late))
         check(f'{name}: bus intervals inside UM10204', all(t[k] >= v for k, v in limits.items()), t)
+        chip, env, res = run(cfg, [BAD, W, R])
+        ok = res[0][:1] == [1] and res[1][:1] == [0] and res[2] == [0, 0x5A] and chip.mem(0x110) == 0x5A \
+            and not chip.full[0]
+        late = [t.latecount for t in chip.t]
+        check(f'{name}: wrong address, then a write and a random read of it: the NACKed write\'s data word is '
+              'taken, not run', ok and not any(late) and env.highs == 0, (res, late))
+
+
+def test_i2c_words():
+    LOG.group(*P('i2c'), title='I2C controller against bench/i2c_eeprom.py: the host\'s words after a NACK or a '
+              'bus fault')
+    check('wrong address, then a write and a random read: the NACKed write\'s data word is taken, not run',
+          *i2c_eeprom.after_nack('standard/i2c.s'))
+    check('bus fault on a write (SDA held low past the timeout), then a write: the first one\'s data word is taken',
+          *i2c_eeprom.after_fault('standard/i2c.s'))
 
 
 def main(log):
@@ -847,3 +1072,4 @@ def main(log):
     test_jtag()
     test_cec()
     check_target(log)
+    test_i2c_words()

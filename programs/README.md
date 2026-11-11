@@ -8,7 +8,7 @@ them on the simulator in [`sim/`](../sim). Python 3, standard library only.
 From the repository root:
 
 ```
-python3 programs/check.py            # every bench: about two minutes on one laptop core
+python3 programs/check.py            # every bench: about two minutes on one core
 python3 programs/check.py can usb    # only the benches whose names contain one of the words
 ```
 
@@ -73,13 +73,13 @@ push-pull line on an open-drain bus).
 | `standard/uart_tx.s` | UART 8N1 transmit | 434, 5208, 13 and 12 cycles per bit on four threads, every edge on the bit grid |
 | `standard/uart_rx.s` | UART 8N1 receive | 434 and 50 cycles per bit on four threads; bytes read correctly when data is good only 0 to 2 cycles either side of mid-bit, at 8 start phases; glitch rejected; framing error flagged |
 | `standard/spi.s` | SPI controller | All four modes at half periods 25, 10 and 9, each on every thread and alignment |
-| `standard/i2c.s` | I2C controller, read and write | Against `standard/i2c_target.s` on another thread at 100 and 400 kHz; in a 512-word image with three other programs, matching its solo run |
+| `standard/i2c.s` | I2C controller, read and write | Against `standard/i2c_target.s` on another thread at 100 and 400 kHz, also with a wrong address first; against an EEPROM model, a write and a read after a wrong address and after a bus fault, with no word left in MIN; in a 512-word image with three other programs, matching its solo run |
 | `standard/i2c_write.s` | I2C controller, write only | 100 and 400 kHz on four threads with UM10204 intervals; stretching at four points; NACK on address and data; stretch timeout reported |
 | `standard/i2c_target.s` | I2C target, 24C02 style | Against `standard/i2c.s` on another thread: write, random reads, wrong address, UM10204 intervals at 100 and 400 kHz |
 | `standard/ws2812.s` | WS2812 | One byte on four threads: T0H 200 to 500 ns, T1H 550 to 850 ns, 62 cycles per bit |
 | `standard/onewire.s` | 1-Wire controller | Reset of 480 us, presence and a written byte on four threads; no device |
 | `standard/jtag.s` | JTAG controller | IDCODE, IR load and a BYPASS loop against a TAP model at half periods 25 and 16 on four threads |
-| `standard/cec.s` | HDMI CEC initiator | A two-block frame acknowledged with every bit window checked, on all four threads at once, each on its own pin; no follower reported |
+| `standard/cec.s` | HDMI CEC initiator | A two-block frame acknowledged with every bit window checked, on all four threads at once, each on its own pin; no follower reported; a block refused mid-frame, then the frame's last block taken unsent and the next frame whole; a broadcast that every follower accepts, and one that a follower rejects mid-frame; another initiator's frame waited out; 7 bit periods of free line before every start bit |
 | `standard/crc16.s` | CRC-16/CCITT-FALSE | Check value of "123456789" |
 | `standard/crc8.s` | CRC-8/MAXIM | Check value of "123456789" |
 | `standard/crc32.s` | CRC-32 | Check value of "123456789" |
@@ -89,7 +89,7 @@ push-pull line on an open-drain bus).
 | `standard/memstress.s` | Memory load | A thread hammering `ld` and `st` changes nothing in the UART transmitter's pad trace |
 | `trimmed/uart_tx.s` | UART 8N1 transmit | 434 and 13 cycles per bit; with the other two and `standard/spi.s` in one 128-word image, matching its solo run |
 | `trimmed/uart_rx.s` | UART 8N1 receive | 434 and 50 cycles per bit; in the 128-word image |
-| `trimmed/i2c.s` | I2C controller, read and write | Against an EEPROM model: write, random reads, wrong address, data NACK, stretching, SDA stuck, SCL stuck at STOP, UM10204 intervals at 100 and 400 kHz; in the 128-word image |
+| `trimmed/i2c.s` | I2C controller, read and write | Against an EEPROM model: write, random reads, wrong address, data NACK, stretching, SDA stuck, SCL stuck at STOP, a write and a read after a wrong address and after a bus fault, UM10204 intervals at 100 and 400 kHz; in the 128-word image |
 | `extra/spi_target.s` | SPI target, mode 0 | Half periods 10, 25 and 250 at 12 start phases: bytes received, and MISO valid at every rising edge |
 | `extra/parallel.s` | 8-bit parallel capture | IEEE 1284 minimum timing at 12 phases; data held 0 cycles after the strobe; a byte every 28 cycles |
 | `extra/swd.s` | SWD, read of DPIDR | Line reset and request as ADIv5 frames them; ACK OK, ACK WAIT, bad read parity; no contention at the turnarounds |
@@ -109,4 +109,4 @@ push-pull line on an open-drain bus).
 | `advanced/usb_tx.s` | USB low-speed transmit | Handshake, data and token packets decoded with NRZI, stuffing and EOP; every thread and alignment; every edge on the 33-cycle grid |
 | `advanced/usb_rx.s` | USB low-speed receive | Random packets, alignments, D+ to D- skew up to 160 ns, rate error up to 1.5%, jitter up to 60 ns, 2-bit gaps |
 | `advanced/usb_dev.s` | USB low-speed device link | SETUP and DATA0 with CRC-16, ACK, NAK, IN with DATA1, address filter, bad CRC, turnaround inside 6.5 bit times |
-| `advanced/can.s` | CAN 2.0A node | Receive with stuffing and CRC-15, ACK in its slot, phases, sender 2% off, transceiver delay, CRC and stuff errors; transmit; arbitration won and lost; each direction alone on 128 words |
+| `advanced/can.s` | CAN 2.0A node | Receive with stuffing and CRC-15, a stuff bit after the CRC sequence, ACK in its slot, phases, sender 2% off, transceiver delay, CRC and stuff errors; transmit; arbitration won and lost; each direction alone on 128 words |

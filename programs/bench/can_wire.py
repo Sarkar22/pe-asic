@@ -92,6 +92,8 @@ def walk(w, f, bit, sp, falls, hi):
                 return dict(t=f, id=None, dlc=None, data=[], crc_ok=False, ack=None, eof_ok=False, errs=errs, end=int(t), stuffbits=stuffs)
             stuffs += 1
             last, run = v, 1
+            if need and len(dest) == need:      # the stuff bit after the CRC sequence's last bit
+                break
             continue
         run = run + 1 if v == last else 1
         last = v
@@ -99,8 +101,8 @@ def walk(w, f, bit, sp, falls, hi):
         if len(dest) == 19:
             dlc = sum(b << (3 - k) for k, b in enumerate(dest[15:19]))
             need = 19 + 8 * min(dlc, 8) + 15
-        if need and len(dest) == need:
-            break
+        if need and len(dest) == need and run < 5:  # the CRC sequence is stuffed too: five equal bits at its end
+            break                                   # are followed by a stuff bit (Bosch CAN 2.0 part A, 5)
     ident = sum(b << (10 - k) for k, b in enumerate(dest[1:12]))
     data = [sum(b << (7 - k) for k, b in enumerate(dest[19 + 8 * j:27 + 8 * j])) for j in range(min(dlc, 8))]
     crc = sum(b << (14 - k) for k, b in enumerate(dest[-15:]))

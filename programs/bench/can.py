@@ -217,7 +217,7 @@ def main(log):
     log.group('advanced/can.s', title='CAN node')
     for name, v, want in anchors()[2:]:
         log.check('reference ' + name, v == want, hex(v))
-    frames = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0, 0, 0, 0, 0, 0, 0, 0]), (0x7FF, [0xFF] * 8), (0x2A5, [])]
+    frames = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0, 0, 0, 0, 0, 0, 0, 0]), (0x7EF, [0xFF] * 8), (0x2A5, [])]
     r, img, w, sched = rx_case(frames)
     log.line('INFO  can is %d words in all: sampler %d, decoder %d, transmitter %d' % (img.size, img.labels['dec'] - img.labels['samp'], img.labels['tx'] - img.labels['dec'], img.size - img.labels['tx'] + 0))
     rep = parse_reports(w)
@@ -272,7 +272,7 @@ def main(log):
     log.check('RX six equal bits: stuff error reported, no ACK', 0x102 in [x for _, x in got], [hex(x) for _, x in got][-3:])
 
     log.info('transmit')
-    cases = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), (0x7FF, [0xFF] * 8), (0x2A5, []), (0x0F0, [0xF0, 0x0F, 0xFF, 0x00])]
+    cases = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), (0x7EF, [0xFF] * 8), (0x2A5, []), (0x0F0, [0xF0, 0x0F, 0xFF, 0x00])]
     for ident, data in cases:
         r, img, st, got = tx_case(ident, data)
         fr = C.decode(r.wave('ui', RXP), 100, lo=2000)
@@ -326,7 +326,7 @@ def main(log):
         log.check('rival starts first at %d: our SOF lands in the same bit, frame intact' % start, ok, (st, sof, rx_fall, [(f['id'], f['crc_ok']) for f in fr][:2]))
 
     log.info('each direction alone on the 128-word fallback')
-    fx = [(0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x7FF, [0xFF] * 8)]
+    fx = [(0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x7EF, [0xFF] * 8)]
     sc, t = [], 4000
     for i, d in fx:
         bits = C.frame_bits(i, d)

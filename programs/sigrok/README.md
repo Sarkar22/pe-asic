@@ -54,19 +54,24 @@ python3 programs/sigrok/check.py --rtl      # on the RTL through verif/rtl_chip.
    JTAG, SWD, USB, CAN), runs on the same record and must agree with sigrok.
 8. **Under `--rtl`** each scenario runs on the simulator first, then on the RTL, and the RTL's record, every pad and
    board level of every cycle, must equal the simulator's. The decode is of the RTL's record.
+9. **HDMI CEC's signal free time** (HDMI CEC 1.4, CEC 9.1) is measured on the record at every start bit that sigrok
+   finds in a frame of the program's: the line must have been high for 7 bit periods (16.8 ms) before it falls,
+   and it must fall 7 bit periods after the end of the program's previous frame, or 5 after another initiator's.
+   A frame ends one 2.4 ms bit period after the fall of its last ACK bit, where sigrok puts its last ACK annotation.
 
 A run where sigrok and the stimulus differ in a way this README documents (below) is reported on a `DIFF` line
 with its VCD file, and does not fail. Any other difference fails.
 
 ## Results
 
-One run with `--rtl`, on the RTL of `src/` at commit 144e3ef: **284 checks, 284 PASS**. 674 scenario runs (627 with
-sigrok, 36 of the CRC programs, 11 teeth) and 716 decodes by sigrok, one VCD file each (a run may decode several
-buses, or one window per packet). Of the 705 decodes of scenarios, 668 are as the stimulus wants and 37 are known
-differences, listed below, on the simulator and on the RTL alike; the other 11 are the teeth, all caught. In all 674
-runs the RTL's record equals the simulator's: 122,441 changes over 49.4 million cycles, every pad and board level of
-every cycle. The simulator pass alone is 171 checks in 160 s; the `--rtl` run, which runs every scenario on both,
-takes 311 s, on one core.
+One run with `--rtl`, on the RTL of `src/` at commit 0d6769e: **291 checks, 291 PASS**. 684 scenario runs (637 with
+sigrok, 36 of the CRC programs, 11 teeth) and 738 decodes by sigrok, one VCD file each (a run may decode several
+buses, or one window per packet). Of the 727 decodes of scenarios, 705 are as the stimulus wants and 22 are known
+differences, listed below, on the simulator and on the RTL alike; the other 11 are the teeth, all caught. In all 684
+runs the RTL's record equals the simulator's, every pad and board level of every cycle: 124,281 changes over 74.8
+million cycles in the runs with sigrok alone. The simulator pass alone is 175 checks in 164 s; the `--rtl` run, which
+runs every scenario on both, takes 648 s, on one core. The CEC runs take 388 s of that: a CEC bit is 2.4 ms,
+120,000 cycles.
 
 Per program: a run of an image with several programs counts for each program of its group, and each decode for the
 program whose bus it is (and for a memory load running beside it), so shared runs count more than once. Simulator
@@ -80,30 +85,30 @@ program appears in (bytes, events, frames).
 | `basic/onewire.s` | onewire_link > onewire_network | 24 | 66 items | 24 of 24 | 24 of 24 | 13 s |
 | `basic/spi.s` | spi (cpol=0/1 cpha=0/1) | 99 | 804 items | 99 of 99 | 99 of 99 | 7 s |
 | `basic/uart_rx.s` | uart (baudrate=115200/1000000) | 22 | 394 items | 22 of 22 | 22 of 22 | 5 s |
-| `basic/uart_tx.s` | uart (baudrate=115200/1000000/4166667/9600/1526) | 39 | 217 items | 39 of 39 | 39 of 39 | 8 s |
+| `basic/uart_tx.s` | uart (baudrate=115200/1000000/4166667/9600/1526) | 39 | 217 items | 39 of 39 | 39 of 39 | 7 s |
 | `basic/ws2812.s` | rgb_led_ws281x | 10 | 850 items | 10 of 10 | 10 of 10 | 2 s |
-| `standard/cec.s` | cec | 2 | 30 frames | 5 of 5 | 5 of 5 | 52 s |
+| `standard/cec.s` | cec | 6 | 183 frames | 21 of 21 | 21 of 21 | 388 s |
 | `standard/crc16.s` | no decoder: binascii.crc_hqx | 16 | - | 16 of 16 | 16 of 16 | 0 s |
 | `standard/crc32.s` | no decoder: zlib.crc32 | 16 | - | 16 of 16 | 16 of 16 | 0 s |
 | `standard/crc8.s` | no decoder: catalogue check value 0xA1 | 4 | - | 4 of 4 | 4 of 4 | 0 s |
 | `standard/hdlc_tx.s` | no decoder: libsigrokdecode has no HDLC | 0 | - | - | - | 0 s |
-| `standard/i2c.s` | i2c > eeprom24xx | 3 | 107 items | 3 of 3 | 3 of 3 | 1 s |
-| `standard/i2c_target.s` | i2c > eeprom24xx | 2 | 86 events | 2 of 2 | 2 of 2 | 0 s |
+| `standard/i2c.s` | i2c > eeprom24xx | 5 | 149 items | 5 of 5 | 5 of 5 | 1 s |
+| `standard/i2c_target.s` | i2c > eeprom24xx | 4 | 128 events | 4 of 4 | 4 of 4 | 1 s |
 | `standard/i2c_write.s` | i2c | 15 | 94 items | 15 of 15 | 15 of 15 | 1 s |
 | `standard/jtag.s` | jtag | 8 | 96 scans | 8 of 8 | 8 of 8 | 0 s |
 | `standard/manch_rx.s` | no decoder: no plain Manchester decoder | 0 | - | - | - | 0 s |
 | `standard/memstress.s` | uart (baudrate=115200) | 1 | 1 bytes | 1 of 1 | 1 of 1 | 0 s |
 | `standard/onewire.s` | onewire_link > onewire_network | 5 | 9 events | 5 of 5 | 5 of 5 | 3 s |
 | `standard/reflex.s` | no decoder: a reaction time, not a protocol | 0 | - | - | - | 0 s |
-| `standard/spi.s` | spi (cpol=0/1 cpha=0/1) | 51 | 108 items | 51 of 51 | 51 of 51 | 2 s |
+| `standard/spi.s` | spi (cpol=0/1 cpha=0/1) | 51 | 108 items | 51 of 51 | 51 of 51 | 1 s |
 | `standard/uart_rx.s` | uart (baudrate=115200/1000000/500000) | 12 | 42 items | 12 of 12 | 12 of 12 | 1 s |
 | `standard/uart_tx.s` | uart (baudrate=115200/9600/4166667/3846154) | 19 | 45 items | 19 of 19 | 19 of 19 | 4 s |
 | `standard/ws2812.s` | rgb_led_ws281x | 4 | 32 bits | 4 of 4 | 4 of 4 | 1 s |
-| `trimmed/i2c.s` | i2c > eeprom24xx | 10 | 200 items | 10 of 10 | 10 of 10 | 4 s |
+| `trimmed/i2c.s` | i2c > eeprom24xx | 12 | 234 items | 12 of 12 | 12 of 12 | 5 s |
 | `trimmed/uart_rx.s` | uart (baudrate=115200/1000000/500000) | 9 | 35 items | 9 of 9 | 9 of 9 | 1 s |
 | `trimmed/uart_tx.s` | uart (baudrate=115200/3846154) | 9 | 34 items | 9 of 9 | 9 of 9 | 1 s |
-| `extra/i2c.s` | i2c > eeprom24xx | 9 | 179 events | 9 of 9 | 9 of 9 | 4 s |
-| `extra/lin.s` | uart (baudrate=22327/19201/16843) > lin | 6 | 180 events | 6 of 6 | 6 of 6 | 43 s |
+| `extra/i2c.s` | i2c > eeprom24xx | 11 | 213 events | 11 of 11 | 11 of 11 | 5 s |
+| `extra/lin.s` | uart (baudrate=22327/19201/16843) > lin | 6 | 180 events | 6 of 6 | 6 of 6 | 42 s |
 | `extra/nec_tx.s` | ir_nec (polarity=active-high cd_freq=38000) | 2 | 10 fields | 2 of 2 | 2 of 2 | 45 s |
 | `extra/parallel.s` | parallel (clock_edge=rising) | 12 | 84 bytes | 12 of 12 | 12 of 12 | 1 s |
 | `extra/spi_target.s` | spi (cpol=0 cpha=0) | 36 | 432 bytes | 36 of 36 | 36 of 36 | 4 s |
@@ -113,7 +118,7 @@ program appears in (bytes, events, frames).
 | `advanced/dmx_tx.s` | dmx512 | 10 | 795 slots | 28 of 28 | 28 of 28 | 14 s |
 | `advanced/i2c_fp.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 1 s |
 | `advanced/i2c_tgt.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 2 s |
-| `advanced/jtag.s` | jtag | 13 | 208 scans | 13 of 13 | 13 of 13 | 1 s |
+| `advanced/jtag.s` | jtag | 13 | 208 scans | 13 of 13 | 13 of 13 | 2 s |
 | `advanced/manch_rx.s` | no decoder: no plain Manchester decoder | 0 | - | - | - | 0 s |
 | `advanced/mdio_phy.s` | mdio | 11 | 55 frames | 11 of 11 | 11 of 11 | 2 s |
 | `advanced/mdio_sta.s` | mdio | 12 | 48 frames | 12 of 12 | 12 of 12 | 2 s |
@@ -148,25 +153,37 @@ All 11 are caught on the simulator and on the RTL, where each broken copy's reco
 edge, which a zero-delay record shows as the new level at the edge, so it decodes as if right (see `spi` below).
 The bench catches that one by the setup time.
 
+## Findings
+
+The checker found three things that the benches had missed. Each is fixed, the benches now check it, and its runs
+here pass plainly.
+
+- `standard/i2c.s`, `extra/i2c.s` and `trimmed/i2c.s`: when the device or register byte of a write was NACKed, the
+  write's data word stayed in MIN and ran as the next transaction: after a write of 0x5A to an absent device,
+  sigrok showed `S, AW:2D, NACK, P`, the data byte sent as a device byte. The programs now take the data word after
+  the bus is released and before the status, after a bus fault too. The benches run a good write and read after a
+  wrong address and after a bus fault (`bench/i2c_eeprom.py`, and the two-thread pair in `bench/standard.py`).
+- `standard/cec.s`: after a block that wasn't acknowledged, the frame's later blocks went out as a frame of their
+  own, and every frame's start bit came one 50 us unit after the line's last activity, with no signal free time.
+  The program now takes the rest of the frame from MIN unsent and answers 1, and starts a frame only after the line
+  has been high for 7 bit periods. `bench/standard.py` checks a block refused in the middle of a frame, another
+  initiator's frame during the count, and the free time before every start bit; so does this checker, on the
+  record. A review found one more: the program read a broadcast's ACK bit like a direct frame's, where HDMI CEC 1.4
+  inverts it (a follower pulls the slot low to reject a broadcast). It now judges each block by the frame's
+  destination; sigrok's cec decoder does the same, and checks a broadcast that every follower accepts and one that
+  a follower rejects in its second block.
+- `bench/can.py` used identifier 0x7FF, which Bosch CAN 2.0 part A, 3.1.1, forbids: its bits ID-10 to ID-4 are all
+  recessive. It now uses 0x7EF, the most recessive legal identifier. That frame's CRC sequence ends in five 0s, so a
+  stuff bit follows it (part A, 5). The chip sends and receives it correctly, and sigrok reads it, but the bench's
+  own decoder in `bench/can_wire.py` stopped at the CRC's last bit and read the stuff bit as the CRC delimiter; it is
+  fixed too.
+
 ## Known differences
 
-The runs that differ (37 decodes: the six 1-Wire corners, 4 I2C, 1 CEC, 3 DMX, 13 JTAG and 10 CAN) are listed on
-`DIFF` lines with their VCD files. The rest of this section is how the scenarios go round the decoders' ways.
-
-**Programs.** These are what sigrok shows the bus doing that the stimulus doesn't ask for. The benches don't decode
-the bus there, or their runs end first.
-
-- `standard/i2c.s`, `extra/i2c.s` and `trimmed/i2c.s`: after the address byte of a write is NACKed, the write's data
-  word stays in MIN and the program runs it as the next transaction. The benches' wrong-address case posts
-  0xB010 and 0x5A00, and the bus then shows `S, AW:2D, NACK, P`: device byte 0x5A, the data. `bench/i2c_eeprom.py`
-  stops 3000 cycles after the last status word, inside that transaction (its STOP count is still 1); the
-  scenario here runs the `standard/` pair 20000 cycles longer, and shows all of it.
-- `standard/cec.s`: after a NACKed block, the rest of the frame stays in MIN and goes out as a new frame, and its
-  start bit begins 16 cycles after the NACKed ACK bit's 2.4 ms. HDMI CEC asks for a signal free time of 3 bit
-  periods before a retransmission, 5 before a new initiator's frame and 7 before the same initiator's next one.
-
-**Bench stimulus.** `bench/can.py` sends and has the chip send identifier 0x7FF. Bosch CAN 2.0 part A, 3.1.1, forbids
-identifiers whose 7 most significant bits are all recessive. sigrok warns, and decodes the frame as sent.
+The runs that differ (22 decodes: the six 1-Wire corners, 3 DMX and 13 JTAG) are listed on `DIFF` lines with their
+VCD files. Each is a place where sigrok 0.5.3 reads the bus differently from the protocol document, and each is
+accepted only in the exact form described below. The rest of this section is how the scenarios go round the
+decoders' ways.
 
 **sigrok 0.5.3's decoders.** Where a decoder reads a bus differently from the protocol document, the scenario
 either goes round it, as listed here, or reports the run as a known difference.
@@ -178,7 +195,10 @@ either goes round it, as listed here, or reports the run as a known difference.
   packet, each from just before its break. It wants a break of more than 88 us and at least one sample of mark
   between slots, where ANSI E1.11 has receivers take a break of 88 us and allows no mark at all. The receive
   scenarios run with a 92 us break (the transmit minimum) and 40 ns of mark (a quarter bit for the sender 2%
-  fast); one run keeps the bench's own timing and is a known difference.
+  fast). One run keeps the bench's own timing, an 88 us break and no mark: sigrok never finds that break, so it
+  decodes nothing in the window. That run is a known difference only if the record's break lasts exactly 88 us and
+  sigrok gives no break, no slot and no error at all in the window; the firmware's slots are checked as in the
+  other runs.
 - `jtag`: it takes a bit on the Exit1-DR to Pause-DR clock, where IEEE 1149.1 shifts nothing, so the scan through
   Pause-DR in `advanced/jtag.s` reads 21 bits for 20.
 - `ps2`: it decodes device-to-host frames only, and reports a frame only at the twelfth clock fall after its start
