@@ -1,0 +1,30 @@
+name: sigrok
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sigrok:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # sigrok-cli 0.7.2 with libsigrokdecode 0.5.3, the decoders the checks were written against
+      - name: Install sigrok-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sigrok-cli
+          sigrok-cli --version
+
+      # The simulator only: the RTL run needs the Verilator models of verif/
+      - name: Decode every program's bus with sigrok
+        run: python3 programs/sigrok/check.py

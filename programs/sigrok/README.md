@@ -25,6 +25,7 @@ python3 programs/sigrok/check.py --rtl      # on the RTL through verif/rtl_chip.
   puts them elsewhere). Open one in PulseView, or run `sigrok-cli -i <file> -P <decoder>` on it.
 - Each check prints one `PASS` or `FAIL` line under a `---` line naming its program or programs, then a table per
   program. The exit status is non-zero if any check fails or a group crashes. `--json FILE` writes the table.
+- [`.github/workflows/sigrok.yaml`](../../.github/workflows/sigrok.yaml) runs the simulator pass on every push.
 
 ## How a run is checked
 
