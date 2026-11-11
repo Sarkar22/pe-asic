@@ -21,3 +21,10 @@ jobs:
       # Python standard library only: nothing to install
       - name: Run every program on the simulator
         run: python3 programs/check.py
+
+      # The document's claims about its own tables, then the three simulators of sim/ on every cycle
+      - name: Check the document's claims about itself
+        run: python3 sim/claims.py
+
+      - name: Compare the three simulators on every cycle
+        run: python3 sim/compare.py --jobs 4

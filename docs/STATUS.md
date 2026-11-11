@@ -7,7 +7,7 @@ Updated 2026-11-11.
 - **Chip:** 8x4 tiles on IHP SG13CMOS5L, with the March shuttle's flow, since 2026-11-06 ([DECISIONS.md](DECISIONS.md)).
 - **Core RTL:** complete for the published instruction set, in `src/`. Four threads, the pin layer with bypass and open drain, the SPI host link, and one 512x16 SRAM for code and data.
 - **Shift units:** one per thread, in `src/pe_shift.sv` (section 5.9): sending and receiving with their own bit timing, CRC up to 32 bits, bit stuffing, USB's end of packet and a Manchester decoder, for low-speed USB and 10 Mbit Ethernet at 50 MHz. The simulator in `sim/` models them.
-- **Specification:** [ISA.md](ISA.md), sections 1 to 11. Changes until the hardware freezes are listed in [DECISIONS.md](DECISIONS.md).
+- **Specification:** [ISA.md](ISA.md), sections 1 to 11. Changes until the hardware freezes are listed in [DECISIONS.md](DECISIONS.md). Three simulators of it are in [`sim/`](../sim/README.md), one compiled from its code blocks and table.
 - **Programs:** 47 programs for 17 protocols in [`programs/`](../programs/README.md), each checked on the simulator in `sim/`.
 - **No person has read the RTL yet.** [AI_USE.md](AI_USE.md) says what was checked by machine.
 
@@ -41,6 +41,8 @@ The last build without the shift units (online build of `913813a`) had 10,645 ce
 | `test/`: cocotb at the pins, over the real SPI link | 32 pass, 1 skipped (a gate-level-only test) on Icarus 12.0 and 13.0, with nine tests of the shift units |
 | Gate level, on the hardened netlist with the shift units and the RTL beside it, pin by pin | 32 pass, 1 skipped (the RTL-only test), on Icarus 13.0 |
 | `programs/check.py`: every program on the simulator | 487 checks pass |
+| `sim/compare.py`: the three simulators of `sim/`, one compiled from ISA.md's code blocks and table, side by side on every cycle | Every program three ways and 300 random images: 441 runs, 2,928,000 cycles, 0 differ. Four changes planted in a copy of the document each make the simulator that follows them stand apart |
+| `sim/claims.py`: statements ISA.md makes about its own tables and examples | 226 pass |
 | `programs/sigrok/`: each program's bus as a logic analyzer on the board would see it, decoded by sigrok's protocol decoders, which other people wrote from the protocol documents | 38 of 47 programs decoded. 175 checks pass on the simulator and 291 on the RTL, whose pads and board levels equal the simulator's on every cycle. 11 planted bugs caught. It found two firmware bugs, now fixed: in the I2C controller and the CEC initiator. See [programs/sigrok/README.md](../programs/sigrok/README.md) |
 | `verif/lockstep.py`: the RTL against `sim/sim.py` every cycle, the whole chip, with host commands through the real command block and, in one mode, through the real SPI block at the pads | 8,151 images (52 M cycles) and 2,708 scripted corner cases, 0 differ. Planted bugs: 31 of 31 in the shift units' wiring, 10 of 10 in host replies and memory, 6 of 8 in the link, 79 of 80 from the core's earlier list; the 3 missed are equivalent within section 9.1. See [COVERAGE.md](COVERAGE.md) |
 | `verif/coverage.sh`: Verilator line, branch and toggle coverage of `src/` under the lockstep and every program bench on the RTL, and functional coverage against [ISA.md](ISA.md) | All 487 program-bench checks pass on the RTL. Line points 309 of 310, branch 550 of 578, toggle 98.4%; no point that wasn't hit can be. Functional points 844 of 852; the 8 left are state changes section 5.9 can't make. See [COVERAGE.md](COVERAGE.md) |
