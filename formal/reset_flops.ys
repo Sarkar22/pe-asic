@@ -1,0 +1,5 @@
+# Writes the chip as read_chip.ys reads it, after proc, for gen_reset.py.
+script read_chip.ys
+hierarchy -top tt_um_sarkar22_pe
+proc
+write_json chip.json

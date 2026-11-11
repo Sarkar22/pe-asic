@@ -1,0 +1,2 @@
+# Reads one shift unit for a proof, with slang as the flow reads it.
+read_slang --top pe_shift pe_shift.sv

@@ -1,0 +1,48 @@
+# Covers that need long traces, on the reduced model of covers_deep.sv.
+[tasks]
+cover
+
+[options]
+mode cover
+depth 28
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+script read_chip.ys
+read_verilog -formal -sv covers_deep.sv
+hierarchy -top covers_deep
+proc
+flatten
+cd covers_deep
+script probes_pins.ys
+script probes_iso.ys
+script probes_reset_pads.ys
+script cut_host.ys
+script cut_cover.ys
+cd ..
+
+[files]
+../src/project.sv
+../src/pe_pkg.sv
+../src/pe_decode.sv
+../src/pe_core.sv
+../src/pe_thread.sv
+../src/pe_exec.sv
+../src/pe_regfile.sv
+../src/pe_mailbox.sv
+../src/pe_pins.sv
+../src/pe_shift.sv
+../src/pe_mem.sv
+../src/pe_host.sv
+../src/pe_spi.sv
+../verif/cells_rtl.v
+sram_free.v
+read_chip.ys
+probes_pins.ys
+probes_iso.ys
+probes_reset_pads.ys
+cut_host.ys
+cut_cover.ys
+covers_deep.sv

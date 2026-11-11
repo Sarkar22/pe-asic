@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""A stand-in for awk, enough for eqy's sby strategy, which reads a status word with awk '{print $1}' <file>.
+run.sh puts it on PATH only when no awk is found.
+SPDX-License-Identifier: Apache-2.0
+"""
+import sys
+
+if len(sys.argv) < 2 or sys.argv[1].replace(" ", "") != "{print$1}":
+    sys.exit("awk stand-in: only '{print $1}' is supported")
+for name in sys.argv[2:] or ["-"]:
+    for line in (sys.stdin if name == "-" else open(name)):
+        fields = line.split()
+        print(fields[0] if fields else "")

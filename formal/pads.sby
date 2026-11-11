@@ -1,0 +1,49 @@
+# Section 5.2's pad equations in every state: open drain can't drive high, bypass is immediate.
+[tasks]
+prove
+cover
+bmc
+
+[options]
+prove: mode prove
+prove: depth 1
+cover: mode cover
+cover: depth 15
+bmc: mode bmc
+bmc: depth 25
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+script read_chip.ys
+read_verilog -formal -sv pads.sv
+hierarchy -top pads
+proc
+flatten
+cd pads
+script probes_pins.ys
+cover: script cut_host.ys
+bmc: script cut_host.ys
+cd ..
+
+[files]
+../src/project.sv
+../src/pe_pkg.sv
+../src/pe_decode.sv
+../src/pe_core.sv
+../src/pe_thread.sv
+../src/pe_exec.sv
+../src/pe_regfile.sv
+../src/pe_mailbox.sv
+../src/pe_pins.sv
+../src/pe_shift.sv
+../src/pe_mem.sv
+../src/pe_host.sv
+../src/pe_spi.sv
+../verif/cells_rtl.v
+sram_free.v
+read_chip.ys
+probes_pins.ys
+cut_host.ys
+pads.sv

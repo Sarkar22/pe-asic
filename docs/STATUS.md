@@ -1,6 +1,6 @@
 # Status
 
-Updated 2026-11-10.
+Updated 2026-11-11.
 
 ## Where the design is
 
@@ -36,6 +36,8 @@ The flow now stops the build on a setup or hold violation in any of the three co
 | `test/`: cocotb at the pins, over the real SPI link | 32 pass, 1 skipped (an RTL-only test) on Icarus 12.0 and 13.0, with nine tests of the shift units |
 | Gate level, on the hardened 8x4 netlist with the RTL beside it, pin by pin | 23 pass, 1 skipped |
 | `programs/check.py`: every program on the simulator | 458 checks pass |
+| `formal/`: SymbiYosys proofs on the RTL, read with slang as the flow reads it | Proved for every state reachable from reset, by k-induction: an open-drain pin can't drive high; all 24 pads follow section 5.2's equations; a bypass lane has no flop; thread pin isolation, 114 rules; each shift unit's timing, 10 checks for every TPER, TFRAC and TAIL; every flop's reset value; no pad drives until a program asks. A cover reaches each property's trigger, and 14 planted bugs are caught. See [formal/README.md](../formal/README.md) |
+| `formal/chip.eqy`: the synthesized netlist against the RTL | Partly proved: 90 of 109 pieces, among them every output pin but uo3. The pieces holding the units, the threads and the pin flops don't close yet |
 | TT precheck: 10 checks, among them KLayout DRC, the boundary and the Verilog syntax | pass |
 | `scripts/setup.sh` on GitHub's ubuntu-24.04 runner, which already has make, git, curl and Python with venv: the pinned tools, then the program checks and the RTL tests | pass: 5 min 40 s, 1.45 GB of disk (venv 463 MB, PDK 982 MB, `tt/` 9.4 MB) |
 | Local build of the same design with the TT flow, after `scripts/setup.sh --harden`, on a 22-thread laptop | `metrics.json` identical to the online build's, all 196 values; 16 min, 3.4 GB of memory; gate level on its netlist 23 pass, 1 skipped |
@@ -48,6 +50,7 @@ The pin-level tests catch 50 of 81 bugs planted in the RTL to test them. The oth
 - The flow reports 101 max-fanout warnings against a limit of 8: 98 on clock buffers that drive 9 to 16 flops, and 3 on buffers it inserted itself, with 9 to 12 loads. It reports no max-capacitance or max-slew warnings in any corner. The last 6x4 build had 3 max-capacitance warnings on the SRAM's `A_DOUT[0..2]` and 15 max-slew warnings in the slow corner; the SRAM's LEF and timing files did not change, so those went with the new layout. The template's config doesn't enforce slew, capacitance or fanout. Before the next milestone the slew and capacitance checks get enforced, and the fanout warnings get fixed or explained.
 - No SRAM of this kind is known to us to have been built on this process yet. The instruction set keeps a 128-word option for a latch array, which isn't built.
 - The CAN bench can't see a wrong sample point: its transceiver model's longest loop delay is 22 cycles.
+- The equivalence check proves only part of the synthesized netlist equal to the RTL ([formal/README.md](../formal/README.md)). Gate-level simulation checks the rest.
 - The specification has not been read by an outside person yet.
 
 ## Dates

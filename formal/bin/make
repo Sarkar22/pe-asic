@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""A stand-in for make, enough for the strategies.mk that eqy writes, for images that have no make.
+
+run.sh puts it on PATH only when no make is found. It builds each target that 'all' depends on, in parallel
+with -j, each after its own prerequisites (a later strategy of a partition waits for the earlier one), with
+make's $@, $^, $< and $$, and recipe lines joined at a trailing backslash. Then it prints eqy's summary lines
+from summary_targets.list. Usage, as eqy calls it: make [-k] [-jN] -C <workdir> -f strategies.mk
+SPDX-License-Identifier: Apache-2.0
+"""
+import concurrent.futures
+import os
+import re
+import subprocess
+import sys
+import threading
+
+jobs, workdir, mkfile, args = 1, ".", "Makefile", sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
+    if a.startswith("-j"):
+        jobs = int(a[2:]) if a[2:] else 8
+    elif a == "-C":
+        workdir = args[i + 1]; i += 1
+    elif a == "-f":
+        mkfile = args[i + 1]; i += 1
+    elif a != "-k":
+        sys.exit(f"make stand-in: unsupported argument {a}")
+    i += 1
+os.chdir(workdir)
+
+rules, target, lines = {}, None, open(mkfile).read().split("\n")
+for line in lines:
+    if line.startswith("\t"):
+        if target is not None:
+            recipe = rules[target][1]
+            if recipe and recipe[-1].endswith("\\"):
+                recipe[-1] = recipe[-1][:-1] + "\n" + line[1:]
+            else:
+                recipe.append(line[1:])
+        continue
+    m = re.match(r"^([^:=\s][^:=]*):(?!=)\s*(.*)$", line)
+    target = None
+    if m and m.group(1) not in (".PHONY", ".DEFAULT_GOAL"):
+        target = m.group(1).strip()
+        rules[target] = (m.group(2).split(), [])
+
+done, lock = {}, threading.Lock()
+
+def build(t):
+    with lock:
+        if t in done:
+            return done[t]
+    deps = rules[t][0] if t in rules else []
+    for d in deps:
+        if d in rules:
+            build(d)
+    rc = 0
+    for cmd in (rules[t][1] if t in rules else []):
+        cmd = cmd.lstrip("@").replace("$@", t).replace("$^", " ".join(deps)).replace("$<", deps[0] if deps else "")
+        cmd = cmd.replace("$$", "$")
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        sys.stdout.write(out.stdout)
+        sys.stdout.flush()
+        if out.returncode != 0:
+            rc = 1
+            break
+    with lock:
+        done[t] = rc
+    return rc
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    list(pool.map(build, [d for d in rules["all"][0] if d in rules]))
+
+ok = True
+for f in open("summary_targets.list").read().split():
+    p = f[len("strategies/"):].rsplit("/", 2)[0]
+    if os.path.exists(f) and "PASS" in open(f).read():
+        print(f"* Successfully proved equivalence of partition {p}")
+    else:
+        print(f"* Failed to prove equivalence of partition {p}")
+        ok = False
+if ok:
+    print("* Successfully proved designs equivalent")
+sys.exit(0)

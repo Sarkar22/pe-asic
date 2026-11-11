@@ -1,0 +1,32 @@
+# The shift unit's exact timing (section 5.9), on one unit with free inputs. The checks are in shift_timing.sv.
+[tasks]
+prove
+cover
+bmc
+
+[options]
+prove: mode prove
+prove: depth 4
+cover: mode cover
+cover: depth 30
+bmc: mode bmc
+bmc: depth 20
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+script read_shift.ys
+read_verilog -formal -sv shift_timing.sv
+hierarchy -top shift_timing
+proc
+flatten
+cd shift_timing
+script probes_shift.ys
+cd ..
+
+[files]
+../src/pe_shift.sv
+read_shift.ys
+probes_shift.ys
+shift_timing.sv

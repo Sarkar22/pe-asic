@@ -1,0 +1,83 @@
+# Equivalence of the pre-layout gate netlist (the flow's synthesis step, with the IHP SG13CMOS5L cells) against
+# the RTL as slang reads it, as the flow reads it. run.sh fills in @ROOT@ (this repository), @PDK_ROOT@ and
+# @NETLIST@ (FORMAL_NETLIST). The SRAM macro is a black box on both sides, so its inputs must match and its
+# outputs are shared. So are the 44 SRAM pin buffers, which the RTL instantiates by name (buf_bbox.v). The
+# other cells' functions come from the PDK's liberty.
+#
+# EQY matches nets of the same name on both sides (flop outputs and the RTL names the synthesis kept), cuts
+# the two designs at those nets, and proves each piece in between. The pieces are merged per block below,
+# which keeps the number of proof folders small.
+
+[options]
+splitnets on
+
+[gold]
+read_verilog -sv @ROOT@/verif/sram_blackbox.v
+read_verilog -sv @ROOT@/formal/buf_bbox.v
+read_slang --top tt_um_sarkar22_pe @ROOT@/src/project.sv @ROOT@/src/pe_pkg.sv @ROOT@/src/pe_decode.sv @ROOT@/src/pe_core.sv @ROOT@/src/pe_thread.sv @ROOT@/src/pe_exec.sv @ROOT@/src/pe_regfile.sv @ROOT@/src/pe_mailbox.sv @ROOT@/src/pe_pins.sv @ROOT@/src/pe_shift.sv @ROOT@/src/pe_mem.sv @ROOT@/src/pe_host.sv @ROOT@/src/pe_spi.sv
+hierarchy -top tt_um_sarkar22_pe
+proc
+flatten
+# slang joins each port to its connection with a $buf cell; make those plain connections again.
+techmap -map @ROOT@/formal/unbuf.v t:$buf
+# One net per bit, as in the netlist.
+splitnets
+# The SRAM's clock pin is the chip's clk pin itself on both sides (pe_mem.sv; the netlist's .A_CLK(clk)). A
+# box input driven straight by a chip input makes a piece with no logic, which EQY rejects, so the pin is tied
+# off on both sides.
+cd tt_um_sarkar22_pe
+connect -port core.mem.sram A_CLK 1'0
+cd ..
+
+[gate]
+read_verilog -sv @ROOT@/verif/sram_blackbox.v
+read_verilog -sv @ROOT@/formal/buf_bbox.v
+read_liberty -nooverwrite -ignore_miss_func @PDK_ROOT@/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/lib/sg13cmos5l_stdcell_typ_1p20V_25C.lib
+read_verilog @NETLIST@
+hierarchy -top tt_um_sarkar22_pe
+flatten
+# Flattening the cells names their port wires after the synthesis's own cell names (_24378_.A); those
+# can't match anything in the RTL, so they are made private.
+rename -hide w:_*
+cd tt_um_sarkar22_pe
+connect -port core.mem.sram A_CLK 1'0
+cd ..
+
+[match *]
+# Nets of the same name are matched, but these: the clock's port wires (only the clock pin is matched), and the
+# combinational nets below that the gate side computes again from their inputs instead of reading them. A
+# matched net cuts both sides; where only one side reads it, the cut leaves that side a free value the chip
+# can't have.
+gold-nomatch /.+\.clk/
+gate-nomatch /.+\.clk/
+gold-nomatch core.fetch
+gate-nomatch core.fetch
+gold-nomatch /core\.exec\.tb_next\[[0-9]+\]/
+gate-nomatch /core\.exec\.tb_next\[[0-9]+\]/
+gold-nomatch /core\.decode\.r[ab]\[[0-9]+\]/
+gate-nomatch /core\.decode\.r[ab]\[[0-9]+\]/
+gold-nomatch core.host.rd_here
+gate-nomatch core.host.rd_here
+# The synthesis's FSM pass re-encoded the host's command state cmd_q from binary to one-hot and dropped the
+# reset state's bit, keeping the names: the netlist's cmd_q[1] to cmd_q[10] are one-hot bits, not the RTL's
+# binary bits of the same names. They are not matched, so the host's pieces hold both encodings as state.
+gold-nomatch /core\.host\.cmd_q\[[0-9]+\]/
+gate-nomatch /core\.host\.cmd_q\[[0-9]+\]/
+
+[partition *]
+merge /core\.gen_shift\[0\]\..*/
+merge /core\.gen_shift\[1\]\..*/
+merge /core\.gen_shift\[2\]\..*/
+merge /core\.gen_shift\[3\]\..*/
+merge /core\.gen_thread\[0\]\..*/
+merge /core\.gen_thread\[1\]\..*/
+merge /core\.gen_thread\[2\]\..*/
+merge /core\.gen_thread\[3\]\..*/
+merge /core\.pins\..*/
+merge /core\.host\..*/
+merge /core\.regfile\..*/
+merge /core\.mailbox\..*/
+
+[strategy sat]
+use sat
+depth 5

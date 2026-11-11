@@ -1,0 +1,72 @@
+# Section 8: every flop resets asynchronously and holds its reset value in cycle 0 (reset_flops.sv, generated
+# by gen_reset.py), and no pad drives until a program asks (reset_pads.sv).
+[tasks]
+flops_prove
+flops_cover
+pads_prove
+pads_bmc
+
+[options]
+flops_prove: mode prove
+flops_prove: depth 2
+pads_prove: mode prove
+pads_prove: depth 3
+flops_cover: mode cover
+flops_cover: depth 8
+pads_bmc: mode bmc
+pads_bmc: depth 25
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+script read_chip.ys
+flops_prove: read_verilog -formal -sv reset_flops.sv
+flops_cover: read_verilog -formal -sv reset_flops.sv
+pads_prove: read_verilog -formal -sv reset_pads.sv
+pads_bmc: read_verilog -formal -sv reset_pads.sv
+flops_prove: hierarchy -top reset_flops
+flops_cover: hierarchy -top reset_flops
+pads_prove: hierarchy -top reset_pads
+pads_bmc: hierarchy -top reset_pads
+proc
+flatten
+flops_prove: cd reset_flops
+flops_cover: cd reset_flops
+pads_prove: cd reset_pads
+pads_bmc: cd reset_pads
+flops_prove: script probes_reset.ys
+flops_cover: script probes_reset.ys
+pads_prove: script probes_pins.ys
+pads_prove: script probes_iso.ys
+pads_prove: script probes_reset_pads.ys
+pads_bmc: script probes_pins.ys
+pads_bmc: script probes_iso.ys
+pads_bmc: script probes_reset_pads.ys
+pads_bmc: script cut_host.ys
+cd ..
+
+[files]
+../src/project.sv
+../src/pe_pkg.sv
+../src/pe_decode.sv
+../src/pe_core.sv
+../src/pe_thread.sv
+../src/pe_exec.sv
+../src/pe_regfile.sv
+../src/pe_mailbox.sv
+../src/pe_pins.sv
+../src/pe_shift.sv
+../src/pe_mem.sv
+../src/pe_host.sv
+../src/pe_spi.sv
+../verif/cells_rtl.v
+sram_free.v
+read_chip.ys
+probes_pins.ys
+probes_iso.ys
+probes_reset.ys
+probes_reset_pads.ys
+cut_host.ys
+reset_flops.sv
+reset_pads.sv

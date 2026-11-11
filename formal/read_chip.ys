@@ -1,0 +1,6 @@
+# Reads the chip for a proof: the SRAM with free read data and the buffer cell first, then the RTL with
+# slang, as the flow reads it. slang elaborates the whole hierarchy into one module, tt_um_sarkar22_pe,
+# whose internal names keep the instance path (core.pins.od_q).
+read_verilog -formal sram_free.v
+read_verilog cells_rtl.v
+read_slang --top tt_um_sarkar22_pe project.sv pe_pkg.sv pe_decode.sv pe_core.sv pe_thread.sv pe_exec.sv pe_regfile.sv pe_mailbox.sv pe_pins.sv pe_shift.sv pe_mem.sv pe_host.sv pe_spi.sv

@@ -1,0 +1,31 @@
+# For covers_deep.sv: besides the host (cut_host.ys), the register file's and the mailbox's read data become
+# free, and units 1 to 3 are cut at their outputs, so their logic drops out of the model.
+cutpoint w:dut.core.rf_a w:dut.core.rf_b
+cutpoint w:dut.core.m_data w:dut.core.m_full w:dut.core.full w:dut.core.hm_full w:dut.core.hm_rdata
+cutpoint w:dut.core.gen_shift?1?.shift.la
+cutpoint w:dut.core.gen_shift?1?.shift.lb
+cutpoint w:dut.core.gen_shift?1?.shift.txfull
+cutpoint w:dut.core.gen_shift?1?.shift.rxfull
+cutpoint w:dut.core.gen_shift?1?.shift.rxbuf
+cutpoint w:dut.core.gen_shift?1?.shift.rxbl
+cutpoint w:dut.core.gen_shift?1?.shift.status
+cutpoint w:dut.core.gen_shift?1?.shift.srd_data
+cutpoint w:dut.core.gen_shift?1?.shift.rd_data
+cutpoint w:dut.core.gen_shift?2?.shift.la
+cutpoint w:dut.core.gen_shift?2?.shift.lb
+cutpoint w:dut.core.gen_shift?2?.shift.txfull
+cutpoint w:dut.core.gen_shift?2?.shift.rxfull
+cutpoint w:dut.core.gen_shift?2?.shift.rxbuf
+cutpoint w:dut.core.gen_shift?2?.shift.rxbl
+cutpoint w:dut.core.gen_shift?2?.shift.status
+cutpoint w:dut.core.gen_shift?2?.shift.srd_data
+cutpoint w:dut.core.gen_shift?2?.shift.rd_data
+cutpoint w:dut.core.gen_shift?3?.shift.la
+cutpoint w:dut.core.gen_shift?3?.shift.lb
+cutpoint w:dut.core.gen_shift?3?.shift.txfull
+cutpoint w:dut.core.gen_shift?3?.shift.rxfull
+cutpoint w:dut.core.gen_shift?3?.shift.rxbuf
+cutpoint w:dut.core.gen_shift?3?.shift.rxbl
+cutpoint w:dut.core.gen_shift?3?.shift.status
+cutpoint w:dut.core.gen_shift?3?.shift.srd_data
+cutpoint w:dut.core.gen_shift?3?.shift.rd_data

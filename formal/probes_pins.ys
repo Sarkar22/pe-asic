@@ -1,0 +1,12 @@
+# Connects the probes of a property wrapper to the flops they name, after the wrapper and the chip are
+# flattened into one module. The wrapper's instance of the chip is "dut".
+connect -nomap -nounset -set out_q dut.core.pins.out_q
+connect -nomap -nounset -set oe_q dut.core.pins.oe_q
+connect -nomap -nounset -set od_q dut.core.pins.od_q
+connect -nomap -nounset -set byp_q dut.core.pins.byp_q
+connect -nomap -nounset -set own_q dut.core.pins.own_q
+connect -nomap -nounset -set sel_q dut.core.pins.sel_q
+connect -nomap -nounset -set la dut.core.u_la
+connect -nomap -nounset -set lb dut.core.u_lb
+connect -nomap -nounset -set miso dut.core.miso
+connect -nomap -nounset -set run dut.core.th_run

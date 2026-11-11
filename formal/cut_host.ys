@@ -1,0 +1,7 @@
+# For covers: the host link's commands become free inputs in every cycle, so a cover can start a thread,
+# stop it or abort in any cycle, without shifting a command in over SPI first. Every behaviour of the real
+# host is one of these, so a cover reached here shows its trigger in a model at least as free as the chip.
+cutpoint w:dut.core.h_stop w:dut.core.h_start w:dut.core.h_step w:dut.core.h_setpc w:dut.core.h_abort w:dut.core.h_pc
+cutpoint w:dut.core.host_req w:dut.core.host_write w:dut.core.host_addr w:dut.core.host_wdata
+cutpoint w:dut.core.hm_idx w:dut.core.hm_post w:dut.core.hm_take w:dut.core.hm_wdata
+cutpoint w:dut.core.rd_req w:dut.core.rd_thread w:dut.core.rd_reg w:dut.core.rd_unit

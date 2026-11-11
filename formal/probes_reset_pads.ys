@@ -1,0 +1,1 @@
+connect -nomap -nounset -set valid4 dut.core.valid4_q
