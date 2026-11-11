@@ -1,0 +1,6 @@
+# The probes of tx_rl.sv: flops inside the unit's instance u.
+connect -nomap -nounset -set rl u.tx_rl_q
+connect -nomap -nounset -set b u.tx_b_q
+connect -nomap -nounset -set rv u.tx_rv_q
+connect -nomap -nounset -set stf u.tx_stf_q
+connect -nomap -nounset -set run u.tx_run_q
