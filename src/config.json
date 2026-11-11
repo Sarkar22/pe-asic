@@ -145,6 +145,38 @@
   "//": "buf_1 to bring nets of 9 or 10 loads down to 8 (the flow's default is 10).",
   "MAX_FANOUT_CONSTRAINT": 8,
 
+  "//": "Synthesize with the classic area script. The default, DELAY 4, maps the four shift units about a third",
+  "//": "bigger, mostly ABC buffering for a wire-load model several times heavier than the real wires, and puts",
+  "//": "the chip over its area budget. AREA 0 leaves that buffering to repair, which sees the placed wires.",
+  "SYNTH_STRATEGY": "AREA 0",
+
+  "//": "Repair slew and capacitance to 60% of each limit after placement, not 80%. AREA 0 maps every driver",
+  "//": "at X1, and the placement estimate of a wire's load runs short of the routed one.",
+  "DESIGN_REPAIR_MAX_SLEW_PCT": 40,
+  "DESIGN_REPAIR_MAX_CAP_PCT": 40,
+
+  "//": "Buffer every net whose estimated wire is longer than 300 um. The repair's estimate of a long net runs",
+  "//": "2 to 3.5 times short of the routed load (routes detour, and the estimate has no coupling), so margins",
+  "//": "alone left long nets that fan out to the four shift units over the slew and cap limits. A shorter",
+  "//": "limit puts more repeaters where the core meets the units and makes the detours worse. The resizer warns",
+  "//": "that this is shorter than its delay-optimal spacing; that is expected.",
+  "DESIGN_REPAIR_MAX_WIRE_LENGTH": 300,
+
+  "//": "Derate the global router's layer capacity by 25%, not 30%. Metal3 is the only horizontal signal layer,",
+  "//": "and at 30% the router sent nets crossing between the core and the shift units round on Metal4, three",
+  "//": "to four times their length, which put X1 drivers (many have no larger size) over the slew limit. 20%",
+  "//": "fixed that, but moved vertical wire onto Metal2 and left shorts in the core's pin-dense mux area.",
+  "GRT_ADJUSTMENT": 0.25,
+
+  "//": "Repair again after global routing, with buffering allowed (a wire length limit of 0 only resizes, and",
+  "//": "the drivers that fail have no larger size). This repair measures wires along their global routes: after",
+  "//": "placement repair has split every net longer than 300 um by its estimate, it still finds about 600 nets",
+  "//": "whose routes detour past 300 um, and splits them. With it, no pin comes within 30% of its slew limit.",
+  "RUN_POST_GRT_DESIGN_REPAIR": true,
+  "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": 300,
+  "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 40,
+  "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 40,
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
