@@ -1,8 +1,8 @@
 # ISA v0.1
 
-Draft, 2026-11-05. This instruction set can change until the hardware freezes.
+Draft, 2026-11-11. This instruction set can change until the hardware freezes.
 
-**Status of the evidence.** Where this document says something ran, it ran on Python simulators: two hand-written, and one compiled directly from the instruction table and code blocks of this file. They agree on every cycle compared. Sections 7 and 11.2 list what ran. Treat anything they don't list as not run. The cycle figures in section 9 come from an RTL design, which has only been simulated and synthesized. No real hardware is behind this document. One of the simulators is in `sim/`. The programs of section 11.2 are in `programs/`, with benches that run each of them on that simulator: `python3 programs/check.py`. The RTL is in `src/`, with its tests in `test/`.
+**Status of the evidence.** Where this document says something ran, it ran on Python simulators: two hand-written, and one compiled directly from the instruction table and code blocks of this file. They agree on every cycle compared. Sections 7 and 11.2 list what ran. Treat anything they don't list as not run. The cycle figures in section 9 come from the RTL in `src/`, which has been simulated, synthesized and laid out, but not built. No real hardware is behind this document. One of the simulators is in `sim/`. The programs of section 11.2 are in `programs/`, with benches that run each of them on that simulator: `python3 programs/check.py`. The RTL is in `src/`, with its tests in `test/`.
 
 ## 1. Overview
 

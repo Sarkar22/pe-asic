@@ -13,7 +13,7 @@ Updated 2026-11-11.
 
 ## Chip build
 
-The first build with the shift units, from a local build with the TT flow and this branch's `src/config.json` (8x4 tiles, IHP SG13CMOS5L, LibreLane 3.1.0.dev4, IHP-Open-PDK `89d42ee6`, 20 ns clock):
+The first build with the shift units, from a local build with the TT flow and `src/config.json` (8x4 tiles, IHP SG13CMOS5L, LibreLane 3.1.0.dev4, IHP-Open-PDK `89d42ee6`, 20 ns clock). The online build of `0d6769e` matches it on all 214 values of `metrics.json`:
 
 | Measure | Value |
 |---|---|
@@ -38,7 +38,7 @@ The last build without the shift units (online build of `913813a`) had 10,645 ce
 
 | Check | Result |
 |---|---|
-| `test/`: cocotb at the pins, over the real SPI link | 32 pass, 1 skipped (an RTL-only test) on Icarus 12.0 and 13.0, with nine tests of the shift units |
+| `test/`: cocotb at the pins, over the real SPI link | 32 pass, 1 skipped (a gate-level-only test) on Icarus 12.0 and 13.0, with nine tests of the shift units |
 | Gate level, on the hardened netlist with the shift units and the RTL beside it, pin by pin | 32 pass, 1 skipped (the RTL-only test), on Icarus 13.0 |
 | `programs/check.py`: every program on the simulator | 487 checks pass |
 | `programs/sigrok/`: each program's bus as a logic analyzer on the board would see it, decoded by sigrok's protocol decoders, which other people wrote from the protocol documents | 38 of 47 programs decoded. 175 checks pass on the simulator and 291 on the RTL, whose pads and board levels equal the simulator's on every cycle. 11 planted bugs caught. It found two firmware bugs, now fixed: in the I2C controller and the CEC initiator. See [programs/sigrok/README.md](../programs/sigrok/README.md) |

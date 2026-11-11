@@ -67,7 +67,7 @@ Both chips get the same memory, the same pad inputs every cycle and the same hos
 | `wide` | As `prog`, but every slot is written, each field drawn over its whole range (5.9.3): every CRC width, CINIT, CXOR, CMODE, SMODE and SN, TPER and RPER up to 65535, TFRAC, TAIL, every decoder and option. Pins are any of io0 to io7 in IN, PP or OD, uo pins and bypass lanes. One image in four is reset in mid-run (section 8): `rst_n` goes low for 4 edges on the RTL and is released through its synchroniser, and `sim/sim.py` starts again as a new chip with the RTL's memory, which has no reset |
 | `directed` | Programs in the assembly language of 6.6 for corners chance doesn't reach, one per seed, with no random host traffic: RXIC saturating at 65535 and starting again at an edge (5.9.6); TPER 65535 with a TFRAC carry (5.9.5), stopped by an ABORT in the very cycle that writes the 65,536-cycle symbol, then started again; and CTX moved in the middle of a CRC append (section 10, defined 17) |
 
-And `--corners`, instead of images: 2,500 scripted cases, each on every thread, with host commands landing in the
+And `--corners`, instead of images: 2,708 scripted cases, each on every thread, with host commands landing in the
 cycle the script picks, compared every cycle as above:
 
 | # | Block | Cases | What, and the section it checks |
@@ -82,6 +82,7 @@ cycle the script picks, compared every cycle as above:
 | 8 | `boundary` | 128 | An `edge` and a timed wait with deadlines on both sides of the 32767-cycle limit (3.5; section 10, defined 2) |
 | 9 | `nowstale` | 16 | `now` on a stale D leaves LATE alone (3.5) |
 | 10 | `world` | 1,204 | Every row of 6.3 behind a tick that is still pending: three words of random legal fields, and for the shifts each combination of a pin in and out; a world row must wait for the tick, any other runs at once (3.6; 6.3, the W column and its pin rule for the shifts); and a word with a value its field's type forbids in each such field, which must stop the thread with ILL (section 10) |
+| 11 | `abortpin` | 208 | An ABORT swept over 52 cycles around an `oe8` and a `put8`: a host command acts after step 5 of its cycle, so the ABORT still releases every `uio` pad, and an OD pin's OUT and SHD are 1 after it (9.3, 3.2) |
 
 ### 2.3 Host commands
 
