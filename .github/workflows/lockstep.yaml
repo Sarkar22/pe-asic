@@ -1,0 +1,39 @@
+name: lockstep
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lockstep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Verilator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y verilator
+          verilator --version
+
+      # The stub and pins kinds at depths 128 and 512, as verif/Makefile builds them
+      - name: Build the Verilator models
+        run: make -C verif JOBS=4
+
+      # The RTL against sim/sim.py every cycle; a small share of the runs in docs/COVERAGE.md
+      - name: Lockstep, every generator and host mode
+        run: |
+          python3 verif/lockstep.py --gen chips --images 200 --jobs 4 --first 0
+          python3 verif/lockstep.py --gen prog --images 100 --jobs 4 --first 100000
+          python3 verif/lockstep.py --gen rows --images 200 --jobs 4 --first 200000
+          python3 verif/lockstep.py --gen chips --images 40 --jobs 4 --first 300000 --host pins
+          python3 verif/lockstep.py --gen rows --images 40 --jobs 4 --first 320000 --host pins
+          python3 verif/lockstep.py --corners --jobs 4
