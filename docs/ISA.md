@@ -778,7 +778,7 @@ shadow_sel(p, l):
         SHSEL[p] := l
 ```
 
-`KEEP[k]` is the mask of the bits that the field table's rows define in slot *k*, leaving out any row marked reserved.
+`KEEP[k]` is the mask of the bits that the field table's rows define in slot *k*. The only bit with no row is TXMODE bit 15, which is reserved, so `KEEP[0]` is 0x7FFF and `KEEP[1]` to `KEEP[15]` are 0xFFFF.
 
 #### 5.9.5 Send
 
@@ -1178,9 +1178,11 @@ Stuffing needs SMODE 1 or 2, and the CRC needs CMODE 1 or 2 with CTX 1. Otherwis
 | USB token, CRC-5 | 5 | 0x2800, 0 | 1, 1 | 0x6000, 0 | LSB first | 0xE6E4, 0xE4E4 | 0x19 |
 | HDLC FCS-16 (X.25, IBM-SDLC) | 16 | 0x1021, 0 | 1, 1 | 0xD0F9, 0 | LSB first | 0x56EF, 0x54EF | 0x906E |
 | CAN, CRC-15 | 15 | 0x8B32, 0 | 0, 0 | 0, 0 | MSB first | 0x5A8E, 0x588E | 0x059E |
-| 1-Wire, CRC-8 (MAXIM-DOW) | 8 | 0x3100, 0 | 0, 0 | 0, 0 | LSB first | 0x0287 on an idle send half | 0xA1 |
+| 1-Wire, CRC-8 (MAXIM-DOW) | 8 | 0x3100, 0 | 0, 0 | 0, 0 | LSB first | 0x0287, 0x0087 | 0xA1 |
 
 The CODING values set CMODE 1 and CTX, and the stuffer: ones with N = 6 for USB, ones with N = 5 for HDLC, equal bits with N = 5 for CAN. USB's values also set REOP. Only the receive half reads it, so the send value keeps it set: a receive half that hunts on the same pins during the send then ends its reception of that packet at the EOP (section 11.5). One configuration checks one CRC, so a USB device rewrites CODING, POLYHI and CHKHI between a token and a data packet.
+
+For 1-Wire, the master starts every time slot, read slots included. If its send half makes the slots and its receive half samples them, the register serves the receive half, with the receive value. The send value is for a unit that sends the CRC, as a device does at the end of its ROM code, and for an idle send half used as a CRC engine (below).
 
 **End flags.** Three flags travel with a reception's last word. End flag *k* is bit *k* of the value `srd Rd, end` reads:
 
