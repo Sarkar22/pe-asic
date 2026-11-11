@@ -18,15 +18,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Verilator
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y verilator
-          verilator --version
-
-      # The stub and pins kinds at depths 128 and 512, as verif/Makefile builds them
+      # The stub and pins kinds at depths 128 and 512, as verif/Makefile builds them. Ubuntu 24.04's Verilator
+      # (5.020) can't parse an instance named mailbox, so the models are built in Verilator's own image, at
+      # 5.046, the version the flow's image has.
       - name: Build the Verilator models
-        run: make -C verif JOBS=4
+        run: |
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":"$PWD" -w "$PWD" --entrypoint make \
+            verilator/verilator:v5.046@sha256:8003e282e9ff02eb446083eb5a3c512225a269f0a7b46a7e392c99468e890018 \
+            -C verif JOBS=4
 
       # The RTL against sim/sim.py every cycle; a small share of the runs in docs/COVERAGE.md
       - name: Lockstep, every generator and host mode
