@@ -22,7 +22,7 @@ import report                                           # noqa: E402
 
 # Bench modules in programs/bench/, in the order they run.
 BENCHES = ['words', 'basic', 'standard', 'trimmed', 'extra', 'manchester', 'dmx', 'ps2', 'mdio', 'jtag_chain',
-           'swd_host', 'i2c_target', 'usb_tx', 'usb_rx', 'usb_dev', 'can']
+           'swd_host', 'i2c_target', 'usb_tx', 'usb_rx', 'usb_dev', 'can', 'bypass']
 
 
 def main(argv):

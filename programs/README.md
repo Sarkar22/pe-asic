@@ -1,6 +1,6 @@
 # Programs
 
-The programs of section 11.2 of [`docs/ISA.md`](../docs/ISA.md), 47 files, with the benches that check
+The programs of section 11.2 of [`docs/ISA.md`](../docs/ISA.md), 48 files, with the benches that check
 them on the simulator in [`sim/`](../sim). Python 3, standard library only.
 
 ## Running
@@ -110,3 +110,4 @@ push-pull line on an open-drain bus).
 | `advanced/usb_rx.s` | USB low-speed receive | Random packets, alignments, D+ to D- skew up to 160 ns, rate error up to 1.5%, jitter up to 60 ns, 2-bit gaps |
 | `advanced/usb_dev.s` | USB low-speed device link | SETUP and DATA0 with CRC-16, ACK, NAK, IN with DATA1, address filter, bad CRC, turnaround inside 6.5 bit times |
 | `advanced/can.s` | CAN 2.0A node | Receive with stuffing and CRC-15, a stuff bit after the CRC sequence, ACK in its slot, phases, sender 2% off, transceiver delay, CRC and stuff errors; transmit; arbitration won and lost; each direction alone on 128 words |
+| `advanced/uart_bypass.s` | UART 8N1 pass-through on the bypass lane of `uo4`, one byte replaced in flight | 4 threads x 4 alignments x 4 sender phases at 16 (3.125 Mbaud) and 17 cycles per bit, 2 alignments at 25 and 50, and a few runs at 434, 5208 and 6553: `uo4` equals `ui4` on every cycle except the chosen frame's data bits, which carry the host's byte on that frame's own bit boundaries; the lane switches 3 cycles into the start bit and 9 into the stop bit, with `ui4`, OUT and `uo4` steady 3 cycles either side; a frame rule and a byte rule, no rule, two rules in turn; both lines decoded; 5 broken copies caught |

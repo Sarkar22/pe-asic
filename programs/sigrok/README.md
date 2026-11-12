@@ -65,13 +65,13 @@ with its VCD file, and does not fail. Any other difference fails.
 
 ## Results
 
-One run with `--rtl`, on the RTL of `src/` at commit 0d6769e: **291 checks, 291 PASS**. 684 scenario runs (637 with
-sigrok, 36 of the CRC programs, 11 teeth) and 738 decodes by sigrok, one VCD file each (a run may decode several
-buses, or one window per packet). Of the 727 decodes of scenarios, 705 are as the stimulus wants and 22 are known
-differences, listed below, on the simulator and on the RTL alike; the other 11 are the teeth, all caught. In all 684
-runs the RTL's record equals the simulator's, every pad and board level of every cycle: 124,281 changes over 74.8
-million cycles in the runs with sigrok alone. The simulator pass alone is 175 checks in 164 s; the `--rtl` run, which
-runs every scenario on both, takes 648 s, on one core. The CEC runs take 388 s of that: a CEC bit is 2.4 ms,
+One run with `--rtl`, on the RTL of `src/` at commit 0d6769e: **304 checks, 304 PASS**. 707 scenario runs (659 with
+sigrok, 36 of the CRC programs, 12 teeth) and 783 decodes by sigrok, one VCD file each (a run may decode several
+buses, or one window per packet). Of the 771 decodes of scenarios, 749 are as the stimulus wants and 22 are known
+differences, listed below, on the simulator and on the RTL alike; the other 12 are the teeth, all caught. In all 707
+runs the RTL's record equals the simulator's, every pad and board level of every cycle: 125,171 changes over 75.0
+million cycles in the runs with sigrok alone. The simulator pass alone is 184 checks in 168 s; the `--rtl` run, which
+runs every scenario on both, takes 653 s, on one core. The CEC runs take 390 s of that: a CEC bit is 2.4 ms,
 120,000 cycles.
 
 Per program: a run of an image with several programs counts for each program of its group, and each decode for the
@@ -125,6 +125,7 @@ program appears in (bytes, events, frames).
 | `advanced/mdio_sta.s` | mdio | 12 | 48 frames | 12 of 12 | 12 of 12 | 2 s |
 | `advanced/ps2_dev.s` | ps2 | 15 | 64 frames | 32 of 32 | 32 of 32 | 25 s |
 | `advanced/swd.s` | swd | 16 | 420 events | 16 of 16 | 16 of 16 | 4 s |
+| `advanced/uart_bypass.s` | uart (baudrate=3125000/1000000/115207) | 22 | 276 bytes | 44 of 44 | 44 of 44 | 2 s |
 | `advanced/usb_dev.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 73 packets | 9 of 9 | 9 of 9 | 1 s |
 | `advanced/usb_rx.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 51 packets | 9 of 9 | 9 of 9 | 1 s |
 | `advanced/usb_tx.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 15 | 15 packets | 15 of 15 | 15 of 15 | 1 s |
@@ -148,8 +149,9 @@ over the originals. Each must be caught by sigrok: its payload differs from the 
 | `spi_mode` | `basic/spi.s` ignoring CPHA, so that against a mode 1 target it runs as mode 0 | MOSI bytes 4B, 78 for A5, 3C |
 | `swd_turnaround` | `advanced/swd.s` holding SWDIO low through the turnaround instead of letting go | ACK `ERROR` (000) for OK |
 | `onewire_reset` | `basic/onewire.s` with a reset low of 400 us, under the 480 us minimum | "Erroneous signal" and no reset |
+| `bypass_bits` | `advanced/uart_bypass.s` sending the new byte at 20 cycles per bit on a line of 16 | the replaced byte reads FE for 7E |
 
-All 11 are caught on the simulator and on the RTL, where each broken copy's record also equals the simulator's.
+All 12 are caught on the simulator and on the RTL, where each broken copy's record also equals the simulator's.
 `bench/basic.py`'s own SPI copy, which swaps the edges, is not here: it moves MOSI in the very cycle of the sampling
 edge, which a zero-delay record shows as the new level at the edge, so it decodes as if right (see `spi` below).
 The bench catches that one by the setup time.

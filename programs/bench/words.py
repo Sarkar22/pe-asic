@@ -20,7 +20,7 @@ WORDS = {
     'advanced/ps2_dev.s': (114, 128), 'advanced/mdio_sta.s': (47, 128), 'advanced/mdio_phy.s': (60, 128),
     'advanced/jtag.s': (37, 128), 'advanced/swd.s': (128, 128), 'advanced/i2c_tgt.s': (78, 128),
     'advanced/i2c_fp.s': (87, 128), 'advanced/usb_tx.s': (43, 128), 'advanced/usb_rx.s': (69, 128),
-    'advanced/usb_dev.s': (194, 512), 'advanced/can.s': (166, 512),
+    'advanced/usb_dev.s': (194, 512), 'advanced/can.s': (166, 512), 'advanced/uart_bypass.s': (65, 128),
 }
 PROGRAMS = tuple(WORDS)
 

@@ -2492,7 +2492,69 @@ def g_teeth(runner, log):
     bad = mutate(basic.src('onewire'), '.equ TRSTL 24500', '.equ TRSTL 20000')
     tooth('onewire_reset', 'basic/onewire.s with a reset low of 400 us, under the 480 us minimum',
           lambda: basic.ow_case(bad, [0xA5]), onewire('uio4'), onewire_events, onewire_expect([0xA5]))
+    import bypass
+    data = [0x00, 0xFF, 0x81, 0x55, 0x0F]
+    bad = mutate(bypass.src('uart_bypass'), '        ldi   R4, 7\n', '        ldi   R4, 7\n        addi  R2, 4\n')
+    tooth('bypass_bits', 'advanced/uart_bypass.s sending the new byte at 20 cycles per bit on a line of 16',
+          lambda: bypass.case(16, [(2, 0x7E, data, 41, ())], 0, 1, text=bad, watch=False),
+          uart('uo4', CLK / 16), uart_bytes, [0x00, 0xFF, 0x7E, 0x55, 0x0F], lo=lambda c: 300)
     LOG.info('teeth: %d of %d caught' % (sum(c for _, c in found), len(found)))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# advanced/uart_bypass.s: bench/bypass.py's case, ui4 decoded as sent and uo4 with the one byte replaced
+
+def g_bypass(runner, log):
+    import bypass
+    import random
+    log.group('advanced/uart_bypass.s', title='a UART line on the bypass lane of uo4 with one byte replaced in flight, '
+              'bench/bypass.py case: sigrok reads ui4 as the sender sent it, and uo4 with the chosen frame\'s byte '
+              'replaced')
+    rng = random.Random(7)
+
+    def stream(n, kind):
+        data = [rng.randrange(256) for _ in range(n)]
+        if kind == 'frame':
+            k = rng.randrange(n)
+            return data, k, k
+        k = rng.randrange(1, n)
+        data[k - 1] = rng.choice([v for v in range(256) if v not in data[:k - 1]])
+        return data, k, bypass.BYTE | data[k - 1]
+
+    def both(b, ctx, bit, data, shown, tag=''):
+        res = ctx.value
+        lo = min(st[0] for st, _, _, _ in res.streams) - 3 * bit
+        tr = trace_of(ctx.chip)
+        for pin, want in (('ui4', data), ('uo4', shown)):
+            bench, _ = rig_uart_decode(tr.wave(pin[:2], 4), CLK / bit)
+            b.sigrok(ctx, uart(pin, CLK / bit), uart_bytes, want, bench=bench, tag=pin + tag, lo=lo)
+
+    for bit, threads in ((16, range(4)), (50, range(4)), (434, (1, 2))):
+        b = Batch(runner, '%d cycles per bit (%d baud), a frame rule and a byte rule on %d threads, 6 abutting frames'
+                  % (bit, round(CLK / bit), len(threads)))
+        for th in threads:
+            for kind in ('frame', 'byte'):
+                data, k, rule = stream(6, kind)
+                new = bypass.other(rng, data[k])
+                ctx = b.run('bypass_%d_t%d_%s' % (bit, th, kind), bypass.case, bit, [(rule, new, data, 40 + th, ())],
+                            th, th, watch=False)
+                both(b, ctx, bit, data, [new if i == k else v for i, v in enumerate(data)])
+                if [v for _, v in ctx.value.outs] != [data[k]]:
+                    b.fail(ctx.name, 'MOUT %s, the replaced frame brought in %#x' % (ctx.value.outs, data[k]))
+        b.close()
+
+    b = Batch(runner, '50 cycles per bit: no rule, so uo4 is ui4; two rules in turn, frames with gaps')
+    data = [rng.randrange(256) for _ in range(6)]
+    ctx = b.run('bypass_norule', bypass.case, 50, [(None, 0, data, 40, ())], 3, 1, watch=False)
+    both(b, ctx, 50, data, data)
+    s1, k1, r1 = stream(6, 'frame')
+    s2, k2, r2 = stream(6, 'byte')
+    n1, n2 = bypass.other(rng, s1[k1]), bypass.other(rng, s2[k2])
+    ctx = b.run('bypass_two', bypass.case, 50, [(r1, n1, s1, 40, ()), (r2, n2, s2, 43, (0, 13, 0, 50, 7))], 1, 3,
+                watch=False)
+    both(b, ctx, 50, s1 + s2, [n1 if i == k1 else v for i, v in enumerate(s1)] +
+         [n2 if i == k2 else v for i, v in enumerate(s2)])
+    b.close()
 
 
 def rig_uart_decode(w, baud):
@@ -2519,6 +2581,7 @@ GROUPS = [
     ('usb', g_usb),
     ('can', g_can),
     ('units', g_units),
+    ('bypass', g_bypass),
     ('basic_images', g_basic_images),
     ('teeth', g_teeth),
 ]

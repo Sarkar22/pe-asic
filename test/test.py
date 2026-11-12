@@ -277,10 +277,12 @@ async def test_miso_moves_three_cycles_after_sck(dut):
             await FallingEdge(dut.clk)
             seen.append(pin(dut, MISO))
         changes.append((before, seen))
-    assert changes[-1][0] == 1, "bit 0 of the version is 1"
-    assert changes[-1][1] == [1, 1, 0], f"MISO moved at the wrong cycle: {changes[-1]}"
+    host.drive(0, 0, 0)                 # SCK falls, and CS rises only after it (9.1)
+    await host.wait(HALF)
     host.drive(1, 0, 0)
     await host.wait(4)
+    assert changes[-1][0] == 1, "bit 0 of the version is 1"
+    assert changes[-1][1] == [1, 1, 0], f"MISO moved at the wrong cycle: {changes[-1]}"
 
 
 @cocotb.test()
@@ -559,7 +561,8 @@ async def test_reset_in_mid_run(dut):
     await host.wait(16)
     assert await host.rdreg(1, 5) == 0x5A and await host.rdreg(1, 9) != 0, "R5 and S hold something"
 
-    # Reset with CS low and SCK high, partway into a byte. CS stays low through the reset and after it.
+    # Reset partway into a byte, with CS low and SCK low, as 9.1 asks while rst_n is low. CS stays low through the
+    # reset and after it.
     await FallingEdge(dut.clk)
     host.drive(0, 0, 0)
     await host.wait(HALF)
@@ -568,10 +571,11 @@ async def test_reset_in_mid_run(dut):
         await host.wait(HALF)
         host.drive(0, 1, 1)
         await host.wait(HALF)
+    host.drive(0, 0, 0)
+    await host.wait(HALF)
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 3, rising=False)
     assert int(dut.uo_out.value) == 0 and int(dut.uio_oe.value) == 0, "outputs clear in reset"
-    host.drive(0, 0, 0)
     await ClockCycles(dut.clk, 3, rising=False)
     dut.rst_n.value = 1
     host.other = 0
@@ -1614,11 +1618,116 @@ async def test_unit_rdreg(dut):
     assert (await host.rdreg(3, 12)) & 0x80, "thread 3's start underruns too: thread 2's txw went to thread 2's unit"
 
 
+# ---- the bypass override: programs/advanced/uart_bypass.s ----------------------------------------------------------
+
+PROGRAMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'programs')
+
+
+class Line:
+    """Drives ui4 with 8N1 frames, LSB first, on an exact grid of cycles, and records once per cycle, 1 ns after the
+    falling edge where the inputs change, ui4, uo4 and the lane's switch: what the pad equation of 5.2 shows in that
+    cycle. Cycles count from the line's start."""
+
+    def __init__(self, dut, host, byp):
+        self.dut, self.host, self.byp = dut, host, byp
+        self.c, self.sched, self.rec = 0, [], []
+
+    def send(self, lead, data, bit, gaps=()):
+        """Frames from `lead` cycles from now. Returns the start cycle of each frame and the cycle after the last."""
+        t, starts = self.c + lead, []
+        for k, v in enumerate(data):
+            starts.append(t)
+            self.sched += [(t + j * bit, b) for j, b in enumerate([0] + [(v >> i) & 1 for i in range(8)] + [1])]
+            t += 10 * bit + (gaps[k] if k < len(gaps) else 0)
+        return starts, t
+
+    async def run(self):
+        level, i = 1, 0
+        while True:
+            await FallingEdge(self.dut.clk)
+            while i < len(self.sched) and self.sched[i][0] <= self.c:
+                level = self.sched[i][1]
+                i += 1
+            self.host.other = (self.host.other & ~0x10) | level << 4
+            self.dut.ui_in.value = (self.host.other & 0xF8) | self.host.link
+            await Timer(1, unit="ns")
+            uo = str(self.dut.uo_out.value)[::-1]        # bit 0 first; MISO, bit 3, is not read
+            self.rec.append((level, int(uo[4]), (int(self.byp.value) >> 4) & 1))
+            self.c += 1
+
+    async def until(self, c):
+        while self.c < c:
+            await FallingEdge(self.dut.clk)
+
+
+@cocotb.test()
+async def test_bypass_override(dut):
+    """5.2 and 5.8, through programs/advanced/uart_bypass.s: a UART line passes from ui4 to uo4 on the lane, unchanged
+    while no rule is armed. With a rule, the chosen frame's data bits leave as the host's byte, each on the incoming
+    frame's own bit boundary, to the cycle, the lane switches only where the program's header says (3 cycles into
+    the start bit, 9 into the stop bit), and every other cycle shows ui4. At 16 cycles per bit with a frame rule and
+    at 50 with a byte rule, on two threads. At gate level the lane is the netlist's gates: the pins are checked the
+    same way, the switch is read from the RTL core that runs beside the netlist, and the two must agree on every pin
+    in every cycle."""
+    gates = os.environ.get("GATES") == "yes"
+    host = await start(dut)
+    if gates:
+        dut.compare.value = 1
+    core = dut.rtl_core if gates else dut.user_project.core
+    with open(os.path.join(PROGRAMS_DIR, 'advanced', 'uart_bypass.s')) as fh:
+        img = assemble(fh.read())
+    await load_image(host, img)
+    line = Line(dut, host, core.pins.byp_q)
+    cocotb.start_soon(line.run())
+    runs = ((1, 16, 2, 0xA5, [0x31, 0x7E, 0x00, 0xFF, 0x0F, 0xC3], ()),
+            (2, 50, 0x100 | 0x7E, 0x5A, [0x10, 0x7E, 0x81, 0x55, 0x01], (0, 7, 0, 60, 0)))
+    for n, (th, bit, rule, new, data, gaps) in enumerate(runs):
+        if n:
+            await host.run(1 << runs[n - 1][0], 0)
+        await host.setpc(th, img.labels['start'])
+        await host.run(0, 1 << th)
+        await post_wait(host, 7, bit)
+        lo = line.c
+        _, end = line.send(40, [0x55, 0xC3], bit)               # no rule armed yet: these pass as they are
+        await line.until(end + 2 * bit)
+        await post_wait(host, 1, new)
+        await post_wait(host, 0, rule)
+        ack = await take_wait(host, 4)
+        starts, end = line.send(40, data, bit, gaps)
+        out = await take_wait(host, 5)
+        await line.until(end + 3 * bit)
+        k = rule if rule < 0x100 else data.index(rule & 255) + 1
+        s = starts[k]
+        assert ack == rule and out == data[k], \
+            f"thread {th}: MACK {ack:#x}, MOUT {out:#x}; rule {rule:#x}, byte {data[k]:#x}"
+        rec = line.rec[lo:]
+        want = [u for u, _, _ in rec]
+        for j in range(8):
+            want[s + (j + 1) * bit - lo:s + (j + 2) * bit - lo] = [(new >> j) & 1] * bit
+        diff = [lo + i for i, (got, w) in enumerate(zip((o for _, o, _ in rec), want)) if got != w]
+        assert not diff, f"thread {th}, {bit} cycles per bit: uo4 differs from the stimulus in {len(diff)} cycles, " \
+                         f"the first {diff[0]}; frame {k} starts at {s}"
+        flips = [(lo + i, b) for i, (_, _, b) in enumerate(rec) if i and b != rec[i - 1][2]]
+        assert flips == [(s + 3, 0), (s + 9 * bit + 9, 1)], f"thread {th}: lane switches {flips}, frame {k} at {s}"
+    if gates:
+        assert int(dut.mismatches.value) == 0, f"the netlist and the RTL differ in {int(dut.mismatches.value)} cycles"
+
+
 # ---- test_matches_simulator: the RTL beside the published simulator ------------------------------------
 
-DUTY = ((3, 3), (3, 3), (3, 3), (4, 4), (2, 4), (4, 2), (1, 5), (5, 1))   # SCK low, high cycles: period 6 or more
-CLAIMS = ((0, 1, 8, 9), (2, 4, 10, 11), (5, 6, 12, 13), (7, 14, 15))     # pins each thread claims with pcfg PP first
+# Section 9.1 at its limits: SCK period 6 or more (clk/6), each SCK low and high 2 or more, CS high 3 or more, CS moving
+# only while SCK is low. DUTY is (low, high) cycles of SCK; SETUP is the cycles from CS falling to the first SCK rise,
+# LAST the cycles SCK stays high on the last bit, HOLD the cycles from the last SCK fall to CS rising, and GAP the
+# cycles CS stays high between transactions. The first of each is the fastest the section allows.
+DUTY = ((2, 4), (4, 2), (3, 3), (3, 3), (2, 4), (4, 2), (3, 3), (4, 4))
+SETUP = (1, 2, 3, 6)
+LAST = (2, 3)
+HOLD = (1, 2, 3)
+GAP = (3, 3, 4, 5, 9, 17)
+CLAIMS = ((0, 1, 8, 9), (2, 4, 10, 11), (5, 6, 12, 13), (7, 14, 15))     # pins each thread claims first: BYP on a
+LANE_PINS = (0, 4, 5, 6, 7)                                             # lane, PP on any other pin
 FIXED = ('caps', 'run', 'setpc', 'status', 'step', 'rdreg', 'post', 'take', 'abort')
+STOPPERS = ('halt', 'recv', 'send', 'rxw', 'txw')   # rows that stop or can block a thread for long
 
 
 def status_bytes(sim):
@@ -1683,6 +1792,14 @@ class Txn:
             k = rng.randrange(1, len(self.mosi) + 1)
             self.cut = min(total - 1, max(1, rng.choice((8 * k - 1, 8 * k, 8 * k + 1, rng.randrange(1, total)))))
 
+    @classmethod
+    def exact(cls, kind, mosi, a=0, b=0):
+        """A command the test chooses, sent whole, with nothing after it."""
+        tx = cls.__new__(cls)
+        tx.kind, tx.mosi, tx.a, tx.b = kind, list(mosi), a, b
+        tx.want, tx.dead, tx.reads, tx.rdreg, tx.cut = {}, False, 0, None, None
+        return tx
+
     def on_byte(self, k, sim, pre, lock):
         kind = self.kind
         if kind == 'wrmem' and k >= 4 and k % 2 == 0 and not self.dead:
@@ -1727,21 +1844,23 @@ class Txn:
             sim.host_abort()
 
 
-def link_levels(mosi, lo, hi, cut, quick):
-    """Per cycle (cs, sck, mosi, byte finished at this rise, is a rise), as in rtl_pins_check of the benches."""
+def link_levels(mosi, cut, lo, hi, setup, last, hold):
+    """Per cycle (cs, sck, mosi, byte finished at this rise, is a rise) of one transaction, CS low throughout: SCK
+    low for `setup` cycles before the first rise and `lo` before each later one, high for `hi` and for `last` on the
+    last bit, then low for `hold` cycles. MOSI changes only while SCK is low, as mode 0 has it."""
     total = 8 * len(mosi) if cut is None else cut
-    out = [(0, 0, 0, None, False)] * lo
+    out = []
     n = 0
     for k, byte in enumerate(mosi):
         for i in range(7, -1, -1):
             if n == total:
                 break
             b = (byte >> i) & 1
-            out += [(0, 0, b, None, False)] * lo
-            high = quick[0] if quick and n == total - 1 else hi
+            out += [(0, 0, b, None, False)] * (setup if n == 0 else lo)
+            high = last if n == total - 1 else hi
             out += [(0, 1, b, k if i == 0 and j == 0 else None, j == 0) for j in range(high)]
             n += 1
-    out += [(0, 0, 0, None, False)] * (quick[1] if quick else lo)
+    out += [(0, 0, 0, None, False)] * hold
     return out
 
 
@@ -1780,12 +1899,25 @@ class Lock:
                 self.rdreg = None
 
 
-@cocotb.test(skip=os.environ.get("GATES") == "yes")
+@cocotb.test(skip=os.environ.get("GATES") == "yes" and os.environ.get("LOCK_GATES") != "yes")
 async def test_matches_simulator(dut):
     """Random programs on all four threads against the published simulator in sim/, with host traffic over the
-    real link: SCK phases of 1 to 5 cycles, cut commands, bytes past a reply, every unlisted code and CS rising
-    as SCK falls. Every output pin but MISO is compared on every cycle, and every MISO byte with what its command
-    returns. MISO may move only 3 cycles after a rising SCK or after CS rises."""
+    real link at the limits of section 9.1: SCK low or high for 2 cycles at a period of 6, CS falling 1 cycle before
+    the first rising SCK and rising 1 cycle after the last falling one, CS high for 3 cycles between transactions,
+    cut commands, bytes past a reply and every unlisted code. Every output pin but MISO is compared on every cycle,
+    and every MISO byte with what its command returns. MISO may move only 3 cycles after a rising SCK or after CS
+    rises.
+
+    Each thread starts on a block that claims its pins, a lane with BYP and any other pin with PP, so the lanes show
+    their inputs until a program moves them. After each transaction the host acts on what it finds. A thread that
+    stopped itself resumes: after a halt, or after a WRMEM has put a legal word in place of the illegal one that
+    stopped it. A thread the host stopped stays stopped while 3 others run, so that the memory commands, and half of
+    the SETPC, STEP and RDREG commands, which name a stopped thread when there is one, find one. A running thread that
+    has retired nothing since the last look is stopped, the word it sat on is rewritten, and it starts at a fresh PC.
+    Which threads those are comes from the simulator, which runs in lockstep, so the stimulus stays strong whatever
+    the seed. How often the other inputs change is drawn for each transaction. LOCK_SEED picks the seed (default 2).
+    At gate level the test runs only with LOCK_GATES=yes, and checks the timebase on the RTL core that runs beside
+    the netlist, since the netlist has no flop of that name."""
     sys.path.insert(0, SIM_DIR)
     sys.dont_write_bytecode = True      # leave no cache in sim/
     import sim as simulator
@@ -1817,25 +1949,76 @@ async def test_matches_simulator(dut):
                 continue
             return encode(r, f)
 
+    def fresh_pc(sim, rng):
+        """A PC in the random part of the image whose next 8 words are legal and neither stop nor block a thread."""
+        for _ in range(64):
+            pc = rng.randrange(64, DEPTH)
+            words = [decode(sim.mem[a % DEPTH]) for a in range(pc, pc + 8)]
+            if all(d is not None and d[0].mn not in STOPPERS for d in words):
+                break
+        return pc
+
+    def rewrite(a, rng):
+        """A WRMEM of a fresh legal word at address a."""
+        w = random_word(rng)
+        tx = Txn.exact('wrmem', [0x01, a >> 8, a & 255, w >> 8, w & 255])
+        tx.addr, tx.data = a, [w]
+        return tx
+
+    def revive(sim, seen, rng):
+        """The host's commands after a transaction. A thread that stopped itself resumes with RUN: after a halt, or
+        after a WRMEM has put a legal word in place of the illegal one that stopped it. A thread the host stopped
+        stays stopped, for the host's own commands to find, while 3 others run, and resumes with RUN when fewer do.
+        A running thread that has retired nothing since seen is stopped, the word it sat on is rewritten, and it
+        starts again at a fresh PC."""
+        out, start = [], 0
+        for t in sim.th:
+            if not t.RUN:
+                prev = decode(sim.mem[(t.PC - 1) % DEPTH])
+                if t.ILL:
+                    out.append(rewrite(t.PC, rng))
+                    start |= 1 << t.TID
+                elif prev is not None and prev[0].mn == 'halt':
+                    start |= 1 << t.TID
+        for t in sim.th:
+            if sum(x.RUN for x in sim.th) + bin(start).count('1') >= 3:
+                break
+            if not t.RUN and not start >> t.TID & 1:
+                start |= 1 << t.TID
+        stuck = [t.TID for t in sim.th if t.RUN and t.retired == seen[t.TID]]
+        if stuck:
+            busy = sum(1 << t for t in stuck)
+            out.insert(0, Txn.exact('run', [0x10, busy, 0], busy, 0))
+            for t in stuck:
+                out.append(rewrite(sim.th[t].PC, rng))
+                pc = fresh_pc(sim, rng)
+                out.append(Txn.exact('setpc', [0x11, t, pc >> 8, pc & 255], t, pc))
+            start |= busy
+        return out + [Txn.exact('run', [0x10, 0, start], 0, start)] if start else out
+
     host = await start(dut)
-    rng = random.Random(2)
+    seed = int(os.environ.get('LOCK_SEED', '2'))
+    rng = random.Random(seed)
+    # The timebase flop: the netlist has none by that name, so at gate level take the RTL core's beside it.
+    core = dut.rtl_core if os.environ.get("GATES") == "yes" else dut.user_project.core
     unlisted = [c for c in range(256) if c not in LISTED]
     rng.shuffle(unlisted)
     kinds = ('caps', 'wrmem', 'rdmem', 'run', 'run', 'run', 'setpc', 'status', 'status', 'step', 'rdreg', 'rdreg', 'rdreg',
              'post', 'post', 'take', 'take', 'abort')
-    count = 0
-    toggles = running = retired = cycles = 0
+    count = restarted = 0
+    toggles = running = retired = cycles = driven = 0
     last_pads = None
     for image in range(LOCK_IMAGES):
         await FallingEdge(dut.clk)
-        dut.rst_n.value = 0
+        dut.rst_n.value = 0                             # CS high and SCK low, as 9.1 asks while rst_n is low
         await ClockCycles(dut.clk, 4, rising=False)
         dut.rst_n.value = 1                             # between two rising edges
         released = get_sim_time(unit="ns")
         await ClockCycles(dut.clk, 8, rising=False)
         words = [random_word(rng) if rng.random() < .99 else noise(rng) for _ in range(DEPTH)]
-        for t, claim in enumerate(CLAIMS):              # each thread starts by claiming pins, so its events show
-            block = [0x90E8 | p << 8 for p in claim] + [0x0100, 0x1000 | rng.randrange(64, DEPTH)]  # pcfg PP / now / goto
+        for t, claim in enumerate(CLAIMS):              # each thread starts by claiming pins, so its events show,
+            block = [(0x90F8 if p in LANE_PINS else 0x90E8) | p << 8 for p in claim]   # and lanes follow their inputs
+            block += [0x0100, 0x1000 | rng.randrange(64, DEPTH)]                        # pcfg ... / now / goto
             words[16 + 8 * t:16 + 8 * t + len(block)] = block
         await host.wrmem(0, words)
         await FallingEdge(dut.clk)
@@ -1848,30 +2031,44 @@ async def test_matches_simulator(dut):
         sim.SYNC1 = sim.SYNC2 = 1
         # 9.1: cycle 0 starts 2 clock edges after rst_n rises, so TB is the rising edges since then, less 2.
         tb = round((get_sim_time(unit="ns") - released) / 20) - 2
-        assert int(dut.user_project.core.tb_q.value) == tb & 0xFFFF, "cycle 0 does not start 2 edges after rst_n rises"
+        assert int(core.tb_q.value) == tb & 0xFFFF, "cycle 0 does not start 2 edges after rst_n rises"
         sim.c = tb
         lock = Lock(sim)
         ui_hi = io = 0
-        hold = rng.choice((1, 3, 20, 200))
         last_miso, prev_cs = 0, 1
         rises, cs_rises = set(), set()
         c = 0
-        for n in range(LOCK_TRANSACTIONS):
-            if n < 4:
-                tx = Txn(rng, 'setpc', 0)
-                tx.a, tx.b, tx.cut = n, 16 + 8 * n, None
-                tx.mosi = [0x11, n, tx.b >> 8, tx.b & 255]
-            elif n == 4:
-                tx = Txn(rng, 'run', 0)
-                tx.a, tx.b, tx.cut, tx.mosi = 0, 15, None, [0x10, 0, 15]
+        queue = [Txn.exact('setpc', [0x11, t, 0, 16 + 8 * t], t, 16 + 8 * t) for t in range(THREADS)]
+        queue.append(Txn.exact('run', [0x10, 0, 15], 0, 15))
+        seen = [0] * THREADS                            # what each thread had retired at the last look
+        n = looked = 0
+        while n < LOCK_TRANSACTIONS:
+            if not queue and n != looked:                   # after each random transaction
+                looked = n
+                queue = revive(sim, seen, rng)
+                seen = [t.retired for t in sim.th]
+            if queue:
+                tx = queue.pop(0)
+                if tx.kind == 'run' and n:
+                    restarted += bin(tx.b).count('1')
             else:
                 kind = 'other' if n % 12 == 11 else rng.choice(kinds)
                 tx = Txn(rng, kind, unlisted[count % len(unlisted)], random_word)
                 count += kind == 'other'
+                n += 1
+                if kind in ('setpc', 'step', 'rdreg') and rng.random() < .5:
+                    idle = [t.TID for t in sim.th if not t.RUN]
+                    if idle:                                # half of these name a thread that is stopped, if any
+                        tx.a = (tx.a & 0xFC) | rng.choice(idle)
+                        tx.mosi[1] = tx.a
+            hold = rng.choice((1, 3, 20, 200))              # cycles between changes of the other inputs, on average
             lo, hi = rng.choice(DUTY)
-            quick = (rng.randint(1, hi), rng.choice((0, 1, 2))) if rng.random() < .3 else None
-            levels = [(1, 0, 0, None, False)] * rng.randrange(4, 20) + link_levels(tx.mosi, lo, hi, tx.cut, quick)
-            levels += [(1, 0, 0, None, False)] * 6
+            last = rng.choice(LAST) if rng.random() < .3 else hi
+            hold_cs = rng.choice(HOLD) if rng.random() < .3 else lo
+            levels = [(1, 0, 0, None, False)] * rng.choice(GAP)
+            levels += link_levels(tx.mosi, tx.cut, lo, hi, rng.choice(SETUP), last, hold_cs)
+            if n == LOCK_TRANSACTIONS:
+                levels += [(1, 0, 0, None, False)] * 3      # the image's last: CS high before the next reset
             marks, sampled = [], []
             for cs, sck, mosi, finished, rise in levels:
                 if hold == 1 or rng.randrange(hold) == 0:
@@ -1882,7 +2079,10 @@ async def test_matches_simulator(dut):
                 await Timer(1, unit="ns")
                 got = (int(dut.uo_out.value), int(dut.uio_out.value), int(dut.uio_oe.value))
                 want = sim.pads(ui)
-                toggles += last_pads is not None and (got[0] & ~8, got[1], got[2]) != last_pads
+                if last_pads is not None and (got[0] & ~8, got[1], got[2]) != last_pads:
+                    toggles += 1
+                    change = ((got[0] & ~8) ^ last_pads[0]) | ((got[1] ^ last_pads[1]) | (got[2] ^ last_pads[2])) << 8
+                    driven += bool(change & ~sum(1 << p for p in LANE_PINS if sim.BYP[p]))
                 last_pads = (got[0] & ~8, got[1], got[2])
                 running += any(th.RUN for th in sim.th)
                 assert (got[0] & ~8, got[1], got[2]) == (want[0] & ~8, want[1], want[2]), \
@@ -1918,7 +2118,9 @@ async def test_matches_simulator(dut):
             cs_rises = {x for x in cs_rises if x > c - 16}
         retired += sum(th.retired for th in sim.th)
         cycles += c
-    dut._log.info(f"{cycles} cycles, {retired} instructions retired, {toggles} output changes, {running} cycles with a thread running")
+    dut._log.info(f"seed {seed}: {cycles} cycles, {retired} instructions retired, {toggles} output changes "
+                  f"({driven} of them not only on a lane in bypass), {running} cycles with a thread running, "
+                  f"{restarted} threads restarted")
     assert count >= 40, "too few unlisted codes"
     assert retired >= cycles // 8 and toggles >= cycles // 100, "stimulus too weak"
 
