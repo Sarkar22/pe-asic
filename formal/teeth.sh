@@ -4,7 +4,11 @@
 # that proof (the same assertions, from reset, with the host's commands free), the reset proof itself, or the
 # equivalence check. The repository is not touched.
 #
-# Usage: formal/teeth.sh [bug ...]       with no bug, every bug in BUGS below
+# The bugs in NETLIST_BUGS are planted in a scratch copy of the gate netlist instead (FORMAL_NETLIST), by
+# plant_netlist.py, and the equivalence check must fail in the piece the bug is in. Each takes one run of
+# chip.eqy; a bug whose cells the netlist lacks (the layout's buffers, in the synthesis output) is skipped.
+#
+# Usage: formal/teeth.sh [bug ...]       with no bug, every bug in BUGS, and in NETLIST_BUGS if FORMAL_NETLIST is set
 # Uses run.sh, with the same environment (FORMAL_IMAGE, FORMAL_DOCKER, FORMAL_WORK, PDK_ROOT, FORMAL_NETLIST).
 # SPDX-License-Identifier: Apache-2.0
 set -uo pipefail
@@ -34,9 +38,53 @@ netlist_differs#src/pe_pins.sv#187#uio_out = v[15:8] & ~od_q;#uio_out = v[15:8] 
 TABLE
 )
 
-names=${*:-$(echo "$BUGS" | cut -d'#' -f1)}
+# Netlist bugs: name # edits for plant_netlist.py # the piece that must fail # what the bug breaks (and the rule of
+# chip.eqy that closes that piece)
+NETLIST_BUGS=$(cat <<'TABLE'
+nl_unit1_reset#swap_reset:_49784_#unit1#unit 1's pwq_q[7] resets to the wrong value (inverted flops)
+nl_unit0_reset#swap_reset:_49294_#unit0#unit 0's pwh_q[7] resets to the wrong value (inverted flops, merges kept apart)
+nl_byp0_inverted#invert_d:_49109_#pins#byp_q[0] loads the inverse (constant flops)
+nl_byp4_dropped#drop_flop:_49108_#pins#the real flop byp_q[4] removed and tied to 0 (a wrong constant)
+nl_arg_stuck#hold_d:_51293_#core.hm_wdata.9#hm_wdata[9] never loads (the merged SCK flop)
+nl_miso_inverted#buf_to_inv:_52053_#host#uo_out[3] through an inverter (core.host.miso unmatched)
+nl_fsm_run#rewire_d:_51385_:_51391_#thread1#the FSM's one-hot RUN bit takes SETPC's next state (PDR)
+nl_fsm_binary#invert_d:_51983_#host#bit 0 of the FSM's binary copy loads the inverse (PDR)
+nl_fanout_buffer#buf_to_inv:fanout3296#unit2#a layout fanout buffer inverts (final netlist only)
+nl_hold_cell#buf_to_inv:hold5195#host#a layout hold cell inverts (final netlist only)
+TABLE
+)
+
+all=$(echo "$BUGS" | cut -d'#' -f1)
+[ -n "${FORMAL_NETLIST:-}" ] && all="$all $(echo "$NETLIST_BUGS" | cut -d'#' -f1)"
+names=${*:-$all}
 printf '%-22s %-20s %-8s %s\n' bug job result "what failed"
 for name in $names; do
+  if nl=$(echo "$NETLIST_BUGS" | grep "^$name#"); then
+    IFS='#' read -r _ edits piece what <<< "$nl"
+    scratch=$WORK/teeth/$name
+    # An old run is left alone rather than deleted: an EQY work folder holds thousands of files.
+    if [ -e "$scratch" ]; then
+      printf '%-22s %-20s %-8s %s\n' "$name" chip.eqy SKIPPED "$scratch exists; remove it or set another FORMAL_WORK"
+      continue
+    fi
+    mkdir -p "$scratch/work"
+    netlist=$scratch/$(basename "${FORMAL_NETLIST:?netlist bugs need FORMAL_NETLIST}")
+    # shellcheck disable=SC2086  # the edits are separate arguments
+    if ! python3 -I "$HERE/plant_netlist.py" "$FORMAL_NETLIST" "$netlist" $edits > "$scratch/edits.txt" 2>&1; then
+      printf '%-22s %-20s %-8s %s\n' "$name" chip.eqy SKIPPED "the netlist has no such cell (see $scratch/edits.txt)"
+      continue
+    fi
+    out=$(FORMAL_NETLIST=$netlist FORMAL_WORK=$scratch/work "$HERE/run.sh" chip.eqy)
+    status=$(echo "$out" | awk '{print $2}')
+    log=$scratch/work/chip_eqy.log
+    if [ "$status" = FAIL ] && grep -q "partition 'tt_um_sarkar22_pe.$piece' using strategy '[a-z]*': partitions not equivalent" "$log"; then
+      result=CAUGHT
+    else
+      result="MISSED($status)"
+    fi
+    printf '%-22s %-20s %-8s %s\n' "$name" chip.eqy "$result" "$piece: $what"
+    continue
+  fi
   line=$(echo "$BUGS" | grep "^$name#") || { echo "unknown bug $name"; continue; }
   IFS='#' read -r _ file lineno old new job what <<< "$line"
   scratch=$WORK/teeth/$name
@@ -64,9 +112,9 @@ PY
     *) log=$scratch/work/${job%%:*}_${job##*:}.log; detail=$(grep -m1 -oE "failed assertion [^ ]+ at [^ ]+" "$log") ;;
   esac
   case "$job" in
-    # The equivalence check of the real RTL already leaves pieces unproved, so here the bug must make a piece
-    # fail that passes on the real RTL: the uio pads' piece.
-    *.eqy) grep -q "uio_out.0' using strategy 'sat': partitions not equivalent" "$log" && result=CAUGHT || result="MISSED($status)" ;;
+    # The equivalence check proves every piece of the real RTL, so the bug must make one fail, and it must be
+    # the one the bug is in: the uio pads' piece.
+    *.eqy) [ "$status" = FAIL ] && grep -q "uio_out.0' using strategy '[a-z]*': partitions not equivalent" "$log" && result=CAUGHT || result="MISSED($status)" ;;
     *) [ "$status" = FAIL ] && result=CAUGHT || result="MISSED($status)" ;;
   esac
   printf '%-22s %-20s %-8s %s\n' "$name" "$job" "$result" "${detail:-see $log}"

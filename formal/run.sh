@@ -10,8 +10,9 @@
 # docker command (default: docker); each job then runs in its own container.
 #   FORMAL_WORK   folder for the solvers' work folders (default: formal/work); it can grow large
 #   PDK_ROOT       for the equivalence check: the PDK, for the standard cells' liberty
-#   FORMAL_NETLIST for the equivalence check: the gate netlist to compare (tt_um_sarkar22_pe.nl.v)
-#   FORMAL_JOBS    parallel proofs in the equivalence check (default 8)
+#   FORMAL_NETLIST for the equivalence check: the gate netlist to compare, the synthesis output or the final
+#                  netlist after layout (tt_um_sarkar22_pe.nl.v)
+#   FORMAL_JOBS    parallel proofs in the equivalence check (default 4)
 #
 # SPDX-License-Identifier: Apache-2.0
 set -uo pipefail
@@ -54,7 +55,7 @@ run_job() {
       else
         sed -e "s|@ROOT@|$ROOT|g" -e "s|@PDK_ROOT@|$PDK_ROOT|g" -e "s|@NETLIST@|$FORMAL_NETLIST|g" \
           "$HERE/$job" > "$WORK/$job"
-        tool eqy -f -j "${FORMAL_JOBS:-8}" -d "$dir" "$WORK/$job" > "$dir.log" 2>&1
+        tool eqy -f -j "${FORMAL_JOBS:-4}" -d "$dir" "$WORK/$job" > "$dir.log" 2>&1
         rc=$?
       fi ;;
     reset:gen)

@@ -1,7 +1,8 @@
 # Formal proofs
 
-Proofs of the chip's safety and timing properties with SymbiYosys, and an equivalence check of the
-pre-layout netlist against the RTL with EQY. Every proof reads the RTL in `src/` with slang
+Proofs of the chip's safety and timing properties with SymbiYosys, and an equivalence check of the gate
+netlists, the synthesis output and the final netlist after layout, against the RTL with EQY. Every proof reads
+the RTL in `src/` with slang
 (`read_slang`), as the flow does; the property wrappers are plain SystemVerilog that `read_verilog -formal
 -sv` reads. Comments cite sections of [`docs/ISA.md`](../docs/ISA.md).
 
@@ -22,7 +23,7 @@ the LibreLane image.
 | **4. The unit's timing** (`shift_timing.sv`, one unit, every input free in every cycle): `start_cmt` TXRUN rises only after TXARM and CMT; `start_sym` in the commit's cycle `tx_symbol()` runs and from the next cycle LA, LB show symbol 0 of the first bit (MAPA, MAPB, TGLA, TGLB, TMSB, LFSR) and TXCD is TPER; `start_empty` a start with no word is an underrun; `sym_tper` with TFRAC 0 each symbol lasts exactly TPER cycles (TPER 0 as 1); `sym_frac` with any TFRAC it lasts TPER plus the carry of TXACC + TFRAC; `hold` LA, LB move only at those cycles; `tail_len` ENDA, ENDB for exactly TAIL cycles, then IDLEA, IDLEB; `stop_tx` and `stop_rx` the cycle after `sstop` or ABORT the half is stopped; `rx_start` a reception starts only at a commit or the hunt's edge | 5.9.5: "A symbol written in cycle *w* is on the pad from *w* + 1 (section 5.7), for exactly TPER cycles plus any fraction carry. TPER 0 gives one cycle and leaves TXACC alone, whatever TFRAC is. The commit at E writes the first symbol". "the outputs show ENDA and ENDB for TAIL cycles, then IDLEA and IDLEB". 5.9.4: "A stopped send half shows its idle levels on its outputs from the next cycle." 5.9.6: "Without HUNT, a reception begins at the commit." | k-induction, with 7 helper invariants that are proved too | 4 | proved for every TPER, TFRAC and TAIL (16, 8 and 8 bits, no bound) | 1 s |
 | **5. Reset: every flop** (`reset_flops.sv`, generated, 473 flop cells, 3569 bits): every flop is an asynchronous-load flop on `rst_n` (the synchroniser) or on the synchronised reset, its value under reset is section 8's (0, or 192 and 128 for each unit's window points), and it holds that value in every reset cycle and in cycle 0 | 8: "Reset is asynchronous, active low, on every flop, and its release passes a synchroniser". The reset table | structural check (`gen_reset.py`) and k-induction | 2 | proved | 4 s |
 | **5b. No pad drives until a program asks** (`reset_pads.sv`): `uio_oe` is 0 until a running thread has `oe`, `oe8` or `pcfg PP/OD` on a uio pin in stage 4; every uo pin but uo3 is 0 until one has a word that writes or configures a uo pin. In cycle 0, `uio_oe` and `uo_out` are 0 | 8: "So after reset every `uio` pin is undriven, and every `uo` pin is low." "Nothing runs until the host starts it." | k-induction | 3 | proved | 5 s |
-| **6. Netlist against RTL** (`chip.eqy`) | | EQY, SAT induction per piece | to 5 | **partly**: 90 of 109 pieces proved equivalent, 18 unknown, 1 failed. Details below | 1 min |
+| **6. Netlist against RTL** (`chip.eqy`): the gate netlist's 4134 matched nets (the 24 output pins, flop outputs, the SRAM's inputs) equal the RTL's, in every state reachable from reset, for the synthesis output and for the final netlist after layout | | EQY: both designs cut at the matched nets into 108 pieces; k-induction on each, PDR on the 6 that hold the host's command FSM | 3 | **proved: 108 of 108 pieces**, on both netlists. Details below | 68 s, 75 s |
 
 The real host link is in every proof above (pe_host and pe_spi read from free `ui_in` pins), so they hold for
 every host command sequence; the memory's read data is a free input in every cycle (`sram_free.v`), so they
@@ -72,7 +73,7 @@ transition relation can produce, which includes every reachable one.
 `teeth.sh` plants one one-line bug at a time in a scratch copy of `src/` and expects the matching check to
 fail with a counterexample trace from reset. All 14 are caught; the step is the trace's last. The prove
 tasks fail on all 13 sby bugs too (5 in the base case, 8 in the induction step); the bmc tasks give a trace
-from reset for each.
+from reset for each. The equivalence check's own teeth, bugs in the netlist, are under "The equivalence check".
 
 | Bug | Change | Check | Fails |
 |---|---|---|---|
@@ -93,46 +94,90 @@ from reset for each.
 
 ## The equivalence check
 
-`chip.eqy` compares `tt_um_sarkar22_pe.nl.v`, the output of the flow's synthesis step (IHP SG13CMOS5L cells,
-AREA 0), against the RTL. The cells' functions come from the PDK's liberty. The SRAM macro and its 44 pin
-buffers, which the RTL instantiates by name, are black boxes on both sides. EQY matches nets of the same name,
-cuts both designs there, and proves each piece between by SAT-based induction. The RTL side is only read,
+`chip.eqy` compares a gate netlist with the RTL, either the flow's synthesis output (the synthesis step's
+`tt_um_sarkar22_pe.nl.v`, IHP SG13CMOS5L cells, AREA 0) or the final netlist after placement and routing
+(`final/nl/tt_um_sarkar22_pe.nl.v`, the one submitted); one file serves both. The cells' functions come from the
+PDK's liberty (typical corner), and the layout's repair buffers, hold cells and clock buffers are cells like the
+others, each X = A. The SRAM macro and its 44 pin buffers, which the RTL instantiates by name, are black boxes on
+both sides: their inputs are compared, and their outputs are inputs both sides share. The RTL side is only read,
 flattened, split into one net per bit and rid of slang's port buffers (`unbuf.v`).
 
-Proved: 90 of the 109 pieces. Together they hold 772 of the 4110 matched points, 659 of them flop outputs
-(of 3536): the decoder, the stage-3 and stage-4 pipeline registers (`a4_q`, `b4_q`, `op4_q`, `ls_addr_q`,
-`ls_data_q`, the valid bits), the register file, the SRAM's inputs (enable, write, read, address, data), the
-synchroniser's first stage, the mailbox's full flags, and every output pin but `uo3` (`uo_out[7:4]`,
-`uo_out[2:0]`, `uio_out`, `uio_oe`).
+EQY matches nets of the same name, cuts both designs at them and proves each piece between. A matched net is an
+input of the pieces that read it and a compared output of the piece that drives it, so a wrong match makes a
+piece fail; it can't make one pass. Each piece is proved first by k-induction (SBY, solver bitwuzla, depth 3:
+a base case from the initial state and an induction step), and where that leaves it open, by PDR (ABC's `pdr`),
+which finds its own invariants. In EQY's model the RTL's flops start unknown and the netlist's anywhere, and a
+piece is proved when its outputs equal the RTL's wherever the RTL's are known; since every flop resets
+(property 5), that covers every run from reset.
 
-Not proved: the other 19 pieces, which hold most of the state: the four shift units, the four threads, the
-pin flops, the mailbox, the host's registers and `uo_out[3]`. 18 end unknown (no difference in the base case,
-but the induction step did not close up to length 5) and `uo_out[3]` fails its base case. What is known to stand
-in the way:
+| Netlist | Pieces proved | By k-induction | By PDR | Time |
+|---|---|---|---|---|
+| synthesis output | **108 of 108** | 102 | 6: the host, the mailbox, the four threads | 68 s |
+| final netlist, after layout | **108 of 108** | 102 | the same 6 | 75 s |
 
-- **Flops with no name.** 16 of the netlist's 3562 flops have no name: each unit's three reset-to-1
-  window-point bits (`pwq_q[7:6]`, `pwh_q[7]`), built as inverted flops, and 4 in the host. Their RTL flops
-  have nothing to match. Naming the 12 in the units (the inverse of each cell's output) did not make the
-  units' pieces close, so they are not the only cause there; that cause is not found yet, nor the threads'
-  and the pins'.
-- **A re-encoded state register.** The synthesis's FSM pass re-encoded the host's command state `cmd_q` from
-  binary to one-hot and dropped the reset state's bit, keeping the names: the netlist's `cmd_q[1]` is not the
-  RTL's `cmd_q[1]`. Those names are not matched, so the host's pieces hold two encodings of one state, which
-  induction can't relate. (EQY's `[recode]` is meant for this; it found no entity to recode here. Re-encoding
-  the RTL side with yosys's own FSM passes gave the same 90 proved pieces, and is left out because it would be
-  trusted, not proved.)
-- **Cut points one side doesn't read.** The synthesis kept some combinational names on nets it then
-  recomputes. Matched, such a net becomes a free input that only one side reads, and a piece fails for values
-  the chip can't have; `core.fetch`, `core.exec.tb_next`, `core.decode.ra`, `core.decode.rb` and
-  `core.host.rd_here` are unmatched for that reason. Matching only names of the form `*_q` instead makes
-  one piece of the whole chip (88k cells), whose induction failed: the netlist keeps one name per net, and
-  1470 flops carry another one (`chk[0]` for `chklo_q[0]`), so they stayed unmatched.
-- **`uo_out[3]`.** The host link's MISO flop is named only by the output pin, so its piece holds the flop on
-  both sides with separate free starting values, and the base case fails on those.
+The two runs match the same 4249 names into the same 108 pieces and compare the same 4134 points: the layout
+changed no name the check uses. The six PDR pieces are the ones that hold the host's command FSM (below); PDR takes
+17 s on the host's piece and at most 5 s on each of the others.
 
-What would close it: names on the 16 flops (a synthesis setting that keeps them), `fsm` left out of the
-synthesis or its encoding fixed, and a look at the threads' and pins' induction traces. Until then,
-gate-level simulation is the check on the logic this one leaves.
+What it takes, besides EQY's default matching by name. Each rule is in `chip.eqy` with how it was derived from
+the netlist:
+
+| Rule | Why | Pieces |
+|---|---|---|
+| **Inverted flops**: for each unit's three reset-to-1 window-point bits (`pwq_q[7:6]`, `pwh_q[7]`; section 8: 192 and 128), `inv_flops.v` puts two inverters after the flop cell and gives the net between them the RTL's name | the library has only reset-to-0 flops, so the synthesis keeps these bits inverted, in flops with no name. Each cell sits in its register's numbering (`_49293_` is `pwh_q[6]`, `_49295_` `pwh_q[8]`), and the mux of `pw = wide ? pwh_q : pwq_q` takes the two bit-7 cells on its two inputs. Naming only the inverse of the cell's output would cut the RTL side alone: the netlist's loads read the cell itself | the four units |
+| **Constant flops**: 12 pin flop bits (`sel_q[7:6]`, `shsel_q[7:6]`, `byp_q[3:1]`, `shbyp_q[3:1]`, `shd_q[3]`, `out_q[3]`) are matched to netlist nets tied to 0 | the synthesis found them constant and removed them (its log: "Setting constant 0-bit at position ..."); no legal word sets them. The RTL's flop is compared with 0 in its piece | the pin flops |
+| **A merged flop**: the SPI's `sck_q` is matched to unit 0's `sync3[1]` | `sck_q <= sck` with `sck = sync2_q[1]` (pe_spi.sv), and `sync3_q <= sync2_q` (pe_core.sv): the same input, the same reset; the netlist's only flop with D = `sync2[1]` serves both. Both RTL flops are compared with it | the host's argument bytes, the host |
+| **`core.host.miso` not matched** | in the RTL it is an alias of `spi.tx_q[7]` ahead of `uo_out[3]`; in the netlist the flop drives `uo_out[3]` and the name sits on a buffer after it, so matched, it would cut the two sides on either side of the flop | `uo_out[3]`, now in the host's piece |
+| **The command FSM left unmatched, and PDR** | the synthesis's FSM pass re-encoded `cmd_q` (binary, 11 states) one-hot, ten bits with the reset state all zero, beside four unnamed flops that hold the binary code (each reads exactly the one-hot bits of the states with its bit set). The one-hot bits keep the RTL's names, so neither encoding matches. Each piece that reads the state holds both encodings, and k-induction can't relate them; PDR does | the host, the mailbox, the four threads |
+| **Merges kept apart**: the host's `reg_q`, which the netlist names after unit 0's port `rd_reg`, is merged with the host, and the SCK flop with unit 0, by the merge patterns themselves | either would join unit 0's piece with the host's into one too large for PDR (this EQY's `nomerge` has no effect) | unit 0, the host |
+| **Final netlist**: the 44 SRAM pin buffers boxed by instance name, every other buffer its liberty function; the names flattening and the layout add (`hold5290.X`, `net5288`, `clknet_*`) made private | the RTL has only `core.*` names and ports, and with the buffers X = A each net keeps its synthesis name | all, on the final netlist |
+| Unmatched, as before: `core.fetch`, `core.exec.tb_next`, `core.decode.ra`, `core.decode.rb`, `core.host.rd_here`, the clock's port wires | the synthesis kept these names on nets it computes again from their inputs; matched, they would give one side a free value the chip can't have | |
+
+Bit 15 of each unit's TXMODE was removed as constant too (KEEP0), but it is not matched to a constant: the
+host's RDREG reads it in the host's piece, and EQY compares a constant-matched bit only in the piece that drives
+it, while in a piece that reads it the RTL gets a free value and the netlist its 0. PDR found exactly that
+counterexample (RDREG of TXMODE with bit 15 at 1 on the RTL side), so the four RTL flops stay in the host's
+piece, where PDR shows they stay 0.
+
+EQY's own `sat` strategy is not used. With this yosys (0.69), its base case (`sat -tempinduct -set-init-undef
+-set-def-formal ...`) has no model at all on a piece that has flops on both sides: `-set-init-undef` with
+`-set-def-formal` is unsatisfiable there, so the base case passes without checking anything, and the strategy
+proved two pieces with planted bugs, among them an inverted `uo_out[3]` buffer. This check's earlier result, "90 of
+109 pieces proved", came from that strategy, so those were not proofs. SBY's k-induction found both bugs in its
+base case.
+
+### What the check assumes
+
+- **One clock.** EQY puts every flop on one global clock and never looks at the clock nets. In both netlists
+  every flop's clock pin, and the SRAM's, reaches the `clk` pin through buffers only (6 for every flop in the
+  final netlist, 9 for the SRAM), checked from the netlist text, not by EQY. So the SRAM's `A_CLK`, tied off on
+  both sides, stands for a real connection to `clk`.
+- **Black boxes.** The SRAM macro and its 44 pin buffers: their inputs are proved equal, their behaviour is not
+  part of this check (the RTL instantiates the same cells).
+- **Cell functions.** Each cell behaves as its liberty function says; the layout against the netlist is LVS's
+  check, not this one.
+- **Starting state.** EQY's, as above; with every flop reset (property 5) it covers every run from reset.
+
+### Teeth
+
+Bugs planted in scratch copies of a netlist (`plant_netlist.py`; the runs here put several in one copy, in pieces
+that share no logic, and `teeth.sh` plants them one at a time). Each must make the piece it is in fail, with a
+counterexample.
+
+| Bug | Netlist | Technique it tests | Piece that fails, on | Found by |
+|---|---|---|---|---|
+| `swap_reset:_49784_`: unit 1's `pwq_q[7]` resets to the wrong value | synthesis | inverted flops | unit1, `pwq_q[7]` | k-induction, base case |
+| `swap_reset:_49294_`: unit 0's `pwh_q[7]` the same | synthesis | inverted flops, the merges kept apart | unit0, `pwh_q[7]` | k-induction, base case |
+| `invert_d:_49109_`: `byp_q[0]` loads the inverse | synthesis | constant flops | pins, `byp_q[0]` | k-induction, base case |
+| `drop_flop:_49108_`: the real flop `byp_q[4]` removed and its net tied to 0, as the synthesis does to the constant ones | synthesis | constant flops (a wrong one is caught) | pins, `byp_q[4]`; and `uo_out.4`, which reads it | k-induction, base case |
+| `hold_d:_51293_`: `hm_wdata[9]` never loads | synthesis | the merged SCK flop | `core.hm_wdata.9`, `hm_wdata[9]` | k-induction, base case |
+| `buf_to_inv:_52053_`: `uo_out[3]` through an inverter | synthesis | `core.host.miso` unmatched | host, `uo_out[3]` | k-induction, base case |
+| `rewire_d:_51385_:_51391_`: the FSM's one-hot RUN bit takes SETPC's next state | synthesis | the FSM unmatched, PDR | thread0 (by PDR), thread1-3, on `run_d`, `d_d` | PDR; k-induction, base case |
+| `invert_d:_51983_`: bit 0 of the FSM's unnamed binary copy loads the inverse | synthesis | the FSM unmatched, PDR | host, `spi.tx_q[0]` | PDR |
+| `buf_to_inv:fanout3296`: a layout fanout buffer on unit 2's `tx_stf_q` inverts | final | the final netlist's buffers | unit2, `la_d`, `lb_d` | PDR |
+| `buf_to_inv:hold5195`: a hold cell on the host's `addr_q[7]` inverts | final | the final netlist's buffers | host, `addr_q[7]`; `core.mem.addr.0`, `sram_addr[7]` | k-induction, base case |
+
+In each run every other piece still passes. The RTL-side tooth `netlist_differs` (above) fails the uio pads' piece.
 
 ## Running
 
@@ -153,8 +198,8 @@ FORMAL_IMAGE=ghcr.io/librelane/librelane:3.1.0.dev4 formal/run.sh
 | `FORMAL_IMAGE` | run each job in this container image (it has sby, eqy, yosys with slang and bitwuzla) |
 | `FORMAL_DOCKER` | the docker command (default `docker`), for example a wrapper that adds memory and CPU limits |
 | `FORMAL_WORK` | where the solvers' work folders go (default `formal/work`; every job together is about 300 MB) |
-| `PDK_ROOT`, `FORMAL_NETLIST` | the equivalence check: the PDK and the netlist to compare |
-| `FORMAL_JOBS` | parallel pieces in the equivalence check (default 8) |
+| `PDK_ROOT`, `FORMAL_NETLIST` | the equivalence check: the PDK and the netlist to compare, the synthesis step's `tt_um_sarkar22_pe.nl.v` or the final `final/nl/tt_um_sarkar22_pe.nl.v` |
+| `FORMAL_JOBS` | parallel pieces in the equivalence check (default 4) |
 
 The image has neither make nor awk, which eqy's strategies use; `bin/make` and `bin/awk` stand in for the
 parts eqy needs, and `run.sh` puts them on PATH only when the real ones are missing.
@@ -163,22 +208,25 @@ parts eqy needs, and `run.sh` puts them on PATH only when the real ones are miss
 the ones here: after a change to the flops, copy the new ones in.
 
 The proofs alone (the prove tasks) take under a minute; the covers take about 25 minutes and the equivalence
-check about one. A CI workflow would need the LibreLane image (or an OSS CAD Suite with yosys-slang and
-bitwuzla), about 30 minutes for every job or about a minute for the prove tasks, and for the equivalence check
-the PDK and a netlist from the synthesis step.
+check a minute or two with 4 jobs. A CI workflow would need the LibreLane image (or an OSS CAD Suite with
+yosys-slang and bitwuzla), about 30 minutes for every job or about a minute for the prove tasks, and for the
+equivalence check the PDK and a netlist from the flow. An EQY run writes a folder per piece, about 3000 files and
+60 MB in all, and `run.sh` replaces an earlier `chip_eqy` folder in `FORMAL_WORK`. `teeth.sh` with `FORMAL_NETLIST`
+set also runs the netlist bugs, one EQY run each.
 
 ## Files
 
 | File | What |
 |---|---|
-| `run.sh`, `teeth.sh` | run the jobs, plant the bugs |
+| `run.sh`, `teeth.sh` | run the jobs, plant the bugs (in the RTL, or in the netlist) |
 | `pads.sv`, `pads.sby` | properties 1, 1b, 2 |
 | `isolation.sv`, `isolation.sby` | properties 3, 3b, 3c |
 | `shift_timing.sv`, `shift_timing.sby` | property 4 |
 | `reset_flops.sv`, `probes_reset.ys`, `gen_reset.py`, `reset_flops.ys` | property 5; the first two are generated |
 | `reset_pads.sv`, `reset.sby` | property 5b, and the tasks of property 5 |
 | `covers_deep.sv`, `covers_deep.sby`, `cut_cover.ys` | the deep covers |
-| `chip.eqy`, `buf_bbox.v`, `unbuf.v` | the equivalence check |
+| `chip.eqy`, `buf_bbox.v`, `pinbuf_box.v`, `inv_flops.v`, `unbuf.v` | the equivalence check |
+| `plant_netlist.py` | plant a bug in a scratch copy of a netlist, for `teeth.sh` |
 | `read_chip.ys`, `read_shift.ys`, `sram_free.v` | read the design |
 | `probes_*.ys` | connect each wrapper's probes to the flops it names, after flattening |
 | `cut_host.ys` | the host-command cut |

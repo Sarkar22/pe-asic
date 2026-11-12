@@ -1,44 +1,111 @@
-# Equivalence of the pre-layout gate netlist (the flow's synthesis step, with the IHP SG13CMOS5L cells) against
-# the RTL as slang reads it, as the flow reads it. run.sh fills in @ROOT@ (this repository), @PDK_ROOT@ and
-# @NETLIST@ (FORMAL_NETLIST). The SRAM macro is a black box on both sides, so its inputs must match and its
-# outputs are shared. So are the 44 SRAM pin buffers, which the RTL instantiates by name (buf_bbox.v). The
-# other cells' functions come from the PDK's liberty.
+# Equivalence of a gate netlist against the RTL as slang reads it, as the flow reads it. The netlist is either
+# the flow's synthesis output or the final netlist after placement and routing (with its repair buffers, hold
+# cells and clock tree): the same file serves both. run.sh fills in @ROOT@ (this repository), @PDK_ROOT@ and
+# @NETLIST@ (FORMAL_NETLIST). The cells' functions come from the PDK's liberty. The SRAM macro is a black box
+# on both sides, so its inputs must match and its outputs are shared; so are the SRAM's 44 pin buffers, which
+# the RTL instantiates by name (pinbuf_box.v).
 #
 # EQY matches nets of the same name on both sides (flop outputs and the RTL names the synthesis kept), cuts
-# the two designs at those nets, and proves each piece in between. The pieces are merged per block below,
-# which keeps the number of proof folders small.
+# the two designs at those nets, and proves each piece in between: first by k-induction (ind), and where that
+# doesn't close, by PDR (pdr), which finds its own invariants. A matched net is both an input of the
+# pieces that read it and an output, compared, of the piece that drives it, so a wrong match fails a piece;
+# it can't make one pass. The pieces are merged per block below, which keeps the number of proof folders
+# small. Every rule below that is specific to this netlist says how it was derived.
 
 [options]
 splitnets on
 
 [gold]
 read_verilog -sv @ROOT@/verif/sram_blackbox.v
+# The RTL instantiates the library's sg13cmos5l_buf_2 for the SRAM's pin buffers (pe_mem.sv); slang needs a
+# module for it, and those 44 cells then become the pin buffer box.
 read_verilog -sv @ROOT@/formal/buf_bbox.v
 read_slang --top tt_um_sarkar22_pe @ROOT@/src/project.sv @ROOT@/src/pe_pkg.sv @ROOT@/src/pe_decode.sv @ROOT@/src/pe_core.sv @ROOT@/src/pe_thread.sv @ROOT@/src/pe_exec.sv @ROOT@/src/pe_regfile.sv @ROOT@/src/pe_mailbox.sv @ROOT@/src/pe_pins.sv @ROOT@/src/pe_shift.sv @ROOT@/src/pe_mem.sv @ROOT@/src/pe_host.sv @ROOT@/src/pe_spi.sv
+read_verilog -sv @ROOT@/formal/pinbuf_box.v
 hierarchy -top tt_um_sarkar22_pe
+select -assert-count 44 t:sg13cmos5l_buf_2
+chtype -set pe_sram_pinbuf t:sg13cmos5l_buf_2
+delete =sg13cmos5l_buf_2
 proc
 flatten
 # slang joins each port to its connection with a $buf cell; make those plain connections again.
 techmap -map @ROOT@/formal/unbuf.v t:$buf
 # One net per bit, as in the netlist.
 splitnets
-# The SRAM's clock pin is the chip's clk pin itself on both sides (pe_mem.sv; the netlist's .A_CLK(clk)). A
-# box input driven straight by a chip input makes a piece with no logic, which EQY rejects, so the pin is tied
-# off on both sides.
+# The SRAM's clock pin is the chip's clk pin on both sides (pe_mem.sv; in the netlist A_CLK reaches clk through
+# clock buffers only). A box input driven straight by a chip input makes a piece with no logic, which EQY
+# rejects, so the pin is tied off on both sides.
 cd tt_um_sarkar22_pe
 connect -port core.mem.sram A_CLK 1'0
 cd ..
 
 [gate]
 read_verilog -sv @ROOT@/verif/sram_blackbox.v
-read_verilog -sv @ROOT@/formal/buf_bbox.v
+read_verilog -sv @ROOT@/formal/pinbuf_box.v
 read_liberty -nooverwrite -ignore_miss_func @PDK_ROOT@/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/lib/sg13cmos5l_stdcell_typ_1p20V_25C.lib
 read_verilog @NETLIST@
 hierarchy -top tt_um_sarkar22_pe
+cd tt_um_sarkar22_pe
+# The SRAM's 44 pin buffers, by instance name (pe_mem.sv's g_addr, g_din, g_dout and pinbuf_men, _wen, _ren),
+# which the layout keeps. Every other buffer, the layout's included, keeps its liberty function X = A.
+select -assert-count 44 c:core.mem.*pinbuf*
+chtype -set pe_sram_pinbuf c:core.mem.*pinbuf*
+# The reset-to-1 bits of each unit's window points (pwq_q[7:6], pwh_q[7]; section 8: 192 and 128) are held
+# inverted in reset-to-0 flops that have no name, the library's only kind. Each cell sits in its register's
+# numbering (_49293_ is pwh_q[6], _49294_ this bit, _49295_ pwh_q[8]; _49308_ pwq_q[5], _49311_ pwq_q[8]), and
+# the mux for pw = wide ? pwh_q : pwq_q takes _49294_'s output on A1 and _49310_'s on A0. inv_flops.v puts two
+# inverters after each cell, and the net between them, the RTL's value, gets the RTL's name.
+techmap -map @ROOT@/formal/inv_flops.v c:_49294_ c:_49309_ c:_49310_ c:_49768_ c:_49783_ c:_49784_ c:_50242_ c:_50257_ c:_50258_ c:_50716_ c:_50731_ c:_50732_
+chtype -map $__pe_dfrbpq_1 sg13cmos5l_dfrbpq_1
+rename _49294_.rtl \core.gen_shift[0].shift.pwh_q[7]
+rename _49309_.rtl \core.gen_shift[0].shift.pwq_q[6]
+rename _49310_.rtl \core.gen_shift[0].shift.pwq_q[7]
+rename _49768_.rtl \core.gen_shift[1].shift.pwh_q[7]
+rename _49783_.rtl \core.gen_shift[1].shift.pwq_q[6]
+rename _49784_.rtl \core.gen_shift[1].shift.pwq_q[7]
+rename _50242_.rtl \core.gen_shift[2].shift.pwh_q[7]
+rename _50257_.rtl \core.gen_shift[2].shift.pwq_q[6]
+rename _50258_.rtl \core.gen_shift[2].shift.pwq_q[7]
+rename _50716_.rtl \core.gen_shift[3].shift.pwh_q[7]
+rename _50731_.rtl \core.gen_shift[3].shift.pwq_q[6]
+rename _50732_.rtl \core.gen_shift[3].shift.pwq_q[7]
+# Pin flop bits the synthesis found constant and removed (its log: "Setting constant 0-bit at position ..."
+# for pins.shsel_q, sel_q, shbyp_q, byp_q, shd_q and out_q; no legal word sets them): a net of each name, tied
+# to 0, stands for the missing flop, so the RTL's flop is compared with 0 in its piece. Only that piece reads
+# them. Bit 15 of each unit's TXMODE was removed the same way (KEEP0), but the host's RDREG reads it in another
+# piece, where EQY would give the RTL a free value for it and the netlist its 0; it is left unmatched, so the
+# host's piece holds the RTL's four flops, and PDR shows they stay 0.
+add -wire \core.pins.shsel_q[6] 1
+add -wire \core.pins.shsel_q[7] 1
+add -wire \core.pins.sel_q[6] 1
+add -wire \core.pins.sel_q[7] 1
+add -wire \core.pins.shbyp_q[1] 1
+add -wire \core.pins.shbyp_q[2] 1
+add -wire \core.pins.shbyp_q[3] 1
+add -wire \core.pins.byp_q[1] 1
+add -wire \core.pins.byp_q[2] 1
+add -wire \core.pins.byp_q[3] 1
+add -wire \core.pins.shd_q[3] 1
+add -wire \core.pins.out_q[3] 1
+connect -set \core.pins.shsel_q[6] 1'0
+connect -set \core.pins.shsel_q[7] 1'0
+connect -set \core.pins.sel_q[6] 1'0
+connect -set \core.pins.sel_q[7] 1'0
+connect -set \core.pins.shbyp_q[1] 1'0
+connect -set \core.pins.shbyp_q[2] 1'0
+connect -set \core.pins.shbyp_q[3] 1'0
+connect -set \core.pins.byp_q[1] 1'0
+connect -set \core.pins.byp_q[2] 1'0
+connect -set \core.pins.byp_q[3] 1'0
+connect -set \core.pins.shd_q[3] 1'0
+connect -set \core.pins.out_q[3] 1'0
+cd ..
 flatten
-# Flattening the cells names their port wires after the synthesis's own cell names (_24378_.A); those
-# can't match anything in the RTL, so they are made private.
-rename -hide w:_*
+# Every name the RTL has is core.* or a port. Flattening names the cells' port wires after the cells
+# (_24378_.A, hold5290.X), and the layout adds nets (net5288, clknet_*): none of them can match anything in the
+# RTL, so they are made private. With the buffers' X = A, each net of the netlist then keeps just its
+# synthesis name, and a box's pins sit on the same nets as the names.
+rename -hide w:* w:core.* %d
 cd tt_um_sarkar22_pe
 connect -port core.mem.sram A_CLK 1'0
 cd ..
@@ -58,14 +125,28 @@ gold-nomatch /core\.decode\.r[ab]\[[0-9]+\]/
 gate-nomatch /core\.decode\.r[ab]\[[0-9]+\]/
 gold-nomatch core.host.rd_here
 gate-nomatch core.host.rd_here
-# The synthesis's FSM pass re-encoded the host's command state cmd_q from binary to one-hot and dropped the
-# reset state's bit, keeping the names: the netlist's cmd_q[1] to cmd_q[10] are one-hot bits, not the RTL's
-# binary bits of the same names. They are not matched, so the host's pieces hold both encodings as state.
+# MISO: in the RTL core.host.miso is an alias of the flop spi.tx_q[7], ahead of uo_out[3]; in the netlist the
+# flop drives uo_out[3] and the name core.host.miso is on a buffer after it. Matched, it would cut the RTL
+# before the pin and the netlist after it.
+gold-nomatch core.host.miso
+gate-nomatch core.host.miso
+# The synthesis's FSM pass re-encoded the host's command state cmd_q (binary, 11 states) as one-hot: the
+# netlist's cmd_q[1] to cmd_q[10] are one-hot bits (the reset state is all zero), beside four unnamed flops
+# that hold the binary code. Neither matches the RTL's binary bits of the same names, so none is matched: each
+# piece that reads the state holds both encodings, and PDR relates them.
 gold-nomatch /core\.host\.cmd_q\[[0-9]+\]/
 gate-nomatch /core\.host\.cmd_q\[[0-9]+\]/
+# The SPI's SCK flop (pe_spi.sv: sck_q <= sck, with sck = sync2_q[1]) and sync3_q[1] (pe_core.sv) take the same
+# input with the same reset, and the synthesis kept one flop for both, under unit 0's port name sync3[1] (the
+# netlist's only flop with D = sync2[1]). Both RTL flops are compared with it.
+gold-match core.host.spi.sck_q core.gen_shift[0].shift.sync3[1]
 
 [partition *]
-merge /core\.gen_shift\[0\]\..*/
+# The pieces are merged per block. Two names are kept out of unit 0's and the host's merges by the patterns
+# themselves (this EQY's nomerge has no effect): the host's reg_q flops, which the netlist names after unit 0's
+# port rd_reg, go with the host, whose command FSM their logic reads; and the SCK flop, one net with unit 0's
+# sync3[1], stays with unit 0. Either one would join the two pieces into one too large for PDR.
+merge /core\.gen_shift\[0\]\.(?!shift\.rd_reg\[).*/
 merge /core\.gen_shift\[1\]\..*/
 merge /core\.gen_shift\[2\]\..*/
 merge /core\.gen_shift\[3\]\..*/
@@ -74,10 +155,35 @@ merge /core\.gen_thread\[1\]\..*/
 merge /core\.gen_thread\[2\]\..*/
 merge /core\.gen_thread\[3\]\..*/
 merge /core\.pins\..*/
-merge /core\.host\..*/
+merge /core\.host\.(?!spi\.sck_q$).*|core\.gen_shift\[0\]\.shift\.rd_reg\[[0-4]\]/
 merge /core\.regfile\..*/
 merge /core\.mailbox\..*/
+name unit0 core.gen_shift[0].shift.b_ep
+name unit1 core.gen_shift[1].shift.b_ep
+name unit2 core.gen_shift[2].shift.b_ep
+name unit3 core.gen_shift[3].shift.b_ep
+name thread0 core.gen_thread[0].thread.bank_q
+name thread1 core.gen_thread[1].thread.bank_q
+name thread2 core.gen_thread[2].thread.bank_q
+name thread3 core.gen_thread[3].thread.bank_q
+name pins core.pins.byp_q[0]
+name host core.host.busy_q
+name regfile core.regfile.rdata_a[0]
+name mailbox core.mailbox.full_d[0]
 
-[strategy sat]
-use sat
-depth 5
+# k-induction with SBY (solver bitwuzla) on every piece: a BMC base case from the initial state (the RTL's
+# flops unknown, the netlist's anywhere) and an induction step, on eqy's xprop model. EQY's own sat strategy is
+# not used: with this yosys (0.69) its base case (sat -set-init-undef -set-def-formal) has no model at all on a
+# piece with flops on both sides, and it passed pieces with planted bugs.
+[strategy ind]
+use sby
+engine smtbmc bitwuzla
+depth 3
+
+# PDR, only for the pieces k-induction leaves open: those that hold the command FSM in both encodings.
+[strategy pdr]
+use sby
+engine abc pdr
+timeout 1800
+# sby replays a counterexample with an SMT solver; the image has bitwuzla (run.sh puts it on PATH).
+option aigsmt bitwuzla
