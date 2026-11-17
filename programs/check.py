@@ -20,9 +20,11 @@ sys.dont_write_bytecode = True
 
 import report                                           # noqa: E402
 
-# Bench modules in programs/bench/, in the order they run.
+# Bench modules in programs/bench/, in the order they run. The last two are the self-tests of the 10BASE-T and
+# USB low-speed checkers (bench/eth_check.py, bench/usb_check.py), whose checks count for those files.
 BENCHES = ['words', 'basic', 'standard', 'trimmed', 'extra', 'manchester', 'dmx', 'ps2', 'mdio', 'jtag_chain',
-           'swd_host', 'i2c_target', 'usb_tx', 'usb_rx', 'usb_dev', 'can', 'bypass']
+           'swd_host', 'i2c_target', 'usb_tx', 'usb_rx', 'usb_dev', 'can', 'bypass', 'eth', 'usb_enum',
+           'eth_check_test', 'usb_check_test']
 
 
 def main(argv):
@@ -61,7 +63,7 @@ def main(argv):
     for p in sorted(count):
         n_pass, n_fail = count[p]
         note = ''
-        if p not in programs:
+        if p not in programs and not os.path.isfile(os.path.join(HERE, p)):
             note = '  (no such file)'
         elif n_pass + n_fail == 0:
             note = '  (no check ran)' if not picks else ''
@@ -69,7 +71,7 @@ def main(argv):
     n_ok = sum(ok for _, ok, _ in log.rows)
     n_bad = len(log.rows) - n_ok
     unchecked = [p for p in programs if sum(count[p]) == 0] if not picks else []
-    missing = [p for p in count if p not in programs]
+    missing = [p for p in count if p not in programs and not os.path.isfile(os.path.join(HERE, p))]
     print('=== %d checks: %d PASS, %d FAIL; %d programs, %d without a check; %.0f s'
           % (len(log.rows), n_ok, n_bad, len(programs), len(unchecked), time.time() - log.t_start))
     print('    time per bench: ' + ', '.join('%s %.0f s' % x for x in times))

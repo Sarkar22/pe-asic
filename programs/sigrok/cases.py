@@ -2093,6 +2093,124 @@ def g_usb(runner, log):
     b.close()
 
 
+# advanced/usb_enum.s: bench/usb_enum.py's host model and the device, with sigrok's usb_request on the transfers
+
+def usb_req_stack(dp, dm):
+    return usb_stack(dp, dm) + [('usb_request', {}, {})]
+
+
+def usb_enum_items(d):
+    """(packets, completed control transfers) as sigrok's usb_packet and usb_request print them. Errors: those of
+    usb_packets(), and usb_request's ERR lines."""
+    pk, errs = usb_packets(d)
+    req = [a.text for a in sorted(d.of('usb_request'), key=lambda a: a.ss) if a.cls.startswith('request-setup')]
+    errs = errs + ['%s %s at %d' % (a.cls, a.text, a.cycle) for a in d.of('usb_request', 'errors')]
+    return (pk, req), errs
+
+
+def ue_setup(addr, req, ep=0):
+    return ['SETUP ADDR %d EP %d' % (addr, ep), usb_expect([0xC3] + list(req) + [0, 0])]
+
+
+def ue_read(addr, req, desc, lose=(), cut=None):
+    """A control read as the packets on the bus (USB 2.0 8.5.3): SETUP, its DATA0 and ACK; INs, each answered by
+    the next piece of min(wLength, len(desc)) bytes, DATA1 first, and the host's ACK, the IN and data packet twice
+    where the host lost its first ACK (8.6.4); then the status OUT, a zero-length DATA1 and the ACK. cut: the data
+    packets after which a new SETUP comes, with no status stage."""
+    out = ue_setup(addr, req) + ['ACK']
+    n = min(req[6] | req[7] << 8, len(desc))
+    tog = 0x4B
+    for k, i in enumerate(range(0, n, 8)):
+        if cut is not None and k == cut:
+            return out
+        pk = ['IN ADDR %d EP 0' % addr, usb_expect([tog] + list(desc[i:i + 8]) + [0, 0])]
+        out += pk * (2 if k in lose else 1) + ['ACK']
+        tog ^= 0x88
+    return out + ['OUT ADDR %d EP 0' % addr, 'DATA1 [ ]', 'ACK']
+
+
+def ue_nodata(addr, req, lose=0):
+    """A request with no data stage: SETUP, DATA0, ACK; the status IN, a zero-length DATA1 (sent again after each
+    lost ACK) and the host's ACK."""
+    return ue_setup(addr, req) + ['ACK'] + ['IN ADDR %d EP 0' % addr, 'DATA1 [ ]'] * (lose + 1) + ['ACK']
+
+
+def ue_request(req, data):
+    kind = 'SETUP in' if req[0] & 0x80 else 'SETUP out'
+    return '%s: [%s ][%s ] : ACK' % (kind, ''.join(' %02X' % b for b in req), ''.join(' %02X' % b for b in data))
+
+
+def bench_usb_enum(r):
+    """The packets bench/usb_check.py found in the same record, in sigrok's summary form."""
+    return [usb_expect(list(pk.octets)) if pk.octets and pk.octets[0] in USB_PID else 'bytes %s' % hexs(pk.octets)
+            for pk in r.rep.packets]
+
+
+def usb_enum_run(script, t_end, **kw):
+    import usb_enum
+    return usb_enum.run(script, t_end, **kw)
+
+
+def g_usb_enum(runner, log):
+    import usb_enum as U
+    D = U.DESC
+    log.group('advanced/usb_enum.s', title='USB low-speed device on endpoint 0, enumerated by bench/usb_enum.py\'s '
+              'host model: D+ io0, D- io1')
+    st = usb_req_stack('uio0', 'uio1')
+    b = Batch(runner, 'power-up enumeration: GET_DESCRIPTOR at 0, SET_ADDRESS(9), GET_DESCRIPTOR at 9; 4 thread '
+              'placements, alignments and sampling phases, the host 0.05% fast and slow', 'packets and transfers')
+    want = (ue_read(0, U.GET_DEV(18), D) + ue_nodata(0, U.SET_ADDR(9)) + ue_read(9, U.GET_DEV(18), D),
+            [ue_request(U.GET_DEV(18), D), ue_request(U.SET_ADDR(9), b''), ue_request(U.GET_DEV(18), D)])
+    for k, (th, al, ph, kw) in enumerate((((0, 1, 2), 0, 0.0, {}), ((3, 0, 1), 3, 7.5, dict(period=U.BIT / 1.0005)),
+                                          ((2, 1, 0), 2, 15.0, dict(period=U.BIT / 0.9995)),
+                                          ((1, 2, 3), 1, 5.0, dict(gap_data=2.0, gap_hs=2.0, gap_tr=2.0)))):
+        ctx = b.run('usb_enum_quick_%d' % k, usb_enum_run, U.quick, 12e6, threads=th, align=al, phase=ph, host_kw=kw)
+        got, errs, d = b.sigrok(ctx, st, usb_enum_items, want)
+        b.cross(ctx.name, bench_usb_enum(ctx.value), got[0])
+        if U.verdict(ctx.value):
+            b.fail(ctx.name, 'bench/usb_check.py: %s' % U.verdict(ctx.value))
+    b.close()
+    b = Batch(runner, 'enumeration with two 10 ms resets and keep-alives; a SETUP to the old address left unanswered',
+              'packets and transfers')
+    want = (ue_read(0, U.GET_DEV(64), D) + ue_nodata(0, U.SET_ADDR(5)) + ue_read(5, U.GET_DEV(18), D) +
+            ue_setup(0, U.GET_DEV(8)),
+            [ue_request(U.GET_DEV(64), D), ue_request(U.SET_ADDR(5), b''), ue_request(U.GET_DEV(18), D)])
+    ctx = b.run('usb_enum_resets', usb_enum_run, U.enumerate_, 40e6)
+    got, errs, d = b.sigrok(ctx, st, usb_enum_items, want)
+    b.cross(ctx.name, bench_usb_enum(ctx.value), got[0])
+    n_rst = len(d.of('usb_signalling', 'reset'))
+    if n_rst != 2 or U.verdict(ctx.value):
+        b.fail(ctx.name, 'usb_signalling resets %d (want 2); %s' % (n_rst, U.verdict(ctx.value)))
+    b.close()
+    # usb_request has no time-out after a data packet: after a lost ACK or a corrupted packet it prints ERR lines and
+    # reports later transfers as BULK, so these runs are judged on usb_packet's packets alone
+    b = Batch(runner, 'lost ACKs; faults (NAK, other addresses and endpoints, a corrupted SETUP data packet, '
+              'corrupted SETUP, IN and OUT tokens, STALL); a SETUP and a reset in the middle of transfers', 'packets')
+    want = ue_read(0, U.GET_DEV(18), D, lose=(1,)) + ue_nodata(0, U.SET_ADDR(6), lose=1) + \
+        ue_read(6, U.GET_DEV(18), D, lose=(0, 2))
+    ctx = b.run('usb_enum_lost', usb_enum_run, U.lost, 20e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    req = list(U.GET_DEV(18))
+    want = (['IN ADDR 0 EP 0', 'NAK'] + ue_setup(3, req) + ['IN ADDR 3 EP 0'] + ue_setup(0, req, ep=1) +
+            ['IN ADDR 0 EP 2'] + ue_setup(0, req) * 2 + ue_read(0, req, D)[:3] + ['IN ADDR 0 EP 0'] +
+            ue_read(0, req, D)[3:-3] + ['IN ADDR 0 EP 0', 'NAK', 'OUT ADDR 0 EP 0', 'DATA1 [ ]', 'OUT ADDR 0 EP 0',
+                                        'DATA1 [ ]', 'ACK'] +
+            ue_setup(0, [0x80, 6, 0, 2, 0, 0, 9, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL', 'OUT ADDR 0 EP 0', 'DATA1 [ ]',
+                                                         'STALL'] +
+            ue_setup(0, [0, 9, 1, 0, 0, 0, 0, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL'] + ue_read(0, req, D))
+    ctx = b.run('usb_enum_faults', usb_enum_run, U.faults, 30e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, lambda got, errs: (
+        got == want and len(errs) == 4 and errs[0].startswith('crc16-err') and
+        all(e.startswith('crc5-err') for e in errs[1:]),
+        'sigrok %s %s, wanted %s with a CRC16 error on the corrupted SETUP data and CRC5 errors on the corrupted SETUP, '
+        'IN and OUT tokens' % (short(got), errs, short(want))), bench=bench_usb_enum(ctx.value))
+    want = (ue_read(0, U.GET_DEV(64), D, cut=1) + ue_read(0, req, D) + ue_nodata(0, U.SET_ADDR(7)) +
+            ue_read(7, req, D, cut=1) + ue_read(0, req, D) + ue_setup(7, U.GET_DEV(8)))
+    ctx = b.run('usb_enum_interrupted', usb_enum_run, U.interrupted, 30e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    b.close()
+
+
 def can_rx_run(frames, **kw):
     import can
     r, img, w, sched = can.rx_case(frames, **kw)
@@ -2579,6 +2697,7 @@ GROUPS = [
     ('swd_host', g_swd_host),
     ('i2c_target', g_i2c_target),
     ('usb', g_usb),
+    ('usb_enum', g_usb_enum),
     ('can', g_can),
     ('units', g_units),
     ('bypass', g_bypass),

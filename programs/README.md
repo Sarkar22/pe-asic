@@ -1,6 +1,6 @@
 # Programs
 
-The programs of section 11.2 of [`docs/ISA.md`](../docs/ISA.md), 48 files, with the benches that check
+The programs of section 11.2 of [`docs/ISA.md`](../docs/ISA.md), 50 files, with the benches that check
 them on the simulator in [`sim/`](../sim). Python 3, standard library only.
 
 ## Running
@@ -8,7 +8,7 @@ them on the simulator in [`sim/`](../sim). Python 3, standard library only.
 From the repository root:
 
 ```
-python3 programs/check.py            # every bench: about two minutes on one core
+python3 programs/check.py            # every bench: about five minutes on one core
 python3 programs/check.py can usb    # only the benches whose names contain one of the words
 ```
 
@@ -38,6 +38,28 @@ same command on every push and pull request.
 The device models and decoders were written alongside the firmware, so a misreading shared by both would
 not show. Nothing here has run on hardware.
 
+## Checkers for 10BASE-T and USB low speed
+
+Three modules in `bench/` were written from the standards before any program that uses them, so that a
+misreading in the firmware can't be shared by its checker:
+
+- `eth_check.py` checks a recorded 10BASE-T pair against IEEE 802.3 clauses 3, 4, 7 and 14 and RFCs 826,
+  894, 791, 792 and 1122: Manchester code, bit rate and jitter, preamble and SFD, frame size, the FCS (with
+  `zlib.crc32`), TP_IDL, link test pulses and their period, the inter-packet gap, collisions, and the ARP and
+  ICMP echo replies field by field. It returns findings with their times.
+- `usb_check.py` checks a recorded D+ and D- pair against USB 2.0 chapters 7 to 9: bit rate and jitter, SYNC,
+  stuffing, PIDs, CRC5 and CRC16, packet format, EOP width, inter-packet delay, the device's response time,
+  keep-alive, reset, and the control transfers (stages, toggles, NAK and retry, the address change after the
+  status stage, the device descriptor). It can also run sigrok's `usb_request` on the same record.
+- `frontend.py` models the board: an RS-485 transceiver of the ISL3176E kind (DI, DE, RO, with the data
+  sheet's delays) and ideal magnetics for 10BASE-T, and the USB bus with its pull-up and pull-downs. Every
+  assumption is stated in the module.
+
+`eth_check_test.py` and `usb_check_test.py` are their self-tests, run by `check.py`: lines built from the
+standards (the 802.3 FCS bit by bit, USB CRCs as section 8.3.5 describes them), one good record that passes
+every check, and one bad record per check that fails exactly that check. Their checks count for
+`bench/eth_check.py` and `bench/usb_check.py` in the summary.
+
 ## Layout
 
 - `basic/`: UART, SPI, write-only I2C, WS2812 and 1-Wire, plus a memory load. Section 11.1's 101-, 97- and
@@ -46,8 +68,8 @@ not show. Nothing here has run on hardware.
   controller), and more protocols written with them.
 - `trimmed/`: UART TX, UART RX and the I2C controller cut down so that four programs fit one 128-word memory.
 - `extra/`: six more protocols.
-- `advanced/`: larger programs. Some use two or three threads, and `usb_dev.s` and `can.s` need the
-  512-word memory.
+- `advanced/`: larger programs. Some use two or three threads, and `usb_dev.s`, `can.s`, `eth_arp.s` and
+  `usb_enum.s` need the 512-word memory.
 - `bench/`: the benches. `check.py` runs the modules listed in its `BENCHES`.
 
 Names repeat across folders, as different code, with two exceptions: `basic/uart_tx.s`,
@@ -110,4 +132,6 @@ push-pull line on an open-drain bus).
 | `advanced/usb_rx.s` | USB low-speed receive | Random packets, alignments, D+ to D- skew up to 160 ns, rate error up to 1.5%, jitter up to 60 ns, 2-bit gaps |
 | `advanced/usb_dev.s` | USB low-speed device link | SETUP and DATA0 with CRC-16, ACK, NAK, IN with DATA1, address filter, bad CRC, turnaround inside 6.5 bit times |
 | `advanced/can.s` | CAN 2.0A node | Receive with stuffing and CRC-15, a stuff bit after the CRC sequence, ACK in its slot, phases, sender 2% off, transceiver delay, CRC and stuff errors; transmit; arbitration won and lost; each direction alone on 128 words |
+| `advanced/eth_arp.s` | 10BASE-T node at 50 MHz: ARP (RFC 826) and ICMP echo (RFC 792) replies, link test pulses | Against a partner line built from IEEE 802.3 and the RFCs, through the RS-485 transceiver model, judged by `bench/eth_check.py`: every reply field by field, the transmit pair against clause 14 (Manchester, bit rate and edge deviation, preamble and SFD, FCS, TP_IDL, link pulses every 8 to 24 ms, the gap before each frame), at three transceiver corners; frames for another station (one with an address one word from ours for each of its three words), runts (46, 62 and 63 octets), FCS errors, ARP for another IP, bad checksums, fragments, multicast, full-size frames, an FLP burst, requests 96 and 47 bit times apart, all accounted for by the program's counters; partner clock 0.01% fast and slow, 12-bit preambles, +/-8 ns jitter at 8 sampling phases, 9 thread pairs and 4 alignments; a request that arrives while the reply goes out; an ARP request padded to 1518 octets; a lone fragment, an echo request with an IP option and one too big for the buffer left unanswered; the frame loss at 802.3's +/-13.5 ns reported; 14 broken copies caught |
+| `advanced/usb_enum.s` | USB low-speed device on endpoint 0 at 50 MHz: the control transfers of enumeration (GET_DESCRIPTOR of the device descriptor, SET_ADDRESS), with the shift units doing NRZI, bit stuffing, the CRC5 and CRC16 checks, the CRC16 of its own data, the end of packet and the clock recovery | Against a host model at the device's pins, through the bus model of `bench/frontend.py`, judged by `bench/usb_check.py`: the enumeration a host does after attach, with two 10 ms resets, a keep-alive every frame, the new address taken after the status stage and the old one then ignored; 8 thread placements, 4 alignments and 8 sampling phases; the host 0.05% fast and slow, edge jitter of +/-22 and +/-70 ns, every inter-packet delay at 2 bit times, EOPs of 1.25 and 1.50 us and of 670 ns at 5 phases; the host's D- 100 and 200 ns behind its D+ (TLST 210 ns); the device's D- lagging its D+ by 40 ns, an 18 ns cable, a data packet ending in a stuffed 0; NAK when nothing is due, other addresses and endpoints ignored, corrupted SETUP data and corrupted SETUP, IN and OUT tokens unanswered, STALL for unsupported requests until the next SETUP; a SET_ADDRESS left in its status stage, then a request with no data stage, leaving the address at 0; lost ACKs, with identical retries and the old address kept until the status ACK; a SETUP and a reset in the middle of a transfer; every answer 2 to 6.5 bit times after the host's EOP; the host's rate and jitter beyond the standard and a dribble bit before the EOP reported; 12 broken copies caught |
 | `advanced/uart_bypass.s` | UART 8N1 pass-through on the bypass lane of `uo4`, one byte replaced in flight | 4 threads x 4 alignments x 4 sender phases at 16 (3.125 Mbaud) and 17 cycles per bit, 2 alignments at 25 and 50, and a few runs at 434, 5208 and 6553: `uo4` equals `ui4` on every cycle except the chosen frame's data bits, which carry the host's byte on that frame's own bit boundaries; the lane switches 3 cycles into the start bit and 9 into the stop bit, with `ui4`, OUT and `uo4` steady 3 cycles either side; a frame rule and a byte rule, no rule, two rules in turn; both lines decoded; 5 broken copies caught |

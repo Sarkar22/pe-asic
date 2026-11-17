@@ -1713,6 +1713,197 @@ async def test_bypass_override(dut):
         assert int(dut.mismatches.value) == 0, f"the netlist and the RTL differ in {int(dut.mismatches.value)} cycles"
 
 
+# ---- 10BASE-T: programs/advanced/eth_arp.s -------------------------------------------------------------------------
+
+class EthPartner:
+    """The other end of a 10BASE-T link, at the pins. Drives ui4 with RO as an RS-485 receiver gives it from the
+    partner's pair (programs/bench/frontend.py, FN6307 typical delays), sampled `phase` ns after each clock edge,
+    and records uo4 (DI) and uo5 (DE) once per cycle, 1 ns after the falling edge where the inputs change. Times
+    count from the partner's start, 20 ns a cycle."""
+
+    def __init__(self, dut, host, phase=7.0):
+        self.dut, self.host, self.phase = dut, host, phase
+        self.c, self.sched, self.rec = 0, [], []
+
+    def drive(self, ro):
+        """RO changes (ns from the partner's start, level), all later than now."""
+        self.sched = sorted(self.sched + [(int(-(-(t - self.phase) // 20)), lv) for t, lv in ro])
+
+    async def run(self):
+        level, i, last = 1, 0, None
+        while True:
+            await FallingEdge(self.dut.clk)
+            while i < len(self.sched) and self.sched[i][0] <= self.c:
+                level = self.sched[i][1]
+                i += 1
+            self.host.other = (self.host.other & ~0x10) | level << 4
+            self.dut.ui_in.value = (self.host.other & 0xF8) | self.host.link
+            await Timer(1, unit="ns")
+            uo = str(self.dut.uo_out.value)[::-1]        # bit 0 first; MISO, bit 3, is not read
+            pads = int(uo[4]) << 4 | int(uo[5]) << 5
+            if pads != last:
+                self.rec.append((self.c, pads))
+                last = pads
+            self.c += 1
+
+    async def until(self, c):
+        while self.c < c:
+            await FallingEdge(self.dut.clk)
+
+
+@cocotb.test()
+async def test_eth_arp(dut):
+    """5.9 end to end, through programs/advanced/eth_arp.s on threads 0 and 1: the host loads the program and posts
+    the MAC and IP; a partner sends an ARP request, an ICMP echo request and an ARP request with an FCS error, built
+    from IEEE 802.3 and RFCs 826 and 792 (programs/bench/eth_check_test.py), through the transceiver model to ui4.
+    The record of uo4 (DI) and uo5 (DE), turned back into the transmit pair by the same model, must pass every check
+    of programs/bench/eth_check.py: a link pulse at start, an ARP reply and an echo reply field by field, the
+    Manchester code, bit rate, preamble, FCS, TP_IDL and the gap before each frame, and no reply to the bad frame.
+    The program's counters, read with RDMEM, must show 2 frames kept and 1 dropped."""
+    sys.path.insert(0, os.path.join(PROGRAMS_DIR, 'bench'))
+    sys.dont_write_bytecode = True      # leave no cache in programs/
+    import eth_check
+    import eth_check_test as G
+    import frontend
+    host = await start(dut)
+    host.other = 0x10                       # RO idles high: a silent pair reads 1 (FN6307's fail-safe receiver)
+    host.drive(1, 0, 0)
+    with open(os.path.join(PROGRAMS_DIR, 'advanced', 'eth_arp.s')) as fh:
+        img = assemble(fh.read())
+    await load_image(host, img)
+    await host.setpc(0, img.labels['rx'])
+    await host.setpc(1, img.labels['tx'])
+    partner = EthPartner(dut, host)
+    cocotb.start_soon(partner.run())
+    await host.run(0, 3)
+    for k in range(0, 10, 2):                   # MAC, then IP: two octets a word, the first in the low byte
+        octs = G.MAC + G.IP
+        await post_wait(host, 4, octs[k] | octs[k + 1] << 8)
+    fe = frontend.Rs485Eth('typ')
+    t = (partner.c + 200) * 20.0
+    rx = []
+    data = bytes((7 * i + 1) & 255 for i in range(56))
+    for f in (G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, G.arp(1, G.PEER_MAC, G.PEER_IP, bytes(6), G.IP)),
+              G.frame(G.MAC, G.PEER_MAC, 0x0800, G.echo(8, G.PEER_IP, G.IP, 0x4321, 9, data)),
+              G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, G.arp(1, G.PEER_MAC, G.PEER_IP, bytes(6), G.IP),
+                      bad_fcs=True)):
+        line, end = G.manchester(G.preamble() + f, t)
+        rx += line
+        t = end + 150e3
+    partner.drive(fe.ro(G.merge(rx)))
+    await partner.until(int(t / 20))
+    di = [(c * 20.0, (v >> 4) & 1) for c, v in partner.rec]
+    de = [(c * 20.0, (v >> 5) & 1) for c, v in partner.rec]
+    di = [x for k, x in enumerate(di) if k == 0 or x[1] != di[k - 1][1]]
+    de = [x for k, x in enumerate(de) if k == 0 or x[1] != de[k - 1][1]]
+    tx = fe.tx_line(di, de, di0=0, de0=0)
+    rep = eth_check.check(tx, G.merge(rx), mac=G.MAC, ip=G.IP, t_start=0.0, t_end=t)
+    assert rep.ok, f"eth_check: {rep.failed()[:4]}"
+    n = rep.checks()
+    assert n['arp_reply'] == (1, 0) and n['icmp_reply'] == (1, 0), f"replies: {n['arp_reply']}, {n['icmp_reply']}"
+    assert n['link_pulse'][0] >= 1 and n['tp_idl'] == (2, 0) and n['fcs'] == (2, 0), f"checks {n}"
+    keep, bad = await host.rdmem(7, 2)
+    assert (keep, bad) == (2, 1), f"counters: {keep} kept, {bad} dropped; want 2 and 1"
+
+
+# ---- USB low speed: programs/advanced/usb_enum.s -------------------------------------------------------------------
+
+class UsbPartner:
+    """The other end of a USB low-speed cable, at the pins: the bus of programs/bench/frontend.py (the device's
+    1.5 kohm pull-up on D-, the host's pull-downs) between the chip's io0 (D+) and io1 (D-) and the host model of
+    programs/bench/usb_enum.py, which runs `script`. Each falling clock edge it gives the bus the pads the chip drives
+    since the rising edge, lets the host act, and drives uio_in with the bus as it is `phase` ns after that rising
+    edge. Times count from the partner's start, 20 ns a cycle."""
+
+    def __init__(self, dut, script, phase=6.0):
+        import frontend
+        import usb_enum
+        self.dut, self.phase, self.c = dut, phase, 0
+        self.bus = frontend.UsbLs()
+        self.host = usb_enum.Host(self.bus)
+        self.value, self.done = None, False
+        self.gen = self.wrap(script)
+        self.wake = 0.0
+
+    def wrap(self, script):
+        self.value = yield from script(self.host)
+
+    async def run(self):
+        while True:
+            await FallingEdge(self.dut.clk)
+            t = self.c * 20.0
+            io, oe = int(self.dut.uio_out.value), int(self.dut.uio_oe.value)
+            self.bus.device(t, io & 1, (io >> 1) & 1, oe & 1, (oe >> 1) & 1)
+            if not self.done and t >= self.wake:
+                self.host.t = t
+                try:
+                    self.wake = self.gen.send(None)
+                except StopIteration:
+                    self.done = True
+            dp, dm = self.bus.level(t + self.phase)
+            self.dut.uio_in.value = dp | dm << 1 | 0xFC
+            self.c += 1
+
+
+@cocotb.test()
+async def test_usb_enumerate(dut):
+    """5.9 end to end, through programs/advanced/usb_enum.s on threads 0 (the device), 1 (the token check) and 2 (the
+    reset watcher): the host loads the program and starts the three; a USB host model at the pins (the bus and the
+    host of programs/bench/frontend.py and usb_enum.py, packets built from USB 2.0 8.3 and 8.4 by
+    programs/bench/usb_check_test.py) reads the 18-byte device descriptor at address 0 in packets of 8, sets address
+    12, reads the descriptor there again with one of its ACKs lost, gets a NAK for an IN with nothing due, drives a
+    50 us SE0 (longer than TDETRST, 2.5 us, so the device may take it as a reset: 7.1.7.5), then reads 8 bytes at
+    address 0 and finds address 12 silent. The record of D+ and D- must pass every check of
+    programs/bench/usb_check.py, told to take that SE0 as a reset (a 10 ms one would be 500,000 cycles): bit rate,
+    jitter, SYNC, stuffing, PIDs, CRC5 and CRC16, EOP and the J after it, inter-packet delay and response time, the
+    control transfers with toggles, the retry and the address change, the descriptor. The counters read with RDMEM
+    must show address 0, 4 SETUPs ACKed and 4 transfers completed."""
+    sys.path.insert(0, os.path.join(PROGRAMS_DIR, 'bench'))
+    sys.dont_write_bytecode = True      # leave no cache in programs/ or sim/
+    import usb_check
+    import usb_enum as U
+    host = await start(dut)
+    host.drive(1, 0, 0)
+    dut.uio_in.value = 0xFE                 # the bus idles at J: D- pulled up, D+ pulled down
+    with open(os.path.join(PROGRAMS_DIR, 'advanced', 'usb_enum.s')) as fh:
+        img = assemble(fh.read())
+    await load_image(host, img)
+    await host.setpc(0, img.labels['dev'])
+    await host.setpc(1, img.labels['tok'])
+    await host.setpc(2, img.labels['rst'])
+
+    def script(h):
+        yield 30e3                          # the threads configure their units
+        yield from U.start(h)
+        d1 = yield from h.control_read(0, U.GET_DEV(18))
+        ok = yield from h.control_nodata(0, U.SET_ADDR(12))
+        d2 = yield from h.control_read(12, U.GET_DEV(18), lose=(1,))
+        nak = (yield from h.in_(12))[0]
+        yield from h.reset(50e3)
+        yield from h.wait(0.1e6)
+        d3 = yield from h.control_read(0, U.GET_DEV(8))
+        old = yield from h.setup(12, U.GET_DEV(8), tries=1)
+        yield from h.wait(50e3)
+        return dict(d1=d1, set=ok, d2=d2, nak=nak, d3=d3, old=old)
+    partner = UsbPartner(dut, script)
+    await host.run(0, 7)
+    cocotb.start_soon(partner.run())
+    for _ in range(400):
+        if partner.done:
+            break
+        await host.wait(1000)
+    assert partner.done, "the host model's script did not finish"
+    v = partner.value
+    assert v == dict(d1=U.DESC, set=True, d2=U.DESC, nak='NAK', d3=U.DESC[:8], old=False), f"host's view: {v}"
+    rep = usb_check.check(partner.bus.record(partner.c * 20.0), descriptor=U.DESC, tdrst=40e3)
+    assert rep.ok, f"usb_check: {rep.failed()[:4]}"
+    n = rep.checks()
+    assert n['descriptor'] == (3, 0) and n['retry'][0] >= 1 and n['reset'][0] >= 2 and n['address'][0] >= 1, \
+        f"checks {n}"
+    addr, nsetup, nreq = await host.rdmem(13, 3)
+    assert (addr, nsetup, nreq) == (0, 4, 4), f"counters: address {addr}, {nsetup} SETUPs, {nreq} transfers"
+
+
 # ---- test_matches_simulator: the RTL beside the published simulator ------------------------------------
 
 # Section 9.1 at its limits: SCK period 6 or more (clk/6), each SCK low and high 2 or more, CS high 3 or more, CS moving
