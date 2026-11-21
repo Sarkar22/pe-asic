@@ -33,7 +33,7 @@ from report import Chip, assemble, src
 
 PROGRAMS = ('advanced/usb_enum.s',)
 PROG = 'advanced/usb_enum.s'
-WORDS = 493                     # section 11.2's count for the program
+WORDS = 503                     # section 11.2's count for the program
 BIT = 1e9 / 1.5e6               # ns, USB 2.0 7.1.11
 CYCLE = 20.0                    # ns at 50 MHz
 DP, DM = 0, 1                   # io0, io1
@@ -173,6 +173,20 @@ def decode_device(states, period=BIT):
 # ---------------------------------------------------------------------------------------------------------------
 # the host
 
+def stuff_bits(raw):
+    """Where usb_check_test.stuff put its stuff bits in a packet's line bits: after six 1s in a row, the SYNC's
+    last 1 counted (7.1.9)."""
+    pos, run, i = [], 1, 8
+    while i < len(raw):
+        if run == 6:
+            pos.append(i)
+            run = 0
+        else:
+            run = run + 1 if raw[i] else 0
+        i += 1
+    return pos
+
+
 class Host:
     """A low-speed host at the device's pins. Times in ns. A script is a generator of Host methods (yield from);
     each yield is the time to resume at. period: its bit time; jitter: each transition moved by a uniform amount up
@@ -194,15 +208,18 @@ class Host:
         self.answers = []               # (host packet's SE0-to-J, device's SOP) for each answer
 
     # -- the wire
-    def tx(self, bits, t0, eop=None, jitter=None, dribble=None):
+    def tx(self, bits, t0, eop=None, jitter=None, dribble=None, nostuff=None):
         """Schedules one packet from J at t0: SYNC and stuffing (usb_check_test.stuff), NRZI, then the EOP: SE0 for
         eop bit times, J driven for one bit, released. dribble: bit times of the last level added before the SE0
         (7.1.9.1). skew: D- moves that many ns after D+ at each J-K transition, so the line passes through SE1 or
-        SE0 (7.1.4.1: up to TLST). Returns the SE0-to-J time."""
+        SE0 (7.1.4.1: up to TLST). nostuff: leaves out the packet's stuff bit of that number (0 the first), so
+        seven or more 1s go out in a row, a bit-stuff error (7.1.9). Returns the SE0-to-J time."""
         eop = self.eop if eop is None else eop
         jit = self.jitter if jitter is None else jitter
         drib = self.dribble if dribble is None else dribble
         raw = G.stuff(bits)
+        if nostuff is not None:
+            del raw[stuff_bits(raw)[nostuff]]
         st = J
         b = self.bus
         p = self.period
@@ -297,9 +314,10 @@ class Host:
         self.next_frame = self.t + 0.1e6
 
     # -- transactions (8.4.6, 8.5.3)
-    def setup(self, addr, req, endp=0, bad=False, tries=3, dribble=None, bad_token=False):
+    def setup(self, addr, req, endp=0, bad=False, tries=3, dribble=None, bad_token=False, nostuff=None, extra=()):
         """SETUP and DATA0 with the 8 bytes of req. True once the device ACKs. dribble: bit times added before the
-        data packet's EOP. bad_token: a CRC5 bit of the SETUP token flipped."""
+        data packet's EOP. bad_token: a CRC5 bit of the SETUP token flipped. nostuff: the data packet's stuff bit of
+        that number left out (Host.tx). extra: bits sent after the data packet's CRC16, before its EOP."""
         for _ in range(tries):
             yield from self.frame_check()
             tokb = G.token('SETUP', addr, endp)
@@ -307,20 +325,22 @@ class Host:
                 tokb = list(tokb)
                 tokb[-1] ^= 1               # a CRC5 bit
             yield from self.send(tokb, self.gap_tr)
-            t = yield from self.send(G.data('DATA0', req, bad_crc=bad), self.gap_data, dribble=dribble)
+            t = yield from self.send(G.data('DATA0', req, bad_crc=bad) + list(extra), self.gap_data,
+                                     dribble=dribble, nostuff=nostuff)
             pk = yield from self.answer(t)
             self.log.append(('setup', addr, bytes(req), pk.name if pk else None))
             if pk is not None and pk.ok and pk.name == 'ACK':
                 return True
-            if bad or bad_token:
+            if bad or bad_token or nostuff is not None or extra:
                 return False
         return False
 
-    def in_(self, addr, endp=0, ack=True, bad_token=False, dribble=None):
+    def in_(self, addr, endp=0, ack=True, bad_token=False, dribble=None, ack_dribble=None, token=None):
         """One IN transaction: ('data', Rx), ('NAK', Rx), ('STALL', Rx), ('bad', Rx) or ('none', None). The host
-        ACKs a good data packet unless ack is False (its ACK lost)."""
+        ACKs a good data packet unless ack is False (its ACK lost). dribble, ack_dribble: the token's and that ACK's
+        dribble. token: the token's bits instead of a good IN token."""
         yield from self.frame_check()
-        tokb = G.token('IN', addr, endp)
+        tokb = G.token('IN', addr, endp) if token is None else token
         if bad_token:
             tokb = list(tokb)
             tokb[-1] ^= 1                   # a CRC5 bit
@@ -334,22 +354,22 @@ class Host:
             return 'bad', pk
         if pk.name.startswith('DATA'):
             if ack:
-                yield from self.send(G.handshake('ACK'), self.gap_hs)
+                yield from self.send(G.handshake('ACK'), self.gap_hs, dribble=ack_dribble)
             self.log.append(('in', addr, pk.name, pk.payload, ack))
             return 'data', pk
         self.log.append(('in', addr, pk.name))
         return pk.name, pk
 
-    def out(self, addr, payload, toggle='DATA1', endp=0, bad=False, bad_token=False):
+    def out(self, addr, payload, toggle='DATA1', endp=0, bad=False, bad_token=False, dribble=None, tok_dribble=None):
         """OUT and its data packet: the device's handshake name, or None. bad_token: a CRC5 bit of the token
-        flipped."""
+        flipped. dribble, tok_dribble: the data packet's and the token's dribble."""
         yield from self.frame_check()
         tokb = G.token('OUT', addr, endp)
         if bad_token:
             tokb = list(tokb)
             tokb[-1] ^= 1                   # a CRC5 bit
-        yield from self.send(tokb, self.gap_tr)
-        t = yield from self.send(G.data(toggle, payload, bad_crc=bad), self.gap_data)
+        yield from self.send(tokb, self.gap_tr, dribble=tok_dribble)
+        t = yield from self.send(G.data(toggle, payload, bad_crc=bad), self.gap_data, dribble=dribble)
         pk = yield from self.answer(t)
         name = pk.name if pk is not None and pk.ok else None
         self.log.append(('out', addr, name))
@@ -627,18 +647,191 @@ INTERRUPTED_WANT = dict(setup1=True, first='data', d1=DESC, set=True, setup2=Tru
 
 
 def dribble(h):
-    """One dribble bit (7.1.9.1: a receiver must accept up to six bit times with no transition before the EOP) on
-    the token of an IN in a data stage and on the data packet of a SETUP, each next to the same transaction sent
-    clean."""
+    """One dribble bit (7.1.9.1: the last bit before the EOP stretched by a bit time, which a receiver must accept)
+    on one packet at a time, the others clean: the data packet of a SETUP; the token of an IN in the data stage; the
+    host's ACK of that data, which must move the device on to the next packet; the token and the zero-length data
+    packet of the status OUT; and the ACK of SET_ADDRESS's status packet, which must make the new address take
+    effect."""
+    yield from start(h)
+    r = {}
+    r['setup'] = yield from h.setup(0, GET_DEV(18), dribble=1, tries=1)
+    kind, pk = yield from h.in_(0, dribble=1, ack_dribble=1)
+    r['in1'] = (kind, pk.name if pk else None, pk.payload if pk else None)
+    kind, pk = yield from h.in_(0)
+    r['in2'] = (kind, pk.name if pk else None, pk.payload if pk else None)
+    kind, pk = yield from h.in_(0, ack_dribble=1)
+    r['in3'] = (kind, pk.name if pk else None, pk.payload if pk else None)
+    r['status_tok'] = yield from h.out(0, [], 'DATA1', tok_dribble=1)
+    r['setup2'] = yield from h.setup(0, GET_DEV(18))
+    for _ in range(3):
+        yield from h.in_(0)
+    r['status_data'] = yield from h.out(0, [], 'DATA1', dribble=1)
+    r['set'] = yield from h.setup(0, SET_ADDR(12))
+    kind, pk = yield from h.in_(0, ack_dribble=1)
+    r['set_status'] = (kind, pk.name if pk else None, pk.payload if pk else None)
+    yield from h.wait(2.2e6)
+    r['at12'] = yield from h.control_read(12, GET_DEV(18))
+    yield from h.wait(0.1e6)
+    return r
+
+
+DRIBBLE_WANT = dict(setup=True, in1=('data', 'DATA1', DESC[:8]), in2=('data', 'DATA0', DESC[8:16]),
+                    in3=('data', 'DATA1', DESC[16:]), status_tok='ACK', setup2=True, status_data='ACK', set=True,
+                    set_status=('data', 'DATA1', b''), at12=DESC)
+
+
+def crc_reach(state, width, poly, target, n, fixed=()):
+    """The first n bits, after the bits `fixed`, that take a CRC register of `width` bits from `state` to `target`:
+    the register as USB 2.0 8.3.5 defines it (the x^(width-1) coefficient first, each bit XORed with it as it
+    enters, the generator's lower terms in poly), searched exhaustively. None if no n bits do it."""
+    mask = (1 << width) - 1
+
+    def feed(s, bits):
+        for b in bits:
+            f = ((s >> (width - 1)) & 1) ^ b
+            s = (s << 1) & mask
+            if f:
+                s ^= poly
+        return s
+    s0 = feed(state, fixed)
+    for v in range(1 << n):
+        bits = [(v >> i) & 1 for i in range(n)]
+        if feed(s0, bits) == target:
+            return list(fixed) + bits
+    return None
+
+
+# A good packet's register ends at the residue, 01100 for CRC5 (8.3.5.1) and 1000000000001101 for CRC16 (8.3.5.2);
+# one more 1 bit, a dribble bit, takes it to 11101 and 0000000000011010. These extra bits reach those values too,
+# but are not a dribble bit: 6 bits after a token, the first a 1 as a dribble bit would be, and 19 after a data
+# packet's CRC16.
+EXTRA_TOK = crc_reach(0b01100, 5, 0b00101, 0b11101, 5, fixed=(1,))
+EXTRA_DATA = crc_reach(0x800D, 16, 0x8005, 0x001A, 16, fixed=(0, 1, 0))
+
+
+def wrong_crc5_then_0(tok):
+    """The token tok (wire order: PID, 11 field bits, CRC5) with its CRC5 replaced by the one wrong value after which a
+    0 bit takes the register to the dribble value 11101, then that 0: a corrupted token (8.3.5.1) that a check of the
+    register and the bit count alone would take for a good token with a dribble bit. A dribble bit has no transition,
+    so in NRZI it is a 1 (7.1.9.1), and a 0 there is no dribble bit."""
+    field = list(tok[8:19])
+    mask, out = 0b11111, []
+    for v in range(32):
+        bits = [(v >> i) & 1 for i in range(5)]
+        s = 0b11111
+        for b in field + bits + [0]:
+            f = ((s >> 4) & 1) ^ b
+            s = (s << 1) & mask
+            if f:
+                s ^= 0b00101
+        if s == 0b11101 and bits != list(tok[19:24]):
+            out.append(bits)
+    assert len(out) == 1, out
+    return list(tok[:19]) + out[0] + [0]
+
+
+BAD_TOK0 = wrong_crc5_then_0(G.token('IN', 0, 0))
+
+
+def near_misses(h):
+    """Packets with bits after their last whole byte that are not a dribble bit (7.1.9.1 allows only bits with no
+    transition): a 0 after an IN token and after a SETUP's data packet; and bits that take the CRC register to the
+    value a dribble bit gives, but are too many (EXTRA_TOK, EXTRA_DATA), or are a 0 after a token whose CRC5 is wrong
+    (BAD_TOK0). All must go unanswered (8.7.1: the CRC
+    fails); the IN after them gets the first data packet; then a whole transfer. A handshake has no CRC, only its
+    PID check (8.7.1), so an ACK with one more bit of either value is taken as an ACK, as bench/usb_check.py also
+    reads it."""
     yield from start(h)
     r = {}
     r['setup'] = yield from h.setup(0, GET_DEV(18))
-    r['in_dribble'] = (yield from h.in_(0, dribble=1))[0]
-    r['in'] = (yield from h.in_(0))[0]
-    r['setup_dribble'] = yield from h.setup(0, GET_DEV(18), dribble=1, tries=1)
-    r['setup2'] = yield from h.setup(0, GET_DEV(18))
+    r['in0'] = (yield from h.in_(0, token=G.token('IN', 0, 0) + [0]))[0]
+    r['in_crc'] = (yield from h.in_(0, token=G.token('IN', 0, 0) + EXTRA_TOK))[0]
+    r['in_bad0'] = (yield from h.in_(0, token=BAD_TOK0))[0]
+    kind, pk = yield from h.in_(0)
+    r['in1'] = (kind, pk.name if pk else None, pk.payload if pk else None)
+    r['setup0'] = yield from h.setup(0, GET_DEV(18), extra=[0], tries=1)
+    r['setup_crc'] = yield from h.setup(0, GET_DEV(18), extra=EXTRA_DATA, tries=1)
+    r['after'] = yield from h.control_read(0, GET_DEV(18))
     yield from h.wait(0.1e6)
     return r
+
+
+NEAR_WANT = dict(setup=True, in0='none', in_crc='none', in_bad0='none', in1=('data', 'DATA1', DESC[:8]), setup0=False,
+                 setup_crc=False, after=DESC)
+
+
+def endpoints(h):
+    """Tokens at the device's address for endpoints 1, 2, 4 and 8, one ENDP bit each (8.3.2.2): SETUP, IN and OUT,
+    all unanswered, before and during a control read at address 0 and at a new address; the transfers then
+    complete."""
+    yield from start(h)
+    r = {}
+    for addr in (0, 10):
+        for ep in (1, 2, 4, 8):
+            r['setup%d_%d' % (addr, ep)] = yield from h.setup(addr, GET_DEV(18), endp=ep, tries=1)
+        r['setup%d' % addr] = yield from h.setup(addr, GET_DEV(18))     # the data stage open: an IN gets data
+        for ep in (1, 2, 4, 8):
+            r['in%d_%d' % (addr, ep)] = (yield from h.in_(addr, endp=ep))[0]
+            r['out%d_%d' % (addr, ep)] = yield from h.out(addr, [], 'DATA1', endp=ep)
+        data = b''
+        for _ in range(3):
+            kind, pk = yield from h.in_(addr)
+            data += pk.payload if kind == 'data' else b''
+        r['data%d' % addr] = data
+        r['status%d' % addr] = yield from h.out(addr, [], 'DATA1')
+        if addr == 0:
+            r['set'] = yield from h.control_nodata(0, SET_ADDR(10))
+            yield from h.wait(2.2e6)
+    yield from h.wait(0.1e6)
+    return r
+
+
+ENDPOINTS_WANT = dict([('setup%d_%d' % (a, e), False) for a in (0, 10) for e in (1, 2, 4, 8)] +
+                      [('in%d_%d' % (a, e), 'none') for a in (0, 10) for e in (1, 2, 4, 8)] +
+                      [('out%d_%d' % (a, e), None) for a in (0, 10) for e in (1, 2, 4, 8)] +
+                      [('setup0', True), ('setup10', True), ('data0', DESC), ('data10', DESC), ('status0', 'ACK'),
+                       ('status10', 'ACK'), ('set', True)])
+
+
+REQ7 = [0x80, 6, 0, 1, 0, 0, 0x7F, 0]     # GET_DESCRIPTOR(DEVICE), wLength 127: seven 1s, then a 0
+REQ8 = [0x80, 6, 0, 1, 0, 0, 0xFF, 0]     # wLength 255: eight 1s
+
+
+def stuff_errors(h):
+    """Bit-stuff errors from the host (7.1.9: seven 1s in a row is a bit-stuff error, and the packet is to be
+    ignored, so no handshake answers it): a SETUP whose DATA0 packet leaves out its first stuff bit, in wLength
+    0x7F, so seven 1s and then a 0 go out, and one in wLength 0xFF, eight 1s; after each, the same SETUP sent
+    clean, and the descriptor read."""
+    yield from start(h)
+    r = {}
+    r['err7'] = yield from h.setup(0, REQ7, nostuff=0, tries=1)
+    r['clean7'] = yield from h.setup(0, REQ7)
+    r['err8'] = yield from h.setup(0, REQ8, nostuff=0, tries=1)
+    r['read8'] = yield from h.control_read(0, REQ8)
+    yield from h.wait(0.1e6)
+    return r
+
+
+STUFF_WANT = dict(err7=False, clean7=True, err8=False, read8=DESC)
+
+
+def flag_chip(*a, **k):
+    """The chip with a probe on every unit's receive buffer: each word that arrives marked last, with its end flags
+    (section 5.9.7: bit 1 a stuff violation, bit 2 the bit after it continued the run), in chip.ends. A probe only:
+    it reads the simulator's state and changes nothing."""
+    chip = Chip(*a, **k)
+    chip.ends, full = [], [0] * 4
+    base = chip.cycle
+
+    def cycle(ui, uio):
+        base(ui, uio)
+        for t in chip.th:
+            u = t.u
+            if u.RXFULL and not full[t.TID] and u.RXBL:
+                chip.ends.append((chip.c, t.TID, u.RXBE, u.RXBN))
+            full[t.TID] = u.RXFULL
+    chip.cycle = cycle
+    return chip
 
 
 def stale(h):
@@ -701,29 +894,37 @@ def device_stats(reps):
     return rate, nxt, par, se0, off, jd
 
 
-def critical_path(text=None):
-    """The cycles from S's time reference (its `now` after a packet's last word) to the `tick` that starts the
-    answer, on the simulator's execute log of a power-up enumeration: the worst case per kind of answer."""
+def critical_path(text=None, host_kw=None):
+    """On the simulator's execute log of a power-up enumeration (S on thread 0, A on 1): the cycles from S's time
+    reference (its `now` after a packet's last word) to the `tick` that starts the answer, the worst case per kind
+    of answer; and the cycles from A's store of a verdict (label vst) to S's load of it (vin for an IN, vtok for a
+    SETUP or OUT), the least per kind of token."""
     img = assemble(text if text is not None else src(PROG), depth=512)
-    ref = img.labels['rend']
-    ticks = {img.labels['shs'] + 4: 'handshake', img.labels['szlp'] + 6: 'zero-length', img.labels['sdata'] + 7: 'data'}
+    L = img.labels
+    ref = L['rend']
+    ticks = {L['shs'] + 4: 'handshake', L['szlp'] + 6: 'zero-length', L['sdata'] + 7: 'data'}
+    loads = {L['vin']: 'IN', L['vtok']: 'SETUP/OUT'}
 
     class Logged(Chip):
         def __init__(self, *a, **k):
             Chip.__init__(self, *a, **k)
             self.log = []
-    r = run(quick, 12e6, chip_cls=Logged, check=False)
-    worst, at = {}, None
+    r = run(quick, 12e6, chip_cls=Logged, check=False, host_kw=host_kw)
+    worst, lead, at, st = {}, {}, None, None
     for c, tid, pc, word in r.chip.log:
+        if tid == 1 and pc == L['vst']:
+            st = c
         if tid != 0:
             continue
+        if pc in loads and st is not None:
+            lead[loads[pc]] = min(lead.get(loads[pc], 1 << 30), c - st)
         if pc == ref:
             at = c
         elif pc in ticks and at is not None:
             k = ticks[pc]
             worst[k] = max(worst.get(k, 0), c - at)
             at = None
-    return worst
+    return worst, lead
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -731,14 +932,14 @@ def critical_path(text=None):
 
 TEETH = [
     ('the toggle not flipped on the host\'s ACK', 'li    R4, WDATA0 ^ WDATA1', 'li    R4, 0'),
-    ('the new address taken at the SETUP, before the status stage', 'st    R1, R7         ; taken when',
-     'st    R1, R7\n        ldi   R7, ADDRV\n        st    R1, R7\n        cp    R6, R1\n        swap  R6\n'
-     '        ori   R6, 0x69\n        ldi   R7, PADDR      ; taken when'),
+    ('the new address taken at the SETUP, before the status stage',
+     'ldi   R7, PADDR\n        st    R1, R7         ; taken when the host ACKs the status packet',
+     'ldi   R7, ADDRV\n        st    R1, R7\n        cp    R6, R1\n        swap  R6\n        ori   R6, 0x69'),
     ('the answer 7 bit times after the EOP (NRSP 260)', '.equ NRSP 176', '.equ NRSP 260'),
-    ('the host\'s data ACKed without its CRC-16 check', 'srd   R4, end\n        cmpi  R4, 1',
-     'ldi   R4, 1\n        cmpi  R4, 1'),
-    ('the CRC-5 verdict ignored on IN', 'xor   R7, R3\n        cmpi  R7, 1          ; A\'s verdict',
-     'ldi   R7, 1\n        cmpi  R7, 1          ; A\'s verdict'),
+    ('the host\'s data ACKed without its CRC-16 check', 'srd   R4, end\n        add   R2, R4',
+     'ldi   R4, 1\n        add   R2, R4'),
+    ('the CRC-5 verdict ignored on IN', 'xor   R2, R3\n        cmpi  R2, 1          ; A\'s verdict',
+     'ldi   R2, 1\n        cmpi  R2, 1          ; A\'s verdict'),
     ('a fraction on the bit time (TFRAC 85): edges off the cycle grid', 'ldi   R0, 67\n        scfg  R0, TXTAIL',
      'li    R0, 0x5543\n        scfg  R0, TXTAIL'),
     ('an EOP of 50 cycles, 1.0 us', 'ldi   R0, 67\n        scfg  R0, TXTAIL', 'ldi   R0, 50\n        scfg  R0, TXTAIL'),
@@ -747,6 +948,26 @@ TEETH = [
     ('min(wLength, 18) not applied', 'ldi   R0, 18         ; min(wLength, 18) bytes (9.4.3)', 'idle'),
     ('the status packet sent as DATA0', 'li    R0, WDATA1     ; status packets are DATA1 (8.5.3)', 'li    R0, WDATA0'),
     ('no stuffing on send (SMODE 0)', '.equ CODTX 0xE6EF', '.equ CODTX 0xE2EF'),
+    ('IN: endpoint bit 3 unchecked', 'tsti  R0, 7          ; endpoint bits 3:1 clear',
+     'tsti  R0, 3          ; endpoint bits 3:1 clear'),
+    ('SETUP and OUT: endpoint bit 3 unchecked', 'tsti  R0, 7\n        jt    tvno', 'tsti  R0, 3\n        jt    tvno'),
+    ('dribble, A: the CRC-5 value after a dribble bit taken as the residue itself', 'lui   R2, 0xE8',
+     'lui   R2, 0x60'),
+    ('dribble, A: the bit count ignored, any length but 24 bits taken at the dribble value',
+     'lui   R2, 0xE8       ; 0xE800 | the bit count', 'li    R2, 0xE809'),
+    ('dribble, S: the CRC-16 value after a dribble bit wrong', 'cmpi  R4, 0x1A', 'cmpi  R4, 0x1B'),
+    ('dribble, S: data with extra bits taken whenever the register reaches the dribble value',
+     'jf    tnone          ; with no flag;', 'idle                 ; with no flag;'),
+    ('dribble, S: a dribbled ACK not taken', 'andi  R2, 30\n        cmpi  R2, 8          ; 8 bits, or 9',
+     'andi  R2, 31\n        cmpi  R2, 8          ; 8 bits, or 9'),
+    ('dribble, S: VERD read before the answer\'s words, the order a clean token allows',
+     'ldi   R7, INW\n        ldp   R0, R7         ; SYNC and PID\n        ldp   R5, R7\n        ld    R4, R7         '
+     '; bytes\n        ldi   R2, VERD       ; read after the answer\'s words: A stores a dribbled token\'s verdict 7 '
+     'slots later\nvin:    ld    R2, R2         ; than a clean one\'s, and this keeps its store at least 15 cycles '
+     'before the load\n        xor   R2, R3\n        cmpi  R2, 1          ; A\'s verdict for this reception: a good '
+     'token\n        jf    tbad\n',
+     'ldi   R2, VERD\nvin:    ld    R2, R2\n        xor   R2, R3\n        cmpi  R2, 1\n        jf    tbad\n'
+     '        ldi   R7, INW\n        ldp   R0, R7\n        ldp   R5, R7\n        ld    R4, R7\n'),
 ]
 
 
@@ -868,6 +1089,65 @@ def main(log):
               'the device to address 0 and the old address goes unanswered', not v and not diff and
               r.count['ADDRV'] == 0, v or diff or summary(r.rep))
 
+    # a dribble bit before the host's EOP (7.1.9.1). The units' end test covers every bit up to the SE0, so the bit
+    # goes into the CRC and the last word (section 5.9.7, 11.5); the firmware takes a packet whose last word has
+    # 8k + 1 bits when the CRC register is one 1 bit past its residue, and a 9-bit handshake ending in a 1
+    r = run(dribble, 20e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in DRIBBLE_WANT if (r.value or {}).get(k) != DRIBBLE_WANT[k]}
+    log.check('one dribble bit on one packet at a time: a SETUP\'s data packet ACKed, an IN token answered with the '
+              'next data packet, the host\'s ACK of it taken, the status OUT\'s token and data packet ACKed, '
+              'SET_ADDRESS\'s status ACK taken (address 12); every usb_check check passes', not v and not diff and
+              r.count['ADDRV'] == 12, v or diff or 'address %d' % r.count['ADDRV'])
+    for what, script, t_end, want, kw in (
+            ('enumeration with two 10 ms resets', enumerate_, 40e6, good_enum, {}),
+            ('power-up enumeration, S on 1, A on 2, W on 3, alignment 1, phase 2.5 ns', quick, 12e6, good_quick,
+             dict(threads=(1, 2, 3), align=1, phase=2.5)),
+            ('power-up enumeration, S on 3, A on 0, W on 1, alignment 3, phase 7.5 ns', quick, 12e6, good_quick,
+             dict(threads=(3, 0, 1), align=3, phase=7.5)),
+            ('power-up enumeration, S on 2, A on 1, W on 0, alignment 2, 670 ns EOPs, 2-bit delays', quick, 12e6,
+             good_quick, dict(threads=(2, 1, 0), align=2, phase=15.0,
+                              host_kw=dict(eop=670.0 / BIT, gap_data=2.0, gap_hs=2.0, gap_tr=2.0))),
+            ('faults', faults, 30e6, lambda x: not {k for k in FAULTS_WANT if (x.value or {}).get(k) !=
+                                                     FAULTS_WANT[k]}, dict(threads=(0, 3, 2), align=1, phase=12.5)),
+            ('lost ACKs', lost, 20e6, lambda x: (x.value or {}).get('d2') == DESC and x.count['ADDRV'] == 6,
+             dict(threads=(3, 2, 1))),
+            ('a SETUP and a reset in the middle of transfers', interrupted, 30e6,
+             lambda x: not {k for k in INTERRUPTED_WANT if (x.value or {}).get(k) != INTERRUPTED_WANT[k]},
+             dict(threads=(1, 0, 3), align=3, phase=17.5))):
+        kw = dict(kw)
+        kw['host_kw'] = dict(kw.get('host_kw', {}), dribble=1)
+        r = run(script, t_end, **kw)
+        note(r)
+        v = verdict(r)
+        log.check('every host packet with one dribble bit (tokens, data, handshakes): %s, the same results as clean, '
+                  'every usb_check check passes' % what, not v and want(r), v or summary(r.rep))
+    cp, ld = critical_path(host_kw=dict(dribble=1))
+    log.info('margins, every host packet dribbled: from the time reference to the start, worst %s cycles of %d: %s; '
+             'A\'s store of its verdict to S\'s load of it, at least %s cycles for an IN and %s for a SETUP or OUT' % (
+                 max(cp.values()) if cp else '?', 176, ', '.join('%s %d' % kv for kv in sorted(cp.items())),
+                 ld.get('IN', '?'), ld.get('SETUP/OUT', '?')))
+    log.check('every host packet dribbled: A stores each verdict before S loads it (section 4.2) and every answer '
+              'starts on time', ld and min(ld.values()) >= 1 and cp and max(cp.values()) < 176 - 8,
+              'lead %s, worst path %s cycles' % (ld, max(cp.values()) if cp else None))
+
+    # bits after the last whole byte that are not a dribble bit, and tokens to other endpoints
+    r = run(near_misses, 16e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in NEAR_WANT if (r.value or {}).get(k) != NEAR_WANT[k]}
+    log.check('bits that are not a dribble bit: a 0 after an IN token and after a SETUP\'s data packet, too many '
+              'bits that reach the dribble value of the CRC5 and CRC16 registers, and a 0 that takes an IN token with a '
+              'wrong CRC5 there: no answer (8.7.1); every usb_check check passes', not v and not diff, v or diff or summary(r.rep))
+    r = run(endpoints, 24e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in ENDPOINTS_WANT if (r.value or {}).get(k) != ENDPOINTS_WANT[k]}
+    log.check('SETUP, IN and OUT tokens to endpoints 1, 2, 4 and 8 (each ENDP bit, 8.3.2.2) at address 0 and 10, idle '
+              'and inside a data stage: none answered, and the transfers complete', not v and not diff and
+              r.count['ADDRV'] == 10, v or diff or summary(r.rep))
+
     # margins
     rate, nxt, par, se0, off, jd = device_stats(reps)
     log.check('response time over %d answers in these runs: %s bit times after the host\'s SE0-to-J, inside 2 to '
@@ -877,7 +1157,7 @@ def main(log):
              'bit grid (TLDEOP -40 to +100); J driven %s ns (one bit, %.0f to %.0f)' % (
                  span(rate, '%.4f'), span(nxt, '%.1f'), span(par, '%.1f'), span(se0, '%.0f'), span(off, '%+.0f'),
                  span(jd, '%.0f'), 1e3 / 1.5152 - 25, 2e3 / 1.5152))
-    cp = critical_path()
+    cp, _ = critical_path()
     log.info('margins: from the time reference to the start, worst %s cycles, against %d (NRSP): %s' % (
         max(cp.values()) if cp else '?', 176, ', '.join('%s %d' % kv for kv in sorted(cp.items()))))
 
@@ -892,32 +1172,44 @@ def main(log):
             out.append('%s %s' % (name, 'enumerates' if good_quick(r) and not r.health else 'FAILS'))
         log.info('past the standard, %s: %s' % (what, '; '.join(out)))
 
-    # a dribble bit before the host's EOP (7.1.9.1): the units' end test covers every bit up to the SE0, so the CRC
-    # checks fail and the packet goes unanswered, a limit of the shift units (section 5.9.7, 11.5)
-    r = run(dribble, 12e6)
+    # bit-stuff errors from the host (7.1.9): the destuffer's violation, end flags 1 and 2 (section 5.9.7)
+    r = run(stuff_errors, 16e6, chip_cls=flag_chip)
     d = r.value or {}
-    fails = r.rep.failed()
-    log.info('receive limit: one dribble bit before an EOP (7.1.9.1): an IN token with it is %s and a SETUP\'s data '
-             'packet with it is %s; usb_check, which takes both as good packets, fails %s' % (
-                 'unanswered' if d.get('in_dribble') == 'none' else 'answered %s' % d.get('in_dribble'),
-                 'not ACKed' if d.get('setup_dribble') is False else 'ACKed', sorted({c for _, c, _ in fails})))
-    log.check('after a dribbled IN and a dribbled SETUP, the same transactions sent clean are answered; threads '
-              'healthy', d.get('setup') is True and d.get('in') == 'data' and d.get('setup2') is True and
-              not r.health, '%s %s' % (d, r.health))
+    flags = [e for e in r.chip.ends if e[2] & 6]
+    host_errs = sorted({c for _, c, _ in r.rep.failed()})
+    fl = r.rep.failed()
+    log.check('bit-stuff errors: a SETUP whose data packet carries seven 1s and then a 0, and one with eight 1s, go '
+              'unanswered; the same SETUPs sent clean are ACKed and the descriptor read; threads healthy; usb_check, '
+              'which reads the host\'s broken packets as good, finds only their missing ACKs',
+              d == STUFF_WANT and not r.health and len(fl) == 2 and all(
+                  c == 'sequence' and 'no answer' in x for _, c, x in fl),
+              '%s %s; usb_check: %s' % ({k: v for k, v in d.items() if k != 'read8'}, r.health,
+                                        [x[:60] for _, _, x in fl[:3]]))
+    log.check('bit-stuff errors: the broken packets end their receptions with end flag 1, and with end flag 2 too '
+              'where the eighth bit continues the run (section 5.9.7), on both units that hunt on D+; no clean '
+              'packet sets either', sorted({(c, f & 6) for c, _, f, _ in flags}, key=lambda x: x[0]) and
+              [f for _, f in sorted({(c, f & 6) for c, _, f, _ in flags})] == [2, 6],
+              'flagged ends (cycle, thread, flags, bits): %s; usb_check findings %s' % (flags, host_errs))
 
     # broken copies
+    def same(want):
+        return lambda x: not {k for k in want if (x.value or {}).get(k) != want[k]}
+    scripts = (('quick', quick, 12e6, {}, good_quick), ('quick, dribbled', quick, 12e6, dict(host_kw=dict(dribble=1)),
+                                                        good_quick),
+               ('dribble', dribble, 20e6, {}, same(DRIBBLE_WANT)), ('near_misses', near_misses, 16e6, {},
+                                                                   same(NEAR_WANT)),
+               ('endpoints', endpoints, 24e6, {}, same(ENDPOINTS_WANT)), ('faults', faults, 30e6, {},
+                                                                         same(FAULTS_WANT)),
+               ('lost', lost, 20e6, {}, lambda x: (x.value or {}).get('d2') == DESC),
+               ('interrupted', interrupted, 30e6, {}, same(INTERRUPTED_WANT)),
+               ('enumerate_', enumerate_, 40e6, {}, good_enum))
     for what, old, new in TEETH:
         text = broken(old, new)
         bad = []
-        for script, t_end in ((quick, 12e6), (faults, 30e6), (lost, 20e6), (interrupted, 30e6), (enumerate_, 40e6)):
-            r = run(script, t_end, text=text)
+        for name, script, t_end, kw, want in scripts:
+            r = run(script, t_end, text=text, **kw)
             v = verdict(r)
-            want = {quick: good_quick, faults: lambda x: not {k for k in FAULTS_WANT if (x.value or {}).get(k) !=
-                                                               FAULTS_WANT[k]},
-                    lost: lambda x: (x.value or {}).get('d2') == DESC,
-                    interrupted: lambda x: not {k for k in INTERRUPTED_WANT if (x.value or {}).get(k) !=
-                                                INTERRUPTED_WANT[k]}, enumerate_: good_enum}[script]
             if v or not want(r):
-                bad.append('%s: %s' % (script.__name__, v[:120] or 'wrong result'))
+                bad.append('%s: %s' % (name, v[:120] or 'wrong result'))
                 break
         log.check('a broken copy is caught: %s' % what, bool(bad), bad[0] if bad else 'every check passed')

@@ -65,13 +65,13 @@ with its VCD file, and does not fail. Any other difference fails.
 
 ## Results
 
-One run with `--rtl`, on the RTL of `src/` at commit 0d6769e: **313 checks, 313 PASS**. 715 scenario runs (667 with
-sigrok, 36 of the CRC programs, 12 teeth) and 791 decodes by sigrok, one VCD file each (a run may decode several
-buses, or one window per packet). Of the 779 decodes of scenarios, 757 are as the stimulus wants and 22 are known
-differences, listed below, on the simulator and on the RTL alike; the other 12 are the teeth, all caught. In all 715
-runs the RTL's record equals the simulator's, every pad and board level of every cycle: 136,687 changes over 77.7
-million cycles in the runs with sigrok alone. The simulator pass alone is 190 checks in 176 s; the `--rtl` run, which
-runs every scenario on both, takes 682 s, on one core. The CEC runs take 391 s of that: a CEC bit is 2.4 ms,
+One run with `--rtl`, on the RTL of `src/` at commit 0d6769e: **365 checks, 365 PASS**. 791 scenario runs (743 with
+sigrok, 36 of the CRC programs, 12 teeth) and 867 decodes by sigrok, one VCD file each (a run may decode several
+buses, or one window per packet). Of the 855 decodes of scenarios, 833 are as the stimulus wants and 22 are known
+differences, listed below, on the simulator and on the RTL alike; the other 12 are the teeth, all caught. In all 791
+runs the RTL's record equals the simulator's, every pad and board level of every cycle: 250,413 changes over 84.9
+million cycles in the runs with sigrok alone. The simulator pass alone is 220 checks in 205 s; the `--rtl` run, which
+runs every scenario on both, takes 740 s, on one core. The CEC runs take 394 s of that: a CEC bit is 2.4 ms,
 120,000 cycles.
 
 Per program: a run of an image with several programs counts for each program of its group, and each decode for the
@@ -88,7 +88,7 @@ program appears in (bytes, events, frames).
 | `basic/uart_rx.s` | uart (baudrate=115200/1000000) | 22 | 394 items | 22 of 22 | 22 of 22 | 5 s |
 | `basic/uart_tx.s` | uart (baudrate=115200/1000000/4166667/9600/1526) | 39 | 217 items | 39 of 39 | 39 of 39 | 8 s |
 | `basic/ws2812.s` | rgb_led_ws281x | 10 | 850 items | 10 of 10 | 10 of 10 | 2 s |
-| `standard/cec.s` | cec | 6 | 183 frames | 21 of 21 | 21 of 21 | 391 s |
+| `standard/cec.s` | cec | 6 | 183 frames | 21 of 21 | 21 of 21 | 394 s |
 | `standard/crc16.s` | no decoder: binascii.crc_hqx | 16 | - | 16 of 16 | 16 of 16 | 0 s |
 | `standard/crc32.s` | no decoder: zlib.crc32 | 16 | - | 16 of 16 | 16 of 16 | 1 s |
 | `standard/crc8.s` | no decoder: catalogue check value 0xA1 | 4 | - | 4 of 4 | 4 of 4 | 0 s |
@@ -109,27 +109,33 @@ program appears in (bytes, events, frames).
 | `trimmed/uart_rx.s` | uart (baudrate=115200/1000000/500000) | 9 | 35 items | 9 of 9 | 9 of 9 | 1 s |
 | `trimmed/uart_tx.s` | uart (baudrate=115200/3846154) | 9 | 34 items | 9 of 9 | 9 of 9 | 1 s |
 | `extra/i2c.s` | i2c > eeprom24xx | 11 | 213 events | 11 of 11 | 11 of 11 | 5 s |
-| `extra/lin.s` | uart (baudrate=22327/19201/16843) > lin | 6 | 180 events | 6 of 6 | 6 of 6 | 45 s |
-| `extra/nec_tx.s` | ir_nec (polarity=active-high cd_freq=38000) | 2 | 10 fields | 2 of 2 | 2 of 2 | 46 s |
+| `extra/lin.s` | uart (baudrate=22327/19201/16843) > lin | 6 | 180 events | 6 of 6 | 6 of 6 | 44 s |
+| `extra/nec_tx.s` | ir_nec (polarity=active-high cd_freq=38000) | 2 | 10 fields | 2 of 2 | 2 of 2 | 45 s |
 | `extra/parallel.s` | parallel (clock_edge=rising) | 12 | 84 bytes | 12 of 12 | 12 of 12 | 1 s |
 | `extra/spi_target.s` | spi (cpol=0 cpha=0) | 36 | 432 bytes | 36 of 36 | 36 of 36 | 4 s |
 | `extra/swd.s` | swd | 12 | 48 events | 12 of 12 | 12 of 12 | 4 s |
 | `advanced/can.s` | can (nominal_bitrate=500000/497512/502513/495050/505051/490196/510204 sample_point=75.0) | 39 | 727 frames | 39 of 39 | 39 of 39 | 9 s |
-| `advanced/dmx_rx.s` | dmx512 | 13 | 2172 slots | 33 of 33 | 33 of 33 | 35 s |
-| `advanced/dmx_tx.s` | dmx512 | 10 | 795 slots | 28 of 28 | 28 of 28 | 15 s |
+| `advanced/can_unit.s` | can (nominal_bitrate=500000/1000000 sample_point=75.0) | 23 | 427 frames | 23 of 23 | 23 of 23 | 7 s |
+| `advanced/dmx_rx.s` | dmx512 | 13 | 2172 slots | 33 of 33 | 33 of 33 | 34 s |
+| `advanced/dmx_tx.s` | dmx512 | 10 | 795 slots | 28 of 28 | 28 of 28 | 14 s |
 | `advanced/i2c_fp.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 1 s |
 | `advanced/i2c_tgt.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 3 s |
-| `advanced/jtag.s` | jtag | 13 | 208 scans | 13 of 13 | 13 of 13 | 2 s |
+| `advanced/jtag.s` | jtag | 13 | 208 scans | 13 of 13 | 13 of 13 | 1 s |
 | `advanced/manch_rx.s` | no decoder: no plain Manchester decoder | 0 | - | - | - | 0 s |
 | `advanced/mdio_phy.s` | mdio | 11 | 55 frames | 11 of 11 | 11 of 11 | 3 s |
 | `advanced/mdio_sta.s` | mdio | 12 | 48 frames | 12 of 12 | 12 of 12 | 2 s |
-| `advanced/ps2_dev.s` | ps2 | 15 | 64 frames | 32 of 32 | 32 of 32 | 26 s |
-| `advanced/swd.s` | swd | 16 | 420 events | 16 of 16 | 16 of 16 | 5 s |
+| `advanced/ow_unit.s` | onewire_link > onewire_network | 10 | 40 events | 10 of 10 | 10 of 10 | 37 s |
+| `advanced/ps2_dev.s` | ps2 | 15 | 64 frames | 32 of 32 | 32 of 32 | 25 s |
+| `advanced/sd_unit.s` | sdcard_sd | 8 | 272 tokens | 8 of 8 | 8 of 8 | 9 s |
+| `advanced/spi_unit.s` | spi (cpol=0/1 cpha=0/1) | 16 | 496 bytes | 16 of 16 | 16 of 16 | 1 s |
+| `advanced/swd.s` | swd | 16 | 420 events | 16 of 16 | 16 of 16 | 4 s |
 | `advanced/uart_bypass.s` | uart (baudrate=3125000/1000000/115207) | 22 | 276 bytes | 44 of 44 | 44 of 44 | 2 s |
+| `advanced/uart_par_unit.s` | uart (baudrate=1000000/115207/8333333 parity=even/odd) | 8 | 154 bytes | 8 of 8 | 8 of 8 | 2 s |
 | `advanced/usb_dev.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 73 packets | 9 of 9 | 9 of 9 | 1 s |
-| `advanced/usb_enum.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) > usb_request; usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 8 | 351 packets | 8 of 8 | 8 of 8 | 18 s |
+| `advanced/usb_enum.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) > usb_request; usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 12 | 496 packets | 12 of 12 | 12 of 12 | 21 s |
 | `advanced/usb_rx.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 51 packets | 9 of 9 | 9 of 9 | 1 s |
 | `advanced/usb_tx.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 15 | 15 packets | 15 of 15 | 15 of 15 | 1 s |
+| `advanced/ws2812_unit.s` | rgb_led_ws281x | 7 | 1050 LEDs | 7 of 7 | 7 of 7 | 4 s |
 | `test/test.py` | uart (baudrate=1250000); usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 3 | 19 packets | 3 of 3 | 3 of 3 | 0 s |
 
 ## Teeth
@@ -218,6 +224,9 @@ either goes round it, as listed here, or reports the run as a known difference.
   lines and reports the transfers after it as BULK. `advanced/usb_enum.s`'s runs with lost ACKs, faults and
   interrupted transfers are judged on `usb_packet`'s packets alone, and the faults must show exactly the CRC16 and
   CRC5 errors planted; its power-up enumerations and its run with resets are judged on the transfers too.
+- `usb_packet`: it takes a data packet's CRC16 from its last 16 bits, so a host data packet with a dribble bit
+  before its EOP (USB 2.0 7.1.9.1) reads one bit longer: the first CRC bit as one more data byte, and a CRC16
+  error. The `advanced/usb_enum.s` run with dribbled host packets expects exactly that reading of each of them.
 - `parallel`: it reports each word at the next clock edge, so the last byte of a run is not shown.
 - `i2c`: it reports no warnings at all, so a missing STOP shows as a repeated START, and timing is not checked.
 - `spi`: it has no setup or hold check, and in a record where a line moves in the same cycle as the sampling edge
@@ -228,10 +237,11 @@ either goes round it, as listed here, or reports the run as a known difference.
 ## Programs without a decoder
 
 libsigrokdecode has no decoder for `standard/hdlc_tx.s` (HDLC), `standard/manch_rx.s` and `advanced/manch_rx.s`
-(plain Manchester) or `advanced/eth_arp.s` (10BASE-T), and `standard/reflex.s` is a reaction time, not a protocol:
-their benches are their only check. For `eth_arp.s` the bench's checker, `bench/eth_check.py`, was written from IEEE
-802.3 and the RFCs before the program ([`../README.md`](../README.md)). The CRC programs are checked against the
-standard library: `standard/crc16.s` against `binascii.crc_hqx(msg, 0xFFFF)` (CRC-16/CCITT-FALSE), `standard/crc32.s`
-against `zlib.crc32`, and `standard/crc8.s` (CRC-8/MAXIM, which the library lacks) against the catalogue's check
-value 0xA1. The memory loads `basic/memhog.s` and `standard/memstress.s` have no bus of their own; their neighbours'
-buses are decoded while they run.
+(plain Manchester), `advanced/eth_arp.s` (10BASE-T) or `advanced/xy2_unit.s` (XY2-100), `advanced/lfsr_unit.s` sends
+PRBS sequences and `advanced/crc_unit.s` runs a CRC engine with no bus, and `standard/reflex.s` is a reaction time,
+not a protocol: their benches are their only check. For `eth_arp.s` the bench's checker, `bench/eth_check.py`, was
+written from IEEE 802.3 and the RFCs before the program ([`../README.md`](../README.md)). The CRC programs are
+checked against the standard library: `standard/crc16.s` against `binascii.crc_hqx(msg, 0xFFFF)`
+(CRC-16/CCITT-FALSE), `standard/crc32.s` against `zlib.crc32`, and `standard/crc8.s` (CRC-8/MAXIM, which the library
+lacks) against the catalogue's check value 0xA1. The memory loads `basic/memhog.s` and `standard/memstress.s` have no
+bus of their own; their neighbours' buses are decoded while they run.

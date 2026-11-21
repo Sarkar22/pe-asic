@@ -2,7 +2,7 @@
 ; with GET_DESCRIPTOR of its 18-byte device descriptor and SET_ADDRESS, and STALLs every other request (9.2.7).
 ; The shift units do the line work (section 5.9): NRZI, bit stuffing, the CRC-5 check of tokens, the CRC-16 check
 ; of the host's data and the CRC-16 appended to the device's own, the end of packet, and the clock recovery of
-; every edge. Three threads, 512-word memory: 493 words placed and a 6-word buffer, words 0 to 498 in use, 13
+; every edge. Three threads, 512-word memory: 503 words placed and a 6-word buffer, words 0 to 508 in use, 3
 ; free. The host starts S at label dev, A at tok and W at rst, any three threads in one RUN, and leaves the fourth
 ; stopped so that RDMEM can read the counters (section 9.4).
 ;
@@ -30,16 +30,26 @@
 ;   into the EOP's SE0, and starts any answer NRSP cycles after it with OE on in the same commit: its SOP comes
 ;   4.4 to 4.5 bit times after the SE0-to-J of a 2-bit EOP, 4.1 to 4.3 after one of 1.50 us and 5.4 to 5.6 after one
 ;   of 670 ns, the shortest a receiver must take (TRSPIPD1 6.5, inter-packet delay at least 2: 7.1.18.1; TLEOPR).
-;   The slowest decisions, an IN answered with data and an OUT's handshake, take 33 slots, 132 cycles, of the 176.
+;   The slowest decision, an OUT's handshake, takes 34 slots, 136 cycles, of the 176, and 37 slots, 148 cycles,
+;   when the OUT's data packet has a dribble bit; an IN answered with data takes 33, with a dribble bit or not.
 ;   After its EOP it takes its own packet, which its receive half sees because a uio pin reads its own drive (5.2),
 ;   waits for its own SE0-to-J with `until` (3 cycles after the pad, 5.7) and drives J NREL + 3 = 34 cycles, then
 ;   releases (7.1.7.4.1: J for one bit, then high impedance).
 ; A, the token check: its unit hunts on the same D+ with CRC-5 (CODING 0xE4E4, POLYHI 0x2800, residue 0x6000).
-;   For every reception it writes VERD = receptions << 3 | end flags, the flags 0 unless the last word has 8 bits.
-;   S counts the same receptions, its own packets included, and takes a token as valid when VERD equals its count
-;   << 3 | 1: CRC-5 right, no stuff error, 24 bits. Both units end a reception in the same cycle, and A's store of
-;   VERD comes at least 13 cycles before S's load of it. A different count means one of them missed a reception;
-;   S takes A's count, so the next token is judged again.
+;   For every reception it writes VERD = receptions << 3 | end flags, with flag 0 set for 24 bits and the CRC-5
+;   right, or for 25 bits and a dribble bit (below), and clear for any other length. S counts the same receptions,
+;   its own packets included, and takes a token as valid when VERD equals its count << 3 | 1: a good token, no
+;   stuff error. Both units end a reception in the same cycle, and A's store of VERD comes at least 41 cycles
+;   before S's load of it for an IN, 15 when the IN has a dribble bit, and 45 for a SETUP or OUT. A different
+;   count means one of them missed a reception; S takes A's count, so the next token is judged again.
+; Dribble (7.1.9.1): a hub may stretch a packet's last bit by a bit time, and a receiver must take the packet.
+;   The end test puts that bit into the CRC and the last word (5.9.7), so a packet whose bits past its last whole
+;   byte are exactly one 1, with no end flag, is taken when the CRC register is one crc_bit(1) past its residue:
+;   `srd hi` 0xE800 for CRC-5, 0x001A for CRC-16. A CRC step is one-to-one, so that holds exactly when the CRC
+;   over the whole bytes passes. A also tests that the 25th bit is a 1, because a 0 after a token with a wrong
+;   CRC-5 reaches 0xE800 too, 1 time in 32; S tests the register alone (no words are left), which a corrupted
+;   data packet with a 0 there reaches 1 time in 65536. A handshake has no check but its PID (8.7.1): 8 or 9 bits are taken. Two or more
+;   bits past the last byte are refused.
 ; W, the reset: waits for SE0, then for the line to leave it within TDET cycles, 5 us. An SE0 longer than that
 ;   is a reset (7.1.7.5: TDETRST is at least 2.5 us; a reset is at least 10 ms; keep-alives and EOPs last 1.25 to
 ;   1.5 us). W counts it in RSTN; S compares RSTN with RSEEN at the first word of each packet and at every ACK,
@@ -182,17 +192,17 @@ tin:    cmpi  R5, BUF + 2    ; two words
         jf    tnone
         tsti  R0, 7          ; endpoint bits 3:1 clear
         jt    tnone
-        ldi   R7, VERD
-        ld    R7, R7
-        xor   R7, R3
-        cmpi  R7, 1          ; A's verdict for this reception: CRC-5 right, 24 bits
-        jf    tbad
         ldi   R7, INW
         ldp   R0, R7         ; SYNC and PID
-        bt    R0, 8          ; DATA0 and DATA1 have PID bit 0 set, the handshakes clear
-        jf    ihs
         ldp   R5, R7
         ld    R4, R7         ; bytes
+        ldi   R2, VERD       ; read after the answer's words: A stores a dribbled token's verdict 7 slots later
+vin:    ld    R2, R2         ; than a clean one's, and this keeps its store at least 15 cycles before the load
+        xor   R2, R3
+        cmpi  R2, 1          ; A's verdict for this reception: a good token
+        jf    tbad
+        bt    R0, 8          ; DATA0 and DATA1 have PID bit 0 set, the handshakes clear
+        jf    ihs
         cmpi  R4, 0
         jt    izlp
         call  sdata
@@ -220,15 +230,19 @@ tdata:  ldi   R7, TOK
         ld    R7, R7
         cmpi  R7, 0
         jt    tnone          ; no SETUP or OUT of ours before it
-        srd   R4, end
-        cmpi  R4, 1          ; CRC-16 right, no stuff error
-        jf    tnone          ; no handshake to a corrupted packet (8.4.6.3)
         sstat R2
         jt    tnone          ; a word was lost
-        andi  R2, 7
-        cmpi  R2, 0
-        jf    tnone          ; not whole bytes: a last word of 0 or 8 bits
-        cmpi  R7, 1
+        andi  R2, 7          ; the bits past whole bytes
+        srd   R4, end
+        add   R2, R4
+        cmpi  R2, 1          ; whole bytes with end flag 1 alone (CRC-16 right, no stuff error), or one bit more
+        jf    tnone          ; with no flag; anything else is corrupted and gets no handshake (8.4.6.3)
+        cmpi  R4, 1
+        jt    dgood
+        srd   R4, hi         ; the bit is a dribble bit (7.1.9.1) if the register is one 1 bit past the residue,
+        cmpi  R4, 0x1A       ; 0x800D: that is, if the CRC-16 over the whole bytes passed (5.9.7)
+        jf    tnone
+dgood:  cmpi  R7, 1
         jt    dsetup
         ldi   R2, OUTW       ; the OUT's data: ACK, except STALL while stalled or in a status IN
         ld    R0, R2
@@ -319,9 +333,9 @@ snew:   ldi   R7, STAGE
 thand:  cmpi  R5, BUF + 1
         jf    tnone
         sstat R2
-        andi  R2, 31
-        cmpi  R2, 8
-        jf    tnone
+        andi  R2, 30
+        cmpi  R2, 8          ; 8 bits, or 9: a dribble bit after the PID (7.1.9.1). A handshake has no check but its
+        jf    tnone          ; PID's (8.7.1), so the 9th bit is taken as it comes
         call  rchk
         ldi   R7, HS
         ld    R0, R7
@@ -393,7 +407,7 @@ tvalid: cmpi  R5, BUF + 2
         tsti  R0, 7
         jt    tvno
         ldi   R2, VERD
-        ld    R2, R2
+vtok:   ld    R2, R2
         xor   R2, R3
         cmpi  R2, 1
 tvret:  ret
@@ -555,10 +569,16 @@ tl:     rxw   R0
         addi  R3, 8
         andi  R2, 31
         cmpi  R2, 8
-        jt    t8
-        ldi   R1, 0
+        jt    t8             ; 24 bits: the end flags as they are
+        bt    R0, 8          ; the 25th bit: a dribble bit has no transition, so in NRZI it is a 1 (7.1.9.1)
+        jf    tdr            ; a 0 there clears flag 0
+        lui   R2, 0xE8       ; 0xE800 | the bit count
+        srd   R0, hi
+        ori   R0, 9
+        cmp   R0, R2         ; 25 bits, and the register one 1 bit past the residue 0x6000: a good token with a
+tdr:    bs    R1, 0          ; dribble bit (7.1.9.1). Flag 0 says so; stuff errors keep flags 1 and 2
 t8:     or    R1, R3
-        st    R1, R4
+vst:    st    R1, R4
         goto  tl
 ; ------------------------------------------------------------------------------------------------- W: resets
 rst:    li    R3, 0x0300     ; D+ and D-, both 0: SE0

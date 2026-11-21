@@ -629,6 +629,9 @@ DECODER = {
                   'nothing: the scan through Pause-DR shows one bit too many',
     'dmx_88': 'ANSI E1.11 has receivers take a break of 88 us; sigrok 0.5.3 dmx512 wants a break of more than 88 us, '
               'so it never finds this one and decodes nothing in the window',
+    'usb_dribble': 'USB 2.0 7.1.9.1 has a receiver accept a dribble bit before the EOP; sigrok 0.5.3 usb_packet takes '
+                   'a data packet\'s CRC16 from its last 16 bits, so a dribbled data packet reads one bit longer, the '
+                   'first CRC bit as an extra data byte, and its CRC16 fails',
 }
 
 
@@ -2135,6 +2138,28 @@ def ue_nodata(addr, req, lose=0):
     return ue_setup(addr, req) + ['ACK'] + ['IN ADDR %d EP 0' % addr, 'DATA1 [ ]'] * (lose + 1) + ['ACK']
 
 
+def ue_dribbled(name, payload):
+    """sigrok 0.5.3's summary of a host data packet with one dribble bit (DECODER['usb_dribble']): the payload, then
+    the CRC16's first bit on the wire as one more byte, 00 or 01."""
+    import usb_check_test as G
+    bits = G.data(name, list(payload))
+    return '%s [%s ]' % (name, ''.join(' %02X' % x for x in list(payload) + [bits[8 + 8 * len(payload)]]))
+
+
+def ue_hosts(items):
+    """items with each host data packet, the one after a SETUP or OUT token, marked as ('host', item)."""
+    return [('host', x) if k and x.startswith('DATA') and items[k - 1].split()[0] in ('SETUP', 'OUT') else x
+            for k, x in enumerate(items)]
+
+
+def ue_drib_host(x):
+    """A marked host data packet as sigrok reads it with one dribble bit; any other item as it is."""
+    if not isinstance(x, tuple):
+        return x
+    name, rest = x[1].split(' ', 1)
+    return ue_dribbled(name, [int(v, 16) for v in rest.strip('[] ').split()])
+
+
 def ue_request(req, data):
     kind = 'SETUP in' if req[0] & 0x80 else 'SETUP out'
     return '%s: [%s ][%s ] : ACK' % (kind, ''.join(' %02X' % b for b in req), ''.join(' %02X' % b for b in data))
@@ -2208,6 +2233,52 @@ def g_usb_enum(runner, log):
             ue_read(7, req, D, cut=1) + ue_read(0, req, D) + ue_setup(7, U.GET_DEV(8)))
     ctx = b.run('usb_enum_interrupted', usb_enum_run, U.interrupted, 30e6)
     b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    b.close()
+    # bit-stuff errors from the host (USB 2.0 7.1.9): usb_signalling reports each one and drops the packet, and the
+    # device must not answer it
+    b = Batch(runner, 'bit-stuff errors from the host: a SETUP data packet with seven 1s, one with eight 1s, each '
+              'followed by the same SETUP sent clean', 'packets')
+    # usb_packet prints a broken packet cut at the error, its last two bytes taken as the CRC16, which then fails
+    cut = 'DATA0 [ 80 06 00 01 00 ]'
+    want = (['SETUP ADDR 0 EP 0', cut] + ue_setup(0, U.REQ7) + ['ACK'] + ['SETUP ADDR 0 EP 0', cut] +
+            ue_read(0, U.REQ8, D))
+    ctx = b.run('usb_enum_stuff_errors', usb_enum_run, U.stuff_errors, 16e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, lambda got, errs: (
+        got == want and len(errs) == 4 and sum(e.startswith('Bit stuff error') for e in errs) == 2 and
+        sum(e.startswith('crc16-err') for e in errs) == 2,
+        'sigrok %s %s, wanted %s with a bit stuff error (and the cut packet\'s CRC16 error) on each broken SETUP '
+        'data packet, and no handshake after either' % (short(got), errs, short(want))))
+    v = ctx.value
+    if (v.value or {}) != U.STUFF_WANT or v.health:
+        b.fail(ctx.name, 'bench: %s %s' % ({k: x for k, x in (v.value or {}).items() if k != 'read8'}, v.health))
+    b.close()
+    # a dribble bit before the host's EOP (USB 2.0 7.1.9.1): sigrok reads the tokens and handshakes as sent, and each
+    # dribbled data packet one bit long with a CRC16 error (DECODER['usb_dribble']), so the runs are judged by the
+    # packets the device sends in answer, which are the clean runs' packets
+    b = Batch(runner, 'one dribble bit before the host\'s EOP (USB 2.0 7.1.9.1), on one packet at a time and on every '
+              'host packet of a power-up enumeration: the device answers as it does without it', 'packets')
+    want = ([ue_setup(0, U.GET_DEV(18))[0], ue_dribbled('DATA0', U.GET_DEV(18)), 'ACK'] +
+            ue_read(0, U.GET_DEV(18), D)[3:-3] + ['OUT ADDR 0 EP 0', 'DATA1 [ ]', 'ACK'] +
+            ue_read(0, U.GET_DEV(18), D)[:-3] + ['OUT ADDR 0 EP 0', ue_dribbled('DATA1', []), 'ACK'] +
+            ue_nodata(0, U.SET_ADDR(12)) + ue_read(12, U.GET_DEV(18), D))
+    ctx = b.run('usb_enum_dribble', usb_enum_run, U.dribble, 20e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, lambda got, errs: (
+        got == want and len(errs) == 2 and all(e.startswith('crc16-err') for e in errs),
+        'sigrok %s %s, wanted %s with a CRC16 error on each of the 2 dribbled data packets (%s)' % (
+            short(got), errs, short(want), DECODER['usb_dribble'])))
+    if U.verdict(ctx.value) or (ctx.value.value or {}) != U.DRIBBLE_WANT:
+        b.fail(ctx.name, 'bench: %s %s' % (U.verdict(ctx.value), ctx.value.value))
+    want = [ue_drib_host(x) for x in ue_hosts(ue_read(0, U.GET_DEV(18), D) + ue_nodata(0, U.SET_ADDR(9)) +
+                                              ue_read(9, U.GET_DEV(18), D))]
+    for k, (th, al, ph) in enumerate((((1, 2, 3), 1, 2.5), ((3, 0, 1), 3, 7.5))):
+        ctx = b.run('usb_enum_dribble_all_%d' % k, usb_enum_run, U.quick, 12e6, threads=th, align=al, phase=ph,
+                    host_kw=dict(dribble=1))
+        b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, lambda got, errs: (
+            got == want and len(errs) == 5 and all(e.startswith('crc16-err') for e in errs),
+            'sigrok %s %s, wanted %s with a CRC16 error on each of the 5 host data packets (%s)' % (
+                short(got), errs, short(want), DECODER['usb_dribble'])))
+        if U.verdict(ctx.value) or not U.good_quick(ctx.value):
+            b.fail(ctx.name, 'bench: %s %s' % (U.verdict(ctx.value), ctx.value.value))
     b.close()
 
 
@@ -2675,6 +2746,343 @@ def g_bypass(runner, log):
     b.close()
 
 
+def g_spi_unit(runner, log):
+    import random
+    import spi_unit as SU
+    log.group('advanced/spi_unit.s', title='SPI target on the shift unit: CS ui3, SCK ui4, MOSI ui5, MISO uo2, '
+              'bench/spi_unit.py against its PL022-style controller')
+    for mode, half, nbits, nframes, rcnt, gap, tedge, title in (
+            (0, 8, 8, 6, 8, None, 1, 'mode 0 (SPH 0): 6 bytes, each a frame, CS high one SCK period between them, '
+             'half period 8'),
+            (3, 4, 64, 3, 64, 100, 1, 'mode 3 (SPH 1): 3 transfers of 8 bytes with CS held low, half period 4'),
+            (0, 3, 8, 16, 0, None, 1, 'mode 0, one endless reception: 16 bytes, CS pulsed one period, half period 3'),
+            (3, 2, 8, 16, 0, None, 0, 'mode 3, TEDGE 0, one endless reception: 16 bytes at half period 2')):
+        b = Batch(runner, title + ', 4 threads')
+        for tid in range(4):
+            rng = random.Random(100 + 10 * mode + tid)
+            table = SU.table_words(rng)
+            frames = SU.rand_frames(rng, nframes, nbits)
+            ctx = b.run('spi_unit_m%d_h%g_r%d_t%d' % (mode, half, rcnt, tid), SU.run, mode, half, frames, table,
+                        rcnt, 0, tedge, tid=tid, align=tid, gap=gap, phase=0.25 * tid)
+            tb = SU.bits_of(table)
+            if rcnt:
+                want = [(SU.to_bytes(f), SU.to_bytes(tb[:len(f)])) for f in frames]
+            else:
+                want = [(SU.to_bytes(f), SU.to_bytes(tb[8 * k:8 * k + len(f)])) for k, f in enumerate(frames)]
+            b.sigrok(ctx, spi('ui4', 'ui5', 'uo2', 'ui3', mode), spi_transfers, want)
+            e = SU.judge(ctx.value, frames, rcnt, 0, table)
+            if e:
+                b.fail(ctx.name, e[0])
+        b.close()
+
+
+
+def can_unit_run(nodes, sends=(), **kw):
+    """nodes: a function that makes the other nodes afresh on each run (they keep state)."""
+    import can_unit as CU
+    r, img, got, bus = CU.run(nodes(), sends=sends, **kw)
+    return CU.parse(got)
+
+
+def can_rtr_expect(ident, dlc):
+    """A remote frame: RTR 1, no data field, the DLC of the data frame asked for (Bosch CAN 2.0 part A, remote
+    frame). The CRC field is computed here from the frame's bits."""
+    bits = [0] + [(ident >> (10 - i)) & 1 for i in range(11)] + [1, 0, 0] + [(dlc >> (3 - i)) & 1 for i in range(4)]
+    return (ident, [], crc15(bits), True)
+
+
+def g_can_unit(runner, log):
+    import can as K
+    import can_unit as CU
+    import can_wire as C
+    log.group('advanced/can_unit.s', title='CAN 2.0A node on the shift unit: TXD io0 (open drain), RXD ui6 (the bus '
+              'through the transceiver model), bench/can_unit.py; sigrok from bus integration on')
+    F = CU.FRAMES
+    b = Batch(runner, 'receive 6 frames from the reference sender, all-zero and all-one stuffing: the chip ACKs each, '
+              'on 4 threads', 'frames')
+    s0, t0 = CU.sender(F)
+    for tid in range(4):
+        ctx = b.run('can_unit_rx6_t%d' % tid, can_unit_run, lambda: [CU.sender(F)[0]], cycles=t0 + 3000, thread=tid,
+                    align=tid)
+        can_check(b, ctx, [can_expect(i, d) for i, d in F])
+        if ctx.value != [CU.want_rx(i, d) for i, d in F]:
+            b.fail(ctx.name, 'the firmware reported %s' % short(ctx.value))
+    b.close()
+    b = Batch(runner, 'receive: back to back at the shortest interframe space, at 500 kbit/s and 1 Mbit/s, data and '
+              'DLC 0; frames whose CRC sequence a stuff bit follows', 'frames')
+    dl0 = [(0x7EF, []), (0x000, []), (0x555, []), (0x2A5, []), (0x123, [])]
+    for name, frames, bit in (('b2b', F, 100), ('b2b_1m', F[:4], 50), ('dlc0_1m', dl0, 50),
+                              ('crctail', [(i, d) for i, d, _ in CU.crc_tail_stuffed()], 100)):
+        s1, t1 = CU.sender(frames, gap=3 if name != 'crctail' else 20, b=bit)
+        ctx = b.run('can_unit_rx_' + name, can_unit_run, lambda frames=frames, name=name, bit=bit:
+                    [CU.sender(frames, gap=3 if name != 'crctail' else 20, b=bit)[0]], cycles=t1 + 3000, b=bit)
+        can_check(b, ctx, [can_expect(i, d) for i, d in frames], bit=bit)
+        if ctx.value != [CU.want_rx(i, d) for i, d in frames]:
+            b.fail(ctx.name, 'the firmware reported %s' % short(ctx.value))
+    b.close()
+    # remote frames with DLC 0 only: sigrok's can decoder 0.5.3 reads DLC x 8 data bits whatever RTR is (its pd.py
+    # sets last_databit from the DLC alone), so it misreads a remote frame with a DLC above 0. bench/can_unit.py
+    # checks DLC 3 and 8 on its own.
+    b = Batch(runner, 'receive remote frames (DLC 0) and a frame with a corrupted CRC: ACKs, and none for the bad CRC',
+              'frames')
+    rtr = [(0x2A5, 0), (0x111, 0), (0x7EF, 0)]
+    sched, t = [], 4000
+    for ident, dlc in rtr:
+        bits = C.unstuffed(ident, [], 1)
+        bits[15:19] = [(dlc >> (3 - i)) & 1 for i in range(4)]
+        c = crc15(bits)
+        st = C.stuff(bits + [(c >> (14 - i)) & 1 for i in range(15)]) + [1] * 10
+        sched.append((t, st))
+        t += len(st) * 100 + 2000
+    ctx = b.run('can_unit_rtr', can_unit_run, lambda: [K.Sender(list(sched), 100.0)], cycles=t + 3000)
+    lo = bus_integrated(ctx.chip, 'ui', 6, 100)
+    b.sigrok(ctx, can_stack('ui6', CLK // 100, 75.0), can_frames, [can_rtr_expect(i, d) for i, d in rtr], lo=lo)
+    s2, t2 = CU.sender(F[:3], flip=1)
+    ctx = b.run('can_unit_badcrc', can_unit_run, lambda: [CU.sender(F[:3], flip=1)[0]], cycles=t2 + 3000)
+    bits, crc = C.with_crc(*F[1])
+    w2 = [can_expect(i, d) for i, d in F[:3]]
+    w2[1] = (F[1][0], F[1][1], crc ^ 4, False)
+    # the chip's error flag after the ACK delimiter breaks that frame's EOF: sigrok warns there, and only there
+    can_check(b, ctx, lambda got, errs: (got[:3] == w2 and all('rame' in e or 'EOF' in e or 'eof' in e for e in errs),
+                                         'sigrok %s %s' % (short(got), short(errs))))
+    b.close()
+    b = Batch(runner, 'transmit 6 frames, ACKed by another node; at 1 Mbit/s; every thread and alignment', 'frames')
+    for ident, data in F:
+        n = len(C.frame_bits(ident, data)) - 9
+        ctx = b.run('can_unit_tx_%03x_%d' % (ident, len(data)), can_unit_run, lambda n=n: [K.Acker([n], 100.0)],
+                    sends=[(ident, data)])
+        can_check(b, ctx, [can_expect(ident, data)])
+        if ctx.value != [('tx', 0)]:
+            b.fail(ctx.name, 'the firmware reported %s' % short(ctx.value))
+    for tid in range(4):
+        ident, data = 0x2F1, [0x5A, 0xFF, 0x00]
+        n = len(C.frame_bits(ident, data)) - 9
+        ctx = b.run('can_unit_tx_t%d' % tid, can_unit_run, lambda n=n: [K.Acker([n], 50.0)], sends=[(ident, data)],
+                    b=50, thread=tid, align=(tid + 1) % 4)
+        can_check(b, ctx, [can_expect(ident, data)], bit=50)
+    b.close()
+    b = Batch(runner, 'transmit with nobody to ACK; arbitration lost (the chip receives the winner, ACKs it and sends '
+              'again) and won', 'frames')
+    ctx = b.run('can_unit_noack', can_unit_run, lambda: [], sends=[(0x123, [1, 2])])
+    can_check(b, ctx, lambda got, errs: (got[:1] == [can_expect(0x123, [1, 2], ack=False)],
+                                         'sigrok %s %s' % (short(got), short(errs))))
+    mine, theirs = (0x246, [1, 2]), (0x244, [9])
+    lm, lt = len(C.frame_bits(*mine)) - 9, len(C.frame_bits(*theirs)) - 9
+    ctx = b.run('can_unit_arb_lost', can_unit_run, lambda: [K.Rival(C.frame_bits(*theirs), 100.0),
+                                                            K.Acker([lt, lm], 100.0)], sends=[mine], cycles=40000)
+    can_check(b, ctx, [can_expect(*theirs), can_expect(*mine)])
+    if ctx.value != [('tx', 2), CU.want_rx(*theirs), ('tx', 0)]:
+        b.fail(ctx.name, 'the firmware reported %s' % short(ctx.value))
+    mine2, theirs2 = (0x244, [7, 8]), (0x246, [9])
+    l2 = len(C.frame_bits(*mine2)) - 9
+    ctx = b.run('can_unit_arb_won', can_unit_run, lambda: [K.Rival(C.frame_bits(*theirs2), 100.0),
+                                                           K.Acker([l2], 100.0)], sends=[mine2], cycles=30000)
+    can_check(b, ctx, [can_expect(*mine2)])
+    b.close()
+
+def sd_stack(cmd, clk):
+    return [('sdcard_sd', {'cmd': cmd, 'clk': clk}, {})]
+
+
+def sd_tokens(d):
+    """The tokens sigrok's sdcard_sd reads on CMD, in order: ('host', index, argument, CRC7) for a command,
+    ('card', index, argument, CRC7) for R1, R6 and R7, and ('card', 'R2') and ('card', 'R3'), whose fields it
+    names without values. It shows each CRC field and checks none, so the CRC7 expected comes from the stimulus."""
+    import re
+    anns = sorted(d.of('sdcard_sd', 'field-transmission', 'field-cmd', 'field-arg', 'field-crc'),
+                  key=lambda a: a.ss)
+    toks = []
+    for a in anns:
+        if a.cls == 'field-transmission':
+            toks.append({'who': 'host' if 'host' in a.text else 'card'})
+        elif toks:
+            toks[-1][a.cls] = a.text
+    out = []
+    for t in toks:
+        cmd, arg, crc = t.get('field-cmd', ''), t.get('field-arg', ''), t.get('field-crc')
+        m = re.search(r'\((\d+)\)', cmd)
+        if t['who'] == 'card' and not m:
+            out.append(('card', 'R3' if crc is not None else 'R2'))
+            continue
+        a = re.search(r'0x([0-9a-fA-F]+)', arg)
+        c = re.search(r'0x([0-9a-fA-F]+)', crc or '')
+        out.append((t['who'], int(m.group(1)) if m else cmd, int(a.group(1), 16) if a else arg,
+                    int(c.group(1), 16) if c else crc))
+    return out, []
+
+
+def sd_expect(r):
+    """From the stimulus: each command the host was told to send, with the CRC7 of its first 40 bits (SD 4.5), and
+    each response the card model was given to send."""
+    import sd_card as SD
+    out = []
+    for (index, arg, _, _), rec in zip(r.cmds, r.card.per_cmd):
+        head = [0, 1] + SD.bits_of(index, 6) + SD.bits_of(arg, 32)
+        out.append(('host', index, arg, SD.crc7(head)))
+        resp = rec['resp']
+        if resp is None:
+            continue
+        if len(resp) == 136:
+            out.append(('card', 'R2'))
+        elif SD.value(resp[2:8]) == 0x3F:
+            out.append(('card', 'R3'))
+        else:
+            out.append(('card', SD.value(resp[2:8]), SD.value(resp[8:40]), SD.value(resp[40:47])))
+    return out
+
+
+def sd_unit_run(cmds, card_kw, **kw):
+    """The card is made afresh on each run: under --rtl a scenario runs twice, and the card keeps state."""
+    import sd_card as SD
+    import sd_unit as SU
+    return SU.run(cmds, card=SD.Card(**card_kw), **kw)
+
+
+def g_sd_unit(runner, log):
+    import sd_card as SD
+    import sd_unit as SU
+    log.group('advanced/sd_unit.s', title='SD host in SD mode on two shift units: CLK io0, CMD io1, DAT0 io2, '
+              'bench/sd_card.py\'s card; sigrok sdcard_sd on CMD and CLK (it has no DAT decoding: the bench checks the '
+              'blocks with their CRC16)')
+    for title, cmds, hs, kw, pairs in (
+            ('CMD0, CMD8, CMD55, ACMD41, CMD2 and CMD3 at 397 kHz, CMD7 and CMD17 at 6.25 MHz',
+             SU.INIT + [SU.SELECT, SU.read_cmd(5)], [63] * len(SU.INIT) + [4, 4], dict(ncr=2, nac=20),
+             ((0, 1), (1, 2), (2, 3), (3, 0))),
+            ('CMD17 at 8.33 MHz, the response 64 clocks after the command',
+             [SU.read_cmd(3), SU.read_cmd(4)], 3, dict(state='tran', ncr=64, nac=30), ((1, 0), (3, 2))),
+            ('CMD17 at 8.33 MHz, the block starting 2 clocks after the command, during the response',
+             [SU.read_cmd(3)], 3, dict(state='tran', ncr=2, nac=2), ((0, 3), (2, 1)))):
+        b = Batch(runner, title, 'tokens')
+        for ta, tb in pairs:
+            ctx = b.run('sd_unit_%s_t%d%d' % ('init' if len(cmds) > 2 else 'rd', ta, tb), sd_unit_run, cmds, kw,
+                        h0=hs[0] if isinstance(hs, list) else hs, h=hs, ta=ta, tb=tb, align=ta)
+            r = ctx.value
+            got, _, _ = b.sigrok(ctx, sd_stack('uio1', 'uio0'), sd_tokens, sd_expect(r))
+            b.cross(ctx.name, [('host', i, a, SD.crc7([0, 1] + SD.bits_of(i, 6) + SD.bits_of(a, 32)))
+                               for i, a, ok in r.card.cmd_seen if ok], [t for t in got if t[0] == 'host'])
+            e = SU.judge(r)
+            if e:
+                b.fail(ctx.name, e[0])
+        b.close()
+
+
+def ow_unit_expect(cmds, rom, present=True):
+    """sigrok's network layer for each transaction: RP:1, the command, and for Read ROM the 64-bit ROM code as it
+    prints it (the first byte on the wire lowest)."""
+    out = []
+    for w in cmds:
+        out.append('RP:%d' % present)
+        if present:
+            out.append('ROM:%02x' % (w & 0xFF))
+            if (w & 0xFF) == 0x33 and (w >> 8) >= 8:
+                out.append('ROM: 0x%016x' % sum(b << (8 * i) for i, b in enumerate(rom)))
+    return out
+
+
+def g_ow_unit(runner, log):
+    import random
+    import unit_small as US
+    log.group('advanced/ow_unit.s', title='1-Wire master on the shift unit, io4 in OD: reset, Read ROM and its 64 read '
+              'slots, bench/unit_small.py\'s device; sigrok onewire_link > onewire_network')
+    rng = random.Random(31)
+    roms = [US.rom_code(0x28, rng.getrandbits(48)) for _ in range(4)]
+    bad_rom = list(US.AN27_ROM)
+    bad_rom[5] ^= 0x01
+    for title, cmds, kws in (
+            ('Read ROM of AN27\'s device (CRC 0xA2)', [US.READ_ROM],
+             [dict(rom=US.AN27_ROM, tid=t, align=t) for t in range(4)]),
+            ('two Read ROMs back to back, random ROM codes, a 6 us rise, device corners (read 0 held 15.5 us, write '
+             'sample at 60 us, presence 55 us after the release, a 5 us response)', [US.READ_ROM, US.READ_ROM],
+             [dict(rom=roms[k], tid=k, align=(k + 1) % 4, rise=300,
+                   dev_kw=[dict(hold_us=15.5), dict(sample_us=60), dict(pd_wait_us=55), dict(resp=250)][k])
+              for k in range(4)]),
+            ('a ROM code with a bit flipped (the chip reports the CRC check failed), and no device',
+             [US.READ_ROM], [dict(rom=bad_rom, tid=2, align=3), dict(rom=US.AN27_ROM, present=False, tid=1, align=0)])):
+        b = Batch(runner, title + ', ' + str(len(kws)) + ' runs', 'events')
+        for k, kw in enumerate(kws):
+            ctx = b.run('ow_unit_%d_%s' % (len(cmds), k), US.ow_case, cmds, **kw)
+            r, bad, _ = ctx.value
+            want = ow_unit_expect(cmds, kw['rom'], kw.get('present', True))
+            b.sigrok(ctx, onewire('uio4'), onewire_events, want)
+            if bad:
+                b.fail(ctx.name, bad[0])
+        b.close()
+
+
+def uart_par_expect(frames, odd):
+    """sigrok uart tokens for frames (byte, parity bit, stop bit): the byte, then PE for a wrong parity bit and FE for
+    a stop bit of 0."""
+    out = []
+    for b, p, stop in frames:
+        out.append(b)
+        if p != (bin(b).count('1') + odd) & 1:
+            out.append('PE')
+        if not stop:
+            out.append('FE')
+    return out
+
+
+def g_uart_par_unit(runner, log):
+    import random
+    import unit_small as US
+    log.group('advanced/uart_par_unit.s', title='UART 8E1 and 8O1 on two shift units, TX io0, RX io0 or ui4; '
+              'bench/unit_small.py; sigrok uart with parity even or odd')
+    rng = random.Random(41)
+    for title, odd, bit, pairs in (
+            ('8E1 loopback on io0 at 1 Mbaud (50 cycles per bit), bursts of 1, 7 and 12 bytes', 0, 50,
+             ((0, 1), (1, 3), (2, 0), (3, 2))),
+            ('8O1 loopback on io0 at 115200 baud and 8.33 Mbaud (434 and 6 cycles per bit)', 1, (434, 6),
+             ((1, 0), (2, 3)))):
+        b = Batch(runner, title + ', ' + str(len(pairs)) + ' thread pairs', 'bytes')
+        for k, (ttx, trx) in enumerate(pairs):
+            bt = bit if isinstance(bit, int) else bit[k]
+            bursts = [[rng.getrandbits(8) for _ in range(m)] for m in (1, 7, 12)]
+            ctx = b.run('uart_par_unit_%s_%d_t%d%d' % ('eo'[odd], bt, ttx, trx), US.up_case, bursts=bursts, bit=bt,
+                        odd=odd, ttx=ttx, trx=trx, align=k)
+            r, bad = ctx.value
+            frames = [(x, US.par_bit(x, odd), 1) for bb in bursts for x in bb]
+            b.sigrok(ctx, uart('uio0', US.CLK / bt, parity=('even', 'odd')[odd]), uart_tokens,
+                     uart_par_expect(frames, odd))
+            if bad:
+                b.fail(ctx.name, bad[0])
+        b.close()
+    b = Batch(runner, 'receive from a sender model on ui4 at 1 Mbaud: 12 frames, wrong parity in 3, a stop bit of 0 '
+              'in 2, 8E1 and 8O1', 'bytes')
+    for odd in (0, 1):
+        data = [rng.getrandbits(8) for _ in range(12)]
+        snd = US.UartSender(data, 50, odd, flip=(2, 7, 9), nostop=(5, 9))
+        ctx = b.run('uart_par_unit_rx_%s' % 'eo'[odd], US.up_case, bit=50, odd=odd, nrx=4, trx=2 + odd, align=odd,
+                    sender=snd)
+        r, bad = ctx.value
+        b.sigrok(ctx, uart('ui4', US.CLK / 50, parity=('even', 'odd')[odd]), uart_tokens,
+                 uart_par_expect(snd.frames, odd))
+        if bad:
+            b.fail(ctx.name, bad[0])
+    b.close()
+
+
+def g_ws2812_unit(runner, log):
+    import random
+    import unit_small as US
+    log.group('advanced/ws2812_unit.s', title='WS2812B driver on the shift unit, DOUT uo6, three symbols a bit; '
+              'bench/unit_small.py; sigrok rgb_led_ws281x')
+    rng = random.Random(51)
+    for title, kws in (
+            ('TPER 20 + TFRAC 213 (1.25 us a bit), 3 frames of 1, 3 and 2 LEDs', [dict(tid=t, align=t) for t in range(4)]),
+            ('TPER 18 and 23 with no fraction, the window edges, and TPER 17 + TFRAC 128',
+             [dict(tper=18, tfrac=0, tid=1, align=2), dict(tper=23, tfrac=0, tid=3, align=1),
+              dict(tper=17, tfrac=128, tid=0, align=3)])):
+        b = Batch(runner, title + ', ' + str(len(kws)) + ' runs', 'LEDs')
+        for k, kw in enumerate(kws):
+            frames = [[rng.getrandbits(8) for _ in range(3 * n)] for n in (1, 3, 2)]
+            ctx = b.run('ws2812_unit_%d_%d' % (kw.get('tper', 20), k), US.ws_case, frames, **kw)
+            r, bad, _ = ctx.value
+            b.sigrok(ctx, ws281x('uo6'), ws281x_frames, ws281x_expect(frames))
+            if bad:
+                b.fail(ctx.name, bad[0])
+        b.close()
+
+
 def rig_uart_decode(w, baud):
     import rig
     return rig.uart_decode(w, baud)
@@ -2701,6 +3109,12 @@ GROUPS = [
     ('can', g_can),
     ('units', g_units),
     ('bypass', g_bypass),
+    ('spi_unit', g_spi_unit),
+    ('can_unit', g_can_unit),
+    ('sd_unit', g_sd_unit),
+    ('ow_unit', g_ow_unit),
+    ('uart_par_unit', g_uart_par_unit),
+    ('ws2812_unit', g_ws2812_unit),
     ('basic_images', g_basic_images),
     ('teeth', g_teeth),
 ]
