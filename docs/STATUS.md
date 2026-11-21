@@ -9,7 +9,6 @@ Updated 2026-11-20.
 - **Shift units:** one per thread, in `src/pe_shift.sv` (section 5.9): sending and receiving with their own bit timing, CRC up to 32 bits, bit stuffing, USB's end of packet and a Manchester decoder, for low-speed USB and 10 Mbit Ethernet at 50 MHz. The simulator in `sim/` models them.
 - **Specification:** [ISA.md](ISA.md), sections 1 to 11. Changes until the hardware freezes are listed in [DECISIONS.md](DECISIONS.md). Three simulators of it are in [`sim/`](../sim/README.md), one compiled from its code blocks and table.
 - **Programs:** 59 programs for 20 protocols in [`programs/`](../programs/README.md), each checked on the simulator in `sim/`. Eleven of them run their protocol on the shift units: an Ethernet node that answers ARP and ping, a USB device that a host enumerates, an SPI target, a CAN node, an SD card host, a 1-Wire master, a UART with parity, WS2812, XY2-100, PRBS generators and a CRC engine.
-- **No person has read the RTL yet.** [AI_USE.md](AI_USE.md) says what was checked by machine.
 
 ## Chip build
 
@@ -60,7 +59,6 @@ The pin-level tests catch 50 of 81 bugs planted in the core RTL before the shift
 
 - No SRAM of this kind is known to us to have been built on this process yet. The instruction set keeps a 128-word option for a latch array, which isn't built.
 - The CAN bench can't see a wrong sample point: its transceiver model's longest loop delay is 22 cycles.
-- The specification has not been read by an outside person yet.
 - 10BASE-T at 50 MHz: the receiver loses no frame with up to ±12 ns of random jitter on every edge, at any sampling phase. At 802.3's worst case of ±13.5 ns it loses frames at one sampling phase in eight: 1 in 5 at that phase, 2.5% over all phases, and 11% over all phases with the worst fixed pattern of early and late edges. The transmitter's edges sit up to 5 ns off the ideal grid: inside the 8.5 ns allowed into a resistive load, over the 3.5 ns allowed through 802.3's cable model. Both come from timing edges in 20 ns steps.
 - 10BASE-T: no collision detection (half-duplex CSMA/CD), echo replies up to 57 data octets, no IP options or reassembly. The program uses 510 of the 512 words.
 - USB: `usb_enum.s` takes one dribble bit before the host's EOP (USB 2.0 7.1.9.1, which lets a hub add up to six bit times with no transition) by reading its CRC register, and refuses two or more. It STALLs GET_DESCRIPTOR(CONFIGURATION) and SET_CONFIGURATION, which a real host asks next: they need about 20 more words, and 3 are free.
