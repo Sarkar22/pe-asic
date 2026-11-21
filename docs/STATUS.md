@@ -9,7 +9,6 @@ Updated 2026-11-11.
 - **Shift units:** one per thread, in `src/pe_shift.sv` (section 5.9): sending and receiving with their own bit timing, CRC up to 32 bits, bit stuffing, USB's end of packet and a Manchester decoder, for low-speed USB and 10 Mbit Ethernet at 50 MHz. The simulator in `sim/` models them.
 - **Specification:** [ISA.md](ISA.md), sections 1 to 11. Changes until the hardware freezes are listed in [DECISIONS.md](DECISIONS.md). Three simulators of it are in [`sim/`](../sim/README.md), one compiled from its code blocks and table.
 - **Programs:** 48 programs for 17 protocols in [`programs/`](../programs/README.md), each checked on the simulator in `sim/`.
-- **No person has read the RTL yet.** [AI_USE.md](AI_USE.md) says what was checked by machine.
 
 ## Chip build
 
@@ -58,7 +57,6 @@ The pin-level tests catch 50 of 81 bugs planted in the core RTL before the shift
 
 - No SRAM of this kind is known to us to have been built on this process yet. The instruction set keeps a 128-word option for a latch array, which isn't built.
 - The CAN bench can't see a wrong sample point: its transceiver model's longest loop delay is 22 cycles.
-- The specification has not been read by an outside person yet.
 
 ## Dates
 
