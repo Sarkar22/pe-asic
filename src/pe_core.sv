@@ -34,23 +34,41 @@ module pe_core
   assign rst_n_sync = rst_sync[1];
 
   // Timebase and input synchroniser. SYNC3 is SYNC2 one cycle older, so the shift units see an
-  // edge on any pin as SYNC2 ^ SYNC3 (section 5.9.2).
+  // edge on any pin as SYNC2 ^ SYNC3 (section 5.9.2). Each input pad is also sampled at the falling
+  // edge (section 3.1), by two library latches: the first, open while the clock is high, holds the
+  // pad's level from the falling edge; the second, open while the clock is low, passes it on and
+  // holds it from the rising edge until the next falling edge. SYNC1F takes it at the rising edge
+  // from the second, which closes at that edge, so the first latch opening at the same edge never
+  // reaches SYNC1F, with real delays or none. SYNC2F follows one cycle later, so in any cycle SYNC3,
+  // SYNC2F and SYNC2 hold a pad's level half a cycle apart. Only RKIND 3 reads SYNC2F.
   logic [15:0] tb_q, tb_next;
   logic [15:0] sync1_q, sync2_q, sync3_q;
+  logic [15:0] pad_in, fall_m, fall_l, sync1f_q, sync2f_q;
+
+  assign pad_in = {uio_in, ui_in};
+
+  for (genvar i = 0; i < 16; i = i + 1) begin : g_fall
+    sg13cmos5l_dlhq_1  lat (.D(pad_in[i]), .GATE(clk), .Q(fall_m[i]));
+    sg13cmos5l_dllrq_1 hold (.D(fall_m[i]), .GATE_N(clk), .RESET_B(rst_n_sync), .Q(fall_l[i]));
+  end
 
   assign tb_next = tb_q + 16'd1;
 
   always_ff @(posedge clk or negedge rst_n_sync) begin
     if (!rst_n_sync) begin
-      tb_q    <= 16'h0000;
-      sync1_q <= 16'h0000;
-      sync2_q <= 16'h0000;
-      sync3_q <= 16'h0000;
+      tb_q     <= 16'h0000;
+      sync1_q  <= 16'h0000;
+      sync2_q  <= 16'h0000;
+      sync3_q  <= 16'h0000;
+      sync1f_q <= 16'h0000;
+      sync2f_q <= 16'h0000;
     end else begin
-      tb_q    <= tb_next;
-      sync1_q <= {uio_in, ui_in};
-      sync2_q <= sync1_q;
-      sync3_q <= sync2_q;
+      tb_q     <= tb_next;
+      sync1_q  <= pad_in;
+      sync2_q  <= sync1_q;
+      sync3_q  <= sync2_q;
+      sync1f_q <= fall_l;
+      sync2f_q <= sync1f_q;
     end
   end
 
@@ -198,7 +216,7 @@ module pe_core
   logic        pin_put, pin_value, pin_put8, pin_oe, pin_oe8, pin_cfg, pin_smap, shd_pin;
 
   // The shift units' outputs, and the strobes of the instruction in stage 4.
-  logic [3:0]  u_la, u_lb, u_txfull, u_rxfull, u_rxbl;
+  logic [3:0]  u_la, u_lb, u_pa, u_pb, u_txfull, u_rxfull, u_rxbl;
   logic [15:0] u_rxbuf [0:3];
   logic [15:0] u_status [0:3];
   logic [15:0] u_srd [0:3];
@@ -382,6 +400,7 @@ module pe_core
         .rst_n   (rst_n_sync),
         .sync2   (sync2_q),
         .sync3   (sync3_q),
+        .sync2f  (sync2f_q),
         .cmt     (th_commit[i]),
         .cfg_we  (u_cfg & ex_one[i]),
         .cfg_slot(ir4_q[9:6]),
@@ -402,6 +421,8 @@ module pe_core
         .rd_reg  (rd_unit),
         .la      (u_la[i]),
         .lb      (u_lb[i]),
+        .pad_a   (u_pa[i]),
+        .pad_b   (u_pb[i]),
         .txfull  (u_txfull[i]),
         .rxfull  (u_rxfull[i]),
         .rxbuf   (u_rxbuf[i]),
@@ -461,8 +482,8 @@ module pe_core
       .smap    (pin_smap),
       .smap_l  (ir4_q[4:3]),
       .shd_pin (shd_pin),
-      .la      (u_la),
-      .lb      (u_lb),
+      .la      (u_pa),
+      .lb      (u_pb),
       .h_abort (h_abort)
   );
 
@@ -513,6 +534,6 @@ module pe_core
 
   // List all unused inputs to prevent warnings
   logic _unused;
-  assign _unused = &{ena, 1'b0};
+  assign _unused = &{ena, u_la, u_lb, 1'b0};
 
 endmodule

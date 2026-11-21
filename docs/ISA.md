@@ -1,6 +1,6 @@
 # ISA v0.1
 
-Draft, 2026-11-11. This instruction set can change until the hardware freezes.
+Draft, 2026-11-21. This instruction set can change until the hardware freezes.
 
 **Status of the evidence.** Where this document says something ran, it ran on Python simulators: two hand-written, and one compiled directly from the instruction table and code blocks of this file. They agree on every cycle compared. Sections 7 and 11.2 list what ran. Treat anything they don't list as not run. The cycle figures in section 9 come from the RTL in `src/`, which has been simulated, synthesized and laid out, but not built. No real hardware is behind this document. One of the simulators is in `sim/`. The programs of section 11.2 are in `programs/`, with benches that run each of them on that simulator: `python3 programs/check.py`. The RTL is in `src/`, with its tests in `test/`.
 
@@ -61,6 +61,7 @@ Nothing divides instruction issue: every thread issues one instruction every 4 c
 | FULL0..FULL7 | 1 each | Mailbox full flags |
 | SYNC1, SYNC2 | 16 each | Two-flop input synchroniser |
 | SYNC3 | 16 | SYNC2 one cycle older, so that an edge on any pin is `SYNC2 ^ SYNC3` (section 5.9) |
+| SYNC1F, SYNC2F | 16 each | The falling-edge samples: each pad's level at the falling edge in the middle of a cycle, through two flops, so SYNC2F is the pad half a cycle after SYNC3's sample and half a cycle before SYNC2's (section 3.1) |
 | OUT, SHD | 16 each | Pin output flops and their shadow. Bit *p* belongs to output pin *p* (section 5.1) |
 | OE, SHOE, OD | 8 each | `uio` output enable, its shadow, and open-drain mode |
 | BYP, SHBYP | 5 each | Bypass switch per lane and its shadow |
@@ -81,20 +82,28 @@ Arithmetic is modulo 2^16 on registers and D. T is always 0 or 1.
 
 An **alignment** is the value of *h* mod 4 for the RUN that starts a thread, where *h* is the cycle of that RUN (section 9.3). Each thread has 4, so `16 alignments` means 4 threads x 4 alignments.
 
-All state is flops that update on the rising edge ending a cycle. A value written in cycle *c* is visible from cycle *c + 1*. Only the rising clock edge is used.
+All state is flops that update on the rising edge ending a cycle. A value written in cycle *c* is visible from cycle *c + 1*.
+
+**Half cycles.** The falling clock edge splits each cycle into two halves: the first from the rising edge that starts the cycle, the second from the falling edge to the rising edge that ends it. Only the pads use the falling edge, and no state changes there:
+
+- **Inputs.** Each input pad is sampled twice in cycle *c*: at its falling edge, into SYNC1F, and at the rising edge that ends it, into SYNC1. Both samples move on through flops at rising edges, so in any cycle SYNC3, SYNC2F and SYNC2 hold one pad's level at three times, each half a cycle after the one before. Only the Manchester decoder with RKIND 3 reads SYNC2F (section 5.9.6).
+- **Outputs.** Each output pad has a level in each half (section 5.2). The two differ only on a pin switched to a shift output that its send half moved at the falling edge (THALF, section 5.9.5). Everything else moves at rising edges only.
+- **The chip's own edges.** A pad that the chip moves at a clock edge is sampled at that edge with its old level, because the pad's delays come after the edge. So a change written in cycle *w* is in SYNC2 at *w* + 3 whether it moved the pad at the rising or the falling edge of *w* + 1, and after a move at the falling edge SYNC2F still shows the old level at *w* + 3.
+- **One level per cycle.** A test, simulator or board that gives an input one level per cycle gives it for the whole cycle: the falling-edge sample of cycle *c* is the level of cycle *c*, so every input edge falls in the first half. One that reads an output once per cycle reads the first half, and sees a move at a falling edge at the next rising edge, half a cycle late. Without THALF and RKIND 3, both halves of every output agree, SYNC2F is read by nothing, and everything behaves as with the rising edge alone.
+- **The duty cycle.** The half cycles are only as exact as the clock's duty cycle: a falling edge *d* ns late moves every falling-edge sample and every falling-edge move by *d* ns (section 7.3).
 
 ### 3.2 Order inside one cycle
 
 A simulator does these steps for cycle *c*, in this order. Every read of a flop sees its value from the start of the cycle, with one exception: `stop()` reads P as step 2 left it. Inside one step, a block also sees what it wrote itself a line earlier.
 
-1. **Pads.** Compute the pad outputs from flop state (section 5.2), then take the pad inputs for cycle *c*. A lane in bypass has no flop in its path, so it depends on `ui_in` too. A simulator either takes inputs first or shows `ui_in` of cycle *c - 1*, as section 10 allows.
+1. **Pads.** Compute the pad outputs from flop state (section 5.2), for both halves of the cycle, then take the pad inputs for cycle *c*: the levels at its falling edge and at the rising edge that ends it (section 3.1). A lane in bypass has no flop in its path, so it depends on `ui_in` too. A simulator either takes inputs first or shows `ui_in` of cycle *c - 1*, as section 10 allows.
 2. **Events.** For every thread, set HIT to whether TB = D xor 0x8000. Then, for every thread with P = 1, run `events()` (section 3.4).
 
    2b. **Shift units.** Every thread runs `tx_step()`, then `rx_step()` (section 5.9).
 
 3. **Execute.** The thread owning cycle *c* runs `slot(P_start)` (section 3.6), where P_start is its P flag from before step 2.
 4. **Memory.** The thread whose memory cycle is *c* runs `memory()` (section 4.2).
-5. **Update.** Every thread runs `update_stale()` (section 3.5), and CMT := 0. Then `SYNC3 := SYNC2`, `SYNC2 := SYNC1`, `SYNC1 := {uio_in, ui_in}`, and *c* advances.
+5. **Update.** Every thread runs `update_stale()` (section 3.5), and CMT := 0. Then `SYNC3 := SYNC2`, `SYNC2 := SYNC1`, `SYNC1 := {uio_in, ui_in}`, `SYNC2F := SYNC1F`, `SYNC1F :=` the same pads' levels at the falling edge of cycle *c*, and *c* advances.
 
 A host command takes effect after step 5 of its cycle. A memory access and the read of RDREG come later (section 9.1).
 
@@ -102,7 +111,7 @@ Step 2b reads CMT, which step 2 sets in the same cycle. Like HIT, CMT lasts one 
 
 **The two halves of a unit share no flop in step 2b.** Each half writes only its own state, and reads only that, CMT, the configuration and the synchroniser. The CRC register belongs to the half that CTX names in that cycle: the send half reads and writes it only with CTX 1, and the receive half only with CTX 0 (section 5.9.7). So the order of `tx_step` and `rx_step` can't change a result, and an implementation may run them at once. Inside one half the code runs in order, so a line reads what an earlier line of the same step wrote.
 
-**Step 3 reads the unit's flops as they were at the start of the cycle, before step 2b.** That is the first rule of section 3.2, and it matters here because step 2b, unlike the steps before it, writes flops that step 3 reads in the same cycle: TXFULL (`tx_load`), RXFULL, RXBUF, RXBN, RXBL and RXBE (`rx_deliver`), CRC (`crc_init`, `crc_bit` and the append), and every flop of the status word, TXUR, RXOVR, RXSEEN, RXRUN, RXEP, LA and LB among them. So a `txw` in the cycle the unit takes the buffer still blocks, an `rxw` in the cycle a word arrives still blocks, an `sstat` in the cycle a flag sets reads it as 0 and leaves it set, and an `srd` in the cycle a bit enters the CRC register reads the register as it was before that bit. A simulator that runs the steps one after another on live state must keep these flops' values from before step 2b for step 3, or run step 3 on a copy of the start-of-cycle state and apply its writes after step 2b's.
+**Step 3 reads the unit's flops as they were at the start of the cycle, before step 2b.** That is the first rule of section 3.2, and it matters here because step 2b, unlike the steps before it, writes flops that step 3 reads in the same cycle: TXFULL (`tx_load`), RXFULL, RXBUF, RXBN, RXBL and RXBE (`rx_deliver`), CRC (`crc_init`, `crc_bit`, the append and the byte end of `rx_eop`), and every flop of the status word, TXUR, RXOVR, RXSEEN, RXRUN, RXEP, LA and LB among them. So a `txw` in the cycle the unit takes the buffer still blocks, an `rxw` in the cycle a word arrives still blocks, an `sstat` in the cycle a flag sets reads it as 0 and leaves it set, and an `srd` in the cycle a bit enters the CRC register reads the register as it was before that bit. A simulator that runs the steps one after another on live state must keep these flops' values from before step 2b for step 3, or run step 3 on a copy of the start-of-cycle state and apply its writes after step 2b's.
 
 Apart from that one read, and from step 3's reads of the shift-unit flops that step 2b writes, which see the start of the cycle like every read (section 5.9), no step reads a flop that an earlier step wrote in the same cycle, so the steps behave like simultaneous flop updates. World instructions and blocked waits stall on P_start, which is what keeps this true. `stop()` is the exception because a stop in the event's own cycle must see the wait as finished. In hardware, the P it reads is the P flop at the start of the cycle and not firing in this cycle. The overlaps are write conflicts, and the instruction wins: `pcfg p, OD` on a pin that its old owner commits in that cycle; any `pcfg`, which clears the pin's output switch, on a pin whose old owner commits that switch in that cycle; `sstop` against a shift unit half that is moving; and `sstat` clearing a sticky flag that was already set and sets again.
 
@@ -399,6 +408,16 @@ uio_oe[i]  = OD[i] ? !V(8 + i) : OE[i]
 
 Bypass lanes exist only for `uo0` and `uo4..uo7`, with `SRC(0) = 3` and `SRC(i) = i` for the others. `uo1` and `uo2` always show OUT.
 
+**Two halves.** These equations give each pad in the second half of a cycle, from its falling edge (section 3.1). In the first half, from the rising edge, the same equations hold with V0 in place of V:
+
+```
+V0(p)      = A0[OWN[p]] if SEL[p] == 1 else B0[OWN[p]] if SEL[p] == 2 else OUT[p]
+A0[t]      = OLA[t] if TXH[t] else LA[t]
+B0[t]      = OLB[t] if TXH[t] else LB[t]
+```
+
+TXH is set for the one cycle after a send half has moved its outputs half a cycle late (THALF, section 5.9.5), and OLA and OLB hold the levels from before that move. So in that cycle a pin on the shift output shows the old level until the falling edge and the new one after it, and the enable of a pin in `OD` moves the same way. In every other cycle V0 is V and the halves agree, as they always do on a pin that shows OUT. A bypass lane follows `ui_in` in both halves.
+
 Pads have no pulls and no hysteresis. `uo` pads can't tri-state. Only `uio` pads can do open drain, turnaround or read-back. A `uio` input reads the pad even while the chip drives it, so a thread can read another thread's output with no outside wire, which gives a loopback self-test.
 
 `LA[t]` and `LB[t]` are the shift outputs of thread *t*'s unit. SEL[p] is pin *p*'s output switch. A shift output replaces OUT and nothing else:
@@ -407,7 +426,9 @@ Pads have no pulls and no hysteresis. `uo` pads can't tri-state. Only `uio` pads
 - **OE** stays firmware's. A shift output on a `uio` pin in `PP` drives only while OE is 1, so a turnaround is still a committed `oe`.
 - **Bypass wins.** On a pin in `BYP`, the output switch has no effect until the bypass switch is committed off.
 - **Idle.** A pin switched to a shift output shows that output's level: the idle level when the send half is idle (after `sstop tx` or a tail), or the end level during a tail. After reset every shift output is 0.
-- **Inputs** need no switch. Any unit can read any input pin, the pins of its own outputs included: a `uio` pin reads its own drive (section 5.2), so a shift output looped back to its own unit is a self-test with no outside wire. A change of a shift output written in cycle *w* is on the pad at *w* + 1 and in SYNC2 at *w* + 3.
+- **Inputs** need no switch. Any unit can read any input pin, the pins of its own outputs included: a `uio` pin reads its own drive (section 5.2), so a shift output looped back to its own unit is a self-test with no outside wire. A change of a shift output written in cycle *w* is on the pad at *w* + 1, from its falling edge if THALF put it there, and in SYNC2 at *w* + 3 either way (section 3.1).
+
+**Implementation note.** This is not normative. A shift output's two halves can come from a flop P that moves its pads at the rising edge and a flop N seen through a latch that is open while the clock is low, with the pads driven from P XOR the latch. For levels *v1* and *v2* in the two halves of cycle *c*, P takes *v1* XOR N's old value and N takes P's new value XOR *v2*, so N keeps its reset value 0 until a half moves, and the two inputs of the XOR never change in the same half cycle, so the pad doesn't glitch. The falling-edge sample is a pair of latches: the first, open while the clock is high, holds the pad's level from the falling edge, and the second, open while the clock is low, passes it on and holds it from the rising edge, where the flop SYNC1F takes it. So the first latch opening at that same edge never reaches SYNC1F, with real delays or none. No latch is state: at reset P, N and SYNC1F are 0, and the output latch and the second input latch are cleared with them.
 
 ### 5.3 Claiming pins
 
@@ -517,7 +538,7 @@ Rt adds a timeout at D + Rt, and T reads 0 if it expires. `inbox` also ends the 
 
 ### 5.7 Input latency and reaction
 
-Inputs pass a two-flop synchroniser with no glitch filter. A pad change in cycle *p* is in SYNC2 at *p + 2*. A commit in cycle E reaches the pad at *E + 1*.
+Inputs pass a two-flop synchroniser with no glitch filter. A pad change in cycle *p* is in SYNC2 at *p + 2*. A commit in cycle E reaches the pad at *E + 1*. The falling-edge sample of cycle *p* is in SYNC2F at *p + 2* too, half a cycle before SYNC2's sample (section 3.1); only RKIND 3 reads it.
 
 - **Pre-armed reaction.** Prepare pins, then wait: the match commits them. An input edge at the pad moves an output 3 cycles later, exactly, on every thread and phase run.
 - **Timed reaction.** After a match in cycle E, `edge p, v, n` fires at E + n. The smallest step on time on every alignment is n = 5, which is 8 cycles pad to pad with no jitter.
@@ -534,8 +555,8 @@ Mode `BYP` gives a pad-to-pad path with no flop in it. The switch is committed s
 
 Each thread has one shift unit with a send half and a receive half.
 
-- The **send half** turns 16-bit words into a stream of symbols on two **shift outputs**, A and B. Each symbol lasts a set number of cycles, or ends at an edge of an outside clock. An output's value per symbol comes from a small table, so one mechanism gives NRZ, NRZI, Manchester, biphase mark, return to zero, a data line with its clock, and a complement for a differential pair.
-- The **receive half** turns one input pin into 16-bit words. It samples at a set period, decodes a Manchester-family code against a predicted clock edge that every input edge corrects, or samples at the edges of an outside clock. It can wait for a sync pattern before it starts a word, and it ends a reception after a set number of bits, a set time without edges, or, for Manchester, the first bit with no clock edge.
+- The **send half** turns 16-bit words into a stream of symbols on two **shift outputs**, A and B. Each symbol lasts a set number of cycles and 256ths of a cycle, placed to the cycle or, with THALF, to the half cycle, or ends at an edge of an outside clock. An output's value per symbol comes from a small table, so one mechanism gives NRZ, NRZI, Manchester, biphase mark, return to zero, a data line with its clock, and a complement for a differential pair.
+- The **receive half** turns one input pin into 16-bit words. It samples at a set period, decodes a Manchester-family code against a predicted clock edge that every input edge corrects, with edges timed to the cycle or, with RKIND 3, to the half cycle, or samples at the edges of an outside clock. It can wait for a sync pattern before it starts a word, and it ends a reception after a set number of bits, a set time without edges, or, for Manchester, the first bit with no clock edge.
 - A **CRC register** of 32 bits serves one half at a time (section 5.9.7). As a CRC of any width from 1 to 32 bits and any polynomial, it takes one bit per data bit in wire order, appends the CRC after a send's covered words, and checks a reception against a set residue. As an LFSR it scrambles a send or descrambles a reception, which also gives a PRBS. A **bit stuffer** inserts a bit after a set number of equal bits on send, and the **destuffer** removes it on receive and ends a reception on a stuff violation.
 
 A unit starts only at a commit of its own thread, so its first symbol lands on the exact cycle of an event (section 3.3). From then on it runs by itself on a cycle grid fixed by that commit. The thread only fills and empties its buffers, through instructions that block like `send` and `recv`. A pin follows a shift output only if its owner switches it to that output, and the switch is committed like any other pin state (section 5.4). In this section "lane" keeps the meaning of section 5.2, a bypass lane.
@@ -548,7 +569,7 @@ The unit counts cycles per symbol. It never changes when a thread issues instruc
 
 | State | Bits | Purpose |
 |---|---|---|
-| CFG[0..15] | 16 each | Configuration slots, written by `scfg` (section 5.9.3). Reserved bits aren't stored and read 0 |
+| CFG[0..15] | 16 each | Configuration slots, written by `scfg` (section 5.9.3). Every bit is a field, so all 16 are stored |
 | CRC | 32 | The CRC register, or the LFSR (section 5.9.7). `srd` and RDREG read it |
 | RXPE | 3 | End flags of the word `rxw` took last (section 5.9.7). `srd` and RDREG read them |
 
@@ -567,6 +588,8 @@ The status word that `sstat` and RDREG read (section 5.9.4) is not stored: both 
 | TXCD | 17 | Cycles left in the current symbol or tail |
 | TXACC | 8 | Fraction accumulator for TFRAC |
 | LA, LB | 1 each | The levels of shift outputs A and B |
+| TXH | 1 | The last move of LA and LB is half a cycle late: set in the cycle of a move that THALF puts at the next falling edge, so that in the next cycle the pads show OLA and OLB until that falling edge (section 5.2) |
+| OLA, OLB | 1 each | LA and LB as they were at the start of the cycle, written by every `tx_step` |
 | TXUR | 1 | Sticky. A send ran out of words before its last word |
 | TXK, TXBK | 2 each | The kind (section 5.9.7) of the word in the shift register, and of the word in the buffer |
 | TXB | 1 | The bit of the current symbol, as the line coder takes it |
@@ -596,6 +619,9 @@ The status word that `sstat` and RDREG read (section 5.9.4) is not stored: both 
 | RXVIO | 1 | The destuffer has seen a stuff violation, and the next bit ends the reception |
 | RXCOV | 1 | The CRC covers the bits of this reception from here on |
 | RXEF, RXBE | 3 each | End flags (section 5.9.7) of the reception in progress, and of the word in the buffer |
+| RXSR8, RXN8 | 16, 5 | RXSR and RXN at the last byte boundary: at the start, and after every 8th bit after the sync pattern (section 5.9.7) |
+| RXC8 | 16 | The CRC register's bits 31 to 16 at the last byte boundary |
+| RXONES | 1 | Every bit since the last byte boundary is a 1 |
 | CMT | 1 | The thread's prepared pins commit in this cycle. Lasts one cycle, like HIT |
 
 **Global state:**
@@ -603,6 +629,7 @@ The status word that `sstat` and RDREG read (section 5.9.4) is not stored: both 
 | State | Bits | Purpose |
 |---|---|---|
 | SYNC3 | 16 | SYNC2 one cycle older, so that an edge on any pin is `SYNC2 ^ SYNC3` |
+| SYNC2F | 16 | The falling-edge sample, half a cycle after SYNC3's and half a cycle before SYNC2's (section 3.1), for RKIND 3 |
 | SEL, SHSEL | 2 x 16 each | The output switch of each output pin, and its shadow: 0 is OUT, 1 is shift output A, 2 is shift output B of the pin's owner |
 
 #### 5.9.3 Configuration
@@ -623,12 +650,13 @@ The status word that `sstat` and RDREG read (section 5.9.4) is not stored: both 
 | TEXT | 0 | 9 | 1: a symbol ends at an edge of pin TCLK. 0: after TPER cycles |
 | TFALL | 0 | 10 | 1: that edge is falling. 0: rising |
 | TCLK | 0 | 14:11 | Input pin of the outside clock, numbered as `ipin` |
+| THALF | 0 | 15 | 1: a symbol whose start the fraction puts half a cycle or more past a rising edge starts at the falling edge in the middle of that cycle, so symbols lie on a grid of half cycles (5.9.5). TEXT and TPER 0 ignore it. 0: every symbol starts at a rising edge |
 | MAPA | 1 `TXMAP` | 7:0 | Output A's code for symbols 0 to 3, two bits each, symbol 0 in bits 1:0 |
 | MAPB | 1 | 15:8 | Output B's codes, the same way |
 | TPER | 2 `TXPER` | 15:0 | Cycles per symbol. 0 acts as 1 and ignores TFRAC |
 | TAIL | 3 `TXTAIL` | 7:0 | Cycles of the end levels after the last symbol. 0: no tail |
-| TFRAC | 3 | 15:8 | Fraction of a cycle added to each symbol, in 256ths. TPER 0 ignores it |
-| RKIND | 4 `RXMODE` | 1:0 | 0: timed samples. 1: Manchester decoder. 2: outside clock. 3: reserved, acts as 0. A reception keeps the decoder it started with |
+| TFRAC | 3 | 15:8 | Fraction of a cycle added to each symbol, in 256ths. TPER 0 ignores it. With THALF the fraction also places each symbol to the half cycle |
+| RKIND | 4 `RXMODE` | 1:0 | 0: timed samples. 1: Manchester decoder. 2: outside clock. 3: Manchester decoder on half cycles, which times every edge to the half cycle with SYNC2F (5.9.6). A reception keeps the decoder it started with |
 | RMSB | 4 | 2 | 1: the first bit of a word ends up in bit n - 1. 0: in bit 0 |
 | RINV | 4 | 3 | 1: invert every decoded bit |
 | RDIFF | 4 | 4 | Timed and outside clock: 1 decodes NRZI, where a change is 0. Manchester decoder: 1 makes the bit "an edge other than a clock edge came between the last two clock edges" |
@@ -637,7 +665,7 @@ The status word that `sstat` and RDREG read (section 5.9.4) is not stored: both 
 | RFALL | 4 | 7 | Outside clock: 1 samples at a falling edge of RCLK, 0 at a rising one |
 | RPIN | 4 | 11:8 | Input pin of the data, numbered as `ipin` |
 | RCLK | 4 | 15:12 | Input pin of the outside clock, numbered as `ipin`. With REOP, timed samples read it as the second line of the end test (section 5.9.7) |
-| RPER | 5 `RXPER` | 15:0 | Timed: cycles per sample. Manchester decoder: cycles per bit, where 256 and up are reserved and act as 255. Both add RFRAC. 0 acts as 1 and ignores RFRAC |
+| RPER | 5 `RXPER` | 15:0 | Timed: cycles per sample. Manchester decoder: cycles per bit. Both add RFRAC. 0 acts as 1 and ignores RFRAC. For the Manchester decoder 256 and up are reserved and act as 255, and with RKIND 3, 0 and 1 are reserved and act as 2, with no RFRAC |
 | FIRST | 6 `RXFIRST` | 15:0 | Timed: cycles from the start to the first sample. With RESYNC, an edge pulls the next sample toward FIRST cycles after it, all the way with RGAIN 0. 0 acts as 1 |
 | REND | 7 `RXEND` | 15:0 | Cycles since the last reference edge, or for the Manchester decoder since the last bit, that end a reception. 0: never |
 | RCNT | 8 `RXCNT` | 10:0 | Bits after the sync pattern that end a reception. 0: no limit |
@@ -659,10 +687,10 @@ The status word that `sstat` and RDREG read (section 5.9.4) is not stored: both 
 | CTX | 15 | 9 | 1: the send half uses the CRC register. 0: the receive half |
 | SMODE | 15 | 11:10 | 0: no stuffing. 1: a run is of ones, and its stuff bit is a 0 (USB, HDLC). 2: a run is of equal bits, and its stuff bit is the complement (CAN). 3: reserved, acts as 0 |
 | SN | 15 | 14:12 | Bits in a run that a stuff bit follows: 1 to 7 with SMODE 1, 2 to 7 with SMODE 2. 0 is reserved: it acts as 1 with SMODE 1, and with SMODE 2 both 0 and 1 act as 2 |
-| REOP | 15 | 15 | Timed samples: 1 ends a reception at a sample where RPIN and RCLK both read 0, such as a USB SE0, and that sample gives no bit. The send half ignores it |
+| REOP | 15 | 15 | Timed samples: 1 ends a reception at a sample where RPIN and RCLK both read 0, such as a USB SE0, and that sample gives no bit. If 1 to 6 bits follow the last byte boundary and all are ones, the reception ends at that boundary instead (5.9.7, the byte end). The send half ignores it |
 <!-- shift-fields-end -->
 
-TXMODE bit 15 is reserved. A **reference edge** is a clock edge for the Manchester decoder, any edge of RPIN for timed samples, and an active edge of RCLK for an outside clock.
+A **reference edge** is a clock edge for the Manchester decoder, of either kind, any edge of RPIN for timed samples, and an active edge of RCLK for an outside clock.
 
 **Output codes.** Each symbol of each bit *b* gives each shift output a value:
 
@@ -690,7 +718,7 @@ So reset leaves a unit sending plain NRZ data on both outputs, at one symbol per
 | Data with its clock, SPI mode 0 | 1 | *b*, *b* | 0 | Clock: 0, 1 |
 | Data with its clock, SPI mode 1 | 1 | *b*, *b* | 0 | Clock: 1, 0 |
 
-For modes 2 and 3 set IDLEB to 1 and swap the clock codes. As TXMAP words: 802.3 Manchester with its complement is 0x0401, SPI mode 0 is 0x0E00, and a USB NRZI pair is 0x0101.
+For modes 2 and 3 set IDLEB to 1 and swap the clock codes. As TXMAP words: 802.3 Manchester with its complement is 0x0401, SPI mode 0 is 0x0E00, and a USB NRZI pair is 0x0101. 10BASE-T at 50 MHz is TPER 2 with TFRAC 128 and THALF: 2.5 cycles a half bit (5.9.5).
 
 Each symbol's value comes from the current bit alone, or toggles the output on it. So a code that depends on earlier bits can't be written: Miller (delay modulation), AMI and other bipolar codes, whose marks alternate in polarity, and two-wire codes whose lines swap clock and data roles, such as the Maple bus. Firmware sends those. A one-line code among them can also be encoded into memory first, one bit per half bit, and sent as NRZ.
 
@@ -778,7 +806,7 @@ shadow_sel(p, l):
         SHSEL[p] := l
 ```
 
-`KEEP[k]` is the mask of the bits that the field table's rows define in slot *k*. The only bit with no row is TXMODE bit 15, which is reserved, so `KEEP[0]` is 0x7FFF and `KEEP[1]` to `KEEP[15]` are 0xFFFF.
+`KEEP[k]` is the mask of the bits that the field table's rows define in slot *k*. Every bit of every slot has a row, so each `KEEP[k]` is 0xFFFF.
 
 #### 5.9.5 Send
 
@@ -786,6 +814,9 @@ Each cycle, after the events of step 2, every thread runs `tx_step()`.
 
 ```
 tx_step():
+    OLA := LA
+    OLB := LB
+    TXH := 0
     if TXRUN:
         tx_run()
     elif TXTL:
@@ -795,15 +826,18 @@ tx_step():
             tx_load()
         if TXARM and CMT:
             TXARM := 0
+            TXACC := 0
             if TXN == 0:
                 TXUR := 1
                 tx_end()
             else:
                 TXRUN := 1
                 TXSYM := 0
-                TXACC := 0
                 tx_begin()
                 tx_symbol()
+
+tx_half():
+    TXH := 1 if THALF and not TEXT and TPER != 0 and bit(TXACC, 7) else 0
 
 tx_load():
     TXSR := TXBUF
@@ -826,6 +860,7 @@ tx_symbol():
     vb := [b, 1 - b, 0, 1][(MAPB >> (2 * TXSYM)) & 3]
     LA := LA ^ va if TGLA else va
     LB := LB ^ vb if TGLB else vb
+    tx_half()
     if TPER == 0:
         TXCD := 1
     else:
@@ -860,6 +895,7 @@ tx_run():
 
 tx_end():
     TXRUN := 0
+    tx_half()
     if TAIL == 0:
         LA := IDLEA
         LB := IDLEB
@@ -872,6 +908,7 @@ tx_end():
 tx_tail():
     if TXCD <= 1:
         TXTL := 0
+        tx_half()
         LA := IDLEA
         LB := IDLEB
     else:
@@ -886,6 +923,7 @@ tx_stop():
     TXSYM := 0
     TXSTF := 0
     TXAN := 0
+    TXH := 0
     LA := IDLEA
     LB := IDLEB
 ```
@@ -893,6 +931,7 @@ tx_stop():
 What follows from the code:
 
 - **The grid.** A symbol written in cycle *w* is on the pad from *w* + 1 (section 5.7), for exactly TPER cycles plus any fraction carry. TPER 0 gives one cycle and leaves TXACC alone, whatever TFRAC is. The commit at E writes the first symbol, so with no fraction, symbol *k* of a send is on the pad from E + 1 + *k* x TPER, and a word of *n* bits lasts *n* x (SYMS + 1) x TPER cycles, with TPER 0 counted as 1 in both. A stuff bit or an appended CRC bit (5.9.7) is a bit like any other: it lasts SYMS + 1 symbols on the same grid.
+- **Half cycles.** TXACC holds the fraction carried into the next symbol. With THALF, a symbol, a tail or an idle level that starts while it is 128 or more sets TXH in `tx_half`, so the pads show the new levels from the falling edge of the cycle after the write, half a cycle later than without THALF (section 5.2). So symbol *k* of a send with TPER 1 or more starts on the pad at E + 1 + *k* x (TPER + TFRAC / 256) rounded down to a half cycle, where without THALF it is rounded down to a cycle. With TPER 2 and TFRAC 128 every symbol lasts exactly 2.5 cycles, 10 Mbit/s Manchester at 50 MHz, where without THALF they alternate 2 and 3. The first symbol still lands at E + 1, because a start sets TXACC to 0. The tail keeps TXACC, so it lasts exactly TAIL cycles on the pad and the idle level after it lands on the same half. `sstop tx` and ABORT move the outputs at a rising edge. The grid is exact to the half cycle only with a 50% clock (section 7.3).
 - **Refill.** The buffer is read only at a word boundary. A `txw` in the same cycle as the boundary is too late, because it fills the buffer at the end of that cycle.
 - **The end.** After the last symbol of the word marked `last`, and of its CRC and any stuff bit if it is of kind `fcs` (5.9.7), the outputs show ENDA and ENDB for TAIL cycles, then IDLEA and IDLEB. With TAIL = 0 they go straight to the idle levels. A word marked `last` always ends the send: a word already in the buffer then belongs to the next send, and moves into the shift register once the tail is over.
 - **Underrun.** If the shift register empties, the buffer is empty and the word wasn't marked `last`, TXUR sets and the send ends exactly as a normal end does, tail included. A start with no word does the same. The bit grid isn't kept, because a receiver can't use half a frame anyway, while a defined end leaves the line in a state the protocol allows.
@@ -924,6 +963,7 @@ rx_step():
             rx_begin()
 
 rx_begin():
+    h := RXHUNT and RKIND == 3 and bit(SYNC2F, RPIN) != bit(SYNC2, RPIN)
     RXHUNT := 0
     RXRUN := 1
     RXSEEN := 1
@@ -939,8 +979,8 @@ rx_begin():
     RXCAND := 0
     RXG := 1
     rx_cbegin()
-    if RXKIND == 1:
-        RXPH := 256
+    if RXKIND == 1 or RXKIND == 3:
+        RXPH := 128 if h else 256
         if not RDIFF:
             rx_bit(bit(SYNC2, RPIN))
     else:
@@ -954,7 +994,17 @@ rx_run():
     if RXKIND == 1:
         if RPER > 255:
             p := 0xFF00 | RFRAC
-        rx_manch(e, p)
+        rx_manch(e, bit(SYNC2, RPIN), p, 256)
+    elif RXKIND == 3:
+        if RPER > 255:
+            p := 0xFF00 | RFRAC
+        elif RPER < 2:
+            p := 512
+        f := bit(SYNC2F, RPIN)
+        e1 := e and f == bit(SYNC2, RPIN)
+        rx_manch(e1, f, p, 128)
+        if RXRUN:
+            rx_manch(e and not e1, bit(SYNC2, RPIN), p, 128)
     elif RXKIND == 2:
         if bit(SYNC2, RCLK) != bit(SYNC3, RCLK) and bit(SYNC2, RCLK) != RFALL:
             RXIC := 0
@@ -968,7 +1018,7 @@ rx_timed(e, p):
     if RXPH < 256:
         RXPH := RXPH - 256 + p
         if REOP and bit(SYNC2, RPIN) == 0 and bit(SYNC2, RCLK) == 0:
-            rx_end()
+            rx_eop()
         else:
             rx_sample()
     else:
@@ -979,7 +1029,7 @@ rx_timed(e, p):
             rx_pull((FIRST - 1 if FIRST else 0) << 8)
             rx_gear()
 
-rx_manch(e, p):
+rx_manch(e, v, p, s):
     w := (p >> 1) if RACQ and RGAIN != 0 and RXG < 16 else (p >> 2)
     if RXPH >= p - w:
         if RXOPEN:
@@ -997,7 +1047,7 @@ rx_manch(e, p):
             RXOPEN := 0
             RXCAND := 0
             RXIC := 0
-            rx_bit(RXWIN if RDIFF else bit(SYNC2, RPIN))
+            rx_bit(RXWIN if RDIFF else v)
             RXWIN := 0
             if e:
                 rx_pull(0)
@@ -1005,7 +1055,7 @@ rx_manch(e, p):
     elif RXRUN and e:
         RXWIN := 1
         rx_pull(p >> 1)
-    RXPH := RXPH + 256
+    RXPH := RXPH + s
 
 rx_pull(r):
     d := RXPH - r
@@ -1076,6 +1126,7 @@ rx_bit(b):
             rx_deliver(RXSR, 16, 0)
             RXSR := 0
             RXN := 0
+        rx_byte(b)
 
 rx_deliver(v, n, last):
     if RXFULL:
@@ -1107,20 +1158,21 @@ rx_stop():
 
 What follows from the code:
 
-- **Start.** Without HUNT, a reception begins at the commit. With HUNT, the commit starts the hunt, and a reception begins in the first later cycle where RPIN moves to HLVL in SYNC2. Either way, the start cycle *s* counts as a reference edge, and the reception keeps the decoder that RKIND named in cycle *s*. For the Manchester decoder, *s* is the first clock edge: it gives the first bit at once (no bit with RDIFF) and puts the next predicted clock edge one bit later.
+- **Start.** Without HUNT, a reception begins at the commit. With HUNT, the commit starts the hunt, and a reception begins in the first later cycle where RPIN moves to HLVL in SYNC2. Either way, the start cycle *s* counts as a reference edge, and the reception keeps the decoder that RKIND named in cycle *s*. For the Manchester decoder, *s* is the first clock edge: it gives the first bit at once (no bit with RDIFF) and puts the next predicted clock edge one bit later. Timed samples and an outside clock take no sample in *s*, even if an active edge of RCLK reaches SYNC2 in that cycle: the first sample is FIRST cycles later, or at the next active edge. So with HUNT, a start bit whose edge reaches SYNC2 in the cycle of a clock edge loses that edge's bit (section 11.5).
 - **Period.** *p* is RPER x 256 + RFRAC, the period in 256ths of a cycle. RPER 0 gives *p* = 256, one cycle, and ignores RFRAC, so a timed half then samples every cycle and RXPH can't run away. The Manchester decoder takes RPER above 255 as 255, so its *p* stays below 65536 and RXPH stays between -32768 and 49407 there.
 - **Timed samples.** RXPH counts down by 256 a cycle, and a sample is taken from SYNC2 in the cycle where it is below 256. Sample *j* is in cycle *s* + FIRST + *j* x RPER, plus the carries of RFRAC. The input and the start edge pass the same synchroniser, so, as in section 5.7, FIRST counts from the edge at the pad. With RESYNC, every edge of RPIN pulls the countdown toward FIRST, by the gain below. With RGAIN 0 that restarts it, so the next sample is FIRST cycles after the edge. If an edge and a sample fall in one cycle, the sample is taken first.
 - **Manchester decoder: phase.** RXPH is the time since the predicted clock edge and grows by 256 a cycle. Let *w* be *p*/4, or *p*/2 with RACQ and RGAIN 1 to 3 until RXG reaches 16. When RXPH reaches *p* - *w*, the window for the next clock edge opens and RXPH drops by *p*, so it counts from -*w* to the predicted clock edge at 0. The next window opens when RXPH reaches *p* - *w* again: *p* - *w* after the predicted clock edge, as the edges since have moved it.
 - **Manchester decoder: the bit.** In an open window, an edge before the predicted clock edge is a candidate, and a later one replaces it. At the predicted clock edge, the first cycle with RXPH at 0 or more, a candidate gives the bit: the level of RPIN in that cycle. With no candidate, the first edge from there on gives the level after it. Either way the window closes. So a clock edge is taken however late it comes before the next window, and a late bit-boundary edge misleads the decoder only if the clock edge after it is late too. For IEEE 802.3 a rising clock edge is a 1, and RINV gives the other convention. With RDIFF the bit is RXWIN: 1 if an edge other than a clock edge came between the last two clock edges. That decodes biphase mark, whose clock edges are the bit starts, one bit late, and, with RINV, differential Manchester, whose clock edges are mid-bit.
 - **Manchester decoder: correction.** Every edge pulls the phase toward the place it should have: an edge in the window toward the predicted clock edge, any other edge toward half a bit after it, where a bit-boundary edge falls. The start edge sets the phase alone.
 - **Gain.** A pull moves RXPH by 2^-k of its error, rounded down. With RGAIN 0, k is 0 and every pull is a full correction. With RGAIN 1 to 3, k is 1 while RXG is 3 or less, that is up to and including the third reference edge after the start, and then 2, 4 or 5. So the first edges set the phase quickly, and later ones are averaged over about 2^k edges. Random Manchester data has about 1.5 edges per bit, so k = 4 averages over about 11 bits. A larger k filters more jitter and follows less offset between the sender's clock and ours.
-- **Outside clock.** Each active edge of RCLK samples RPIN in the same cycle. Both pins pass the same synchroniser, so they stay aligned to within the one cycle of phase uncertainty in section 10, item 2.
+- **Outside clock.** Each active edge of RCLK samples RPIN in the same cycle. Both pins pass the same synchroniser, so they stay aligned to within the one cycle of phase uncertainty in section 10, item 2. RCLK can be one of the unit's own shift outputs read back from its `uio` pad, as a controller that receives on its own clock does: each sample is then the data as it was at the clock's pad edge.
+- **Manchester decoder on half cycles (RKIND 3).** Each cycle runs `rx_manch` twice, half a cycle each, first with the falling-edge sample SYNC2F and then with SYNC2, and RXPH grows by 128 in each. So every window opens, every predicted clock edge falls and every edge is timed to the half cycle, not the cycle. An edge in a cycle, SYNC2 against SYNC3 as for RKIND 1, is in the first half if SYNC2F already shows the new level, and in the second if it still shows the old one. A pulse that begins and ends between SYNC3's and SYNC2's samples is no edge, as for RKIND 1, even if SYNC2F saw it. With HUNT, a start edge in the second half starts RXPH at 128, not 256. RPER 0 and 1 act as 2, so in any cycle there is at most one edge, one window opening, one bit and one pull. At 50 MHz edges in 10 ns steps leave 13 ns between the latest boundary edge and the earliest clock edge at 802.3's ±13.5 ns of zero-crossing jitter (14.3.1.3.1), where the 20 ns steps of RKIND 1 leave 3 (section 7.3). A test that gives one input level per cycle puts every edge in the first half (section 3.1).
 - **Sync.** Until the pattern is found, bits shift through RXSR as a history and no word builds. The pattern is laid out as the received word it would form. With RMSB = 0 it sits in the top SYNCLEN bits: the 802.3 start frame delimiter alone is 0xD500 with SYNCLEN 8, and the last preamble byte with the delimiter is 0xD555 with SYNCLEN 16. With RMSB = 1 it sits in the bottom SYNCLEN bits. The bit that completes the pattern isn't kept. The next bit starts the first word.
 - **Words.** A word of *n* bits holds them in bits *n* - 1..0, with higher bits 0. Every 16 bits make a word. If the buffer is still full, the new word is lost and RXOVR sets. A word that completes in the same cycle as an `rxw` counts as lost, because the buffer was full at the start of the cycle.
-- **End.** A reception ends after its RCNT-th bit, after REND cycles with no reference edge (for the Manchester decoder, with no bit), when a Manchester window closes with no edge in it, one bit after a stuff violation, at a timed sample that sees the end test with REOP (both in 5.9.7), or at `sstop rx`. A Manchester window closes empty in the cycle the next window would open: 7/4 bits after the last predicted clock edge, or 3/2 bits while RACQ's wide window is in use. A reception that found its pattern and ended any way but `sstop rx` then gives exactly one word marked last, holding the bits since the last full word: 0 to 15, or up to 16 when RCNT ends it. That word is never lost: it waits in RXSR, with RXEP set, until the buffer is empty, and only then does a HUNT receive half start hunting again. A reception that never found its pattern gives no word, and only RXSEEN shows it. `sstop rx` drops the reception, its last word and the buffer.
+- **End.** A reception ends after its RCNT-th bit, after REND cycles with no reference edge (for the Manchester decoder, with no bit), when a Manchester window closes with no edge in it, one bit after a stuff violation, at a timed sample that sees the end test with REOP (both in 5.9.7), or at `sstop rx`. A Manchester window closes empty in the cycle the next window would open: 7/4 bits after the last predicted clock edge, or 3/2 bits while RACQ's wide window is in use. A reception that found its pattern and ended any way but `sstop rx` then gives exactly one word marked last, holding the bits since the last full word, less any that the byte end drops (5.9.7): 0 to 15, or up to 16 when RCNT ends it. That word is never lost: it waits in RXSR, with RXEP set, until the buffer is empty, and only then does a HUNT receive half start hunting again. A reception that never found its pattern gives no word, and only RXSEEN shows it. `sstop rx` drops the reception, its last word and the buffer.
 - **`sgo rx` while busy** stays armed, and status bit 15 shows it. `rx_step` takes the arm only when the half is idle: no reception, no hunt and no last word waiting. Without HUNT, the first commit after the reception ends starts the next one. With HUNT the half hunts again after every reception, so the arm waits until `sstop rx` clears it. If HUNT is cleared first, the first commit after the half goes idle starts a reception, whatever that commit was for.
 - **Scope of the Manchester decoder.** It receives Manchester-family codes of up to 255 cycles per bit, down to about 195 kbit/s at 50 MHz, that mark a frame only by its start and its end. A frame ends at the first bit with no clock edge, and no status bit reports a code violation. So codes that frame by violations can't be received with it: AES3 and S/PDIF preambles, the MIL-STD-1553 sync, Token Ring's J and K. Those, and slower Manchester codes, are left to timed samples and firmware.
-- **Exact.** Every decision falls on a cycle that RXPH, the synchroniser and whole 256ths fix, so two simulators agree on every cycle.
+- **Exact.** Every decision falls on a cycle that RXPH, the synchroniser and whole 256ths fix, and with RKIND 3 on a half cycle that SYNC2F fixes too, so two simulators agree on every cycle.
 
 **Implementation note.** This is not normative. The code fixes what happens in each cycle, not how. Written out literally, `rx_manch` chains about five carry chains in one cycle, too many for the slow corner at 50 MHz. The structure below gives the same result in every cycle with at most two:
 
@@ -1128,6 +1180,7 @@ What follows from the code:
 - **Manchester decoder.** Form RXPH - *p* and RXPH - *p*/2 beside the window compare. When the compare and the sign are known, select the in-window or the boundary error, then the gain's fixed wiring, and fold the + 256 into the one add that follows. *p* itself needs no flop: it is RPER and RFRAC with the rules for 0 and for 256 and up. The arithmetic fits 17 bits (the Period bullet), sign-extended into RXPH, because RXKIND keeps a timed RXPH out of it.
 - **Timed samples.** Form the error, RXPH - 256 + *p* (when sampling) minus FIRST's target, beside the countdown, then select the gain's wiring and subtract: two carry chains on 25 bits.
 - **Cost.** 32 flops per unit for the two window points, 128 for four units. RXKIND's 2 flops are in the state table.
+- **RKIND 3.** The two half steps share one cycle's edge, so only one of them pulls, and with *p* at least 512 at most one opens a window and at most one gives a bit (the RKIND 3 bullet above). So the half steps need two sets of compares, of RXPH and of RXPH + 128 against the window point and 0, and one pull and one gain wiring, fed by the half that has the edge. RPER below 2 replaces *p* with 512 and the window points with 384 and 256.
 - **If the real flow misses 60 MHz: decide the window opening a cycle early.** Two more flops per unit, one per window point, may hold whether RXPH at the start of the next cycle will be at or above *p* - *p*/4, and at or above *p* - *p*/2. Each is formed in the cycle before, beside RXPH's own update and from the same operands (RXPH or RXPH - *p*, the selected correction and the + 256), by a carry-save compare against its window point. In the cycle of an `scfg` that writes RXPER or RXOPT the compare uses the window points being loaded, and in the cycle of `rx_begin` it compares 256. `rx_manch` then takes `RXPH >= p - w` from one of the two flops, picked by RACQ, RGAIN and RXG < 16, which are known at the start of the cycle. That takes the window compare off the front of the longest path, for 2 flops and two 17-bit compare trees per unit. It gives the same result in every cycle. It is written down so that it is ready; it was not synthesized or simulated.
 
 #### 5.9.7 CRC and stuffing
@@ -1159,15 +1212,15 @@ Stuffing needs SMODE 1 or 2, and the CRC needs CMODE 1 or 2 with CTX 1. Otherwis
 - **HDLC:** the opening flag has no kind; address, control and information are `crc`, and the last is `fcs`; the closing flag has no kind and is `last`.
 - **CAN:** SOF to the end of the data field are `crc`, the last `fcs`; the CRC delimiter, ACK slot and EOF, 10 recessive bits that CAN doesn't stuff, are the tail (ENDA recessive) only up to 25 cycles per bit, since TAIL holds at most 255 cycles. At slower rates they are the idle level (IDLEA recessive) with TAIL 0, or a word of no kind.
 
-**Coverage on receive** is set by CSKIP. The register starts from its initial value at the reception's start, and takes the bits from bit CSKIP after the sync pattern, counting from 0, to the end of the reception. The sync pattern is never covered, so the CRC leaves out Ethernet's preamble and SFD, USB's SYNC and an HDLC opening flag, and CSKIP leaves out the bits after it that the CRC doesn't cover, such as USB's 8-bit PID. CAN has no sync pattern (SYNCLEN 0), so its CRC starts at SOF with CSKIP 0. The CRC ends where the reception ends, which 5.9.6 defines: the Manchester end for Ethernet, the end test below for USB, the closing flag for HDLC, and RCNT for CAN, which firmware writes once the DLC has arrived.
+**Coverage on receive** is set by CSKIP. The register starts from its initial value at the reception's start, and takes the bits from bit CSKIP after the sync pattern, counting from 0, to the end of the reception. The sync pattern is never covered, so the CRC leaves out Ethernet's preamble and SFD, USB's SYNC and an HDLC opening flag, and CSKIP leaves out the bits after it that the CRC doesn't cover, such as USB's 8-bit PID. CAN has no sync pattern (SYNCLEN 0), so its CRC starts at SOF with CSKIP 0. The CRC ends where the reception ends, which 5.9.6 defines: the Manchester end for Ethernet, the end test below for USB, the closing flag for HDLC, and RCNT for CAN, which firmware writes once the DLC has arrived. For CAN, RCNT can end the reception at the CRC's last bit, with CHK 0, or one bit later at the CRC delimiter, with CHK 0x8B320000, the good residue fed the delimiter's 1. The second takes a stuff bit after the CRC into the reception, where with HUNT it would start a short one, puts the ACK slot always in the next bit, and fails a dominant delimiter.
 
 **Exact.** A bit enters the register in the cycle its last symbol ends on send, and in the cycle it is decoded on receive. Stuff bits and appended bits take a bit time each on the same grid, so the line carries every bit on a cycle the configuration and the data fix.
 
 **The append.** After the last bit of a word of kind `fcs`, and any stuff bit it needs, the send half sends *w* more bits, each bit 31 of the register XOR CXOR, with the word's line code. After each one the register shifts left by one, with no feedback. When the last one ends, the register takes its initial value again, so the next frame of the same send starts its CRC from it. The stuffer counts the appended bits and adds any stuff bit they need. Then the send goes on as at any word end: the next word, the tail, or an underrun. The append uses the register only while CTX is 1: if CTX moves to 0 during it, the remaining appended bits are CXOR and the register is left to the receive half (section 10, item 17).
 
-**The check.** At the end of a reception, with CMODE 1 and CTX 0, end flag 0 sets if CRC equals CHK, which the code writes `(CHKH << 16) | CHKL`. A good reception leaves a residue that doesn't depend on the data or the initial value: 0 when the sender's CXOR is 0, and with CXOR 1 the register that *w* ones give from 0. The table below has CHK for each standard. HDLC's check includes the first six bits of the closing flag, 011111, which reach the CRC before the destuffer knows they belong to a flag, so its CHK is its residue 0x1D0F fed those six bits: 0xD0F9. The check covers every covered bit up to the end, so a bit the protocol lets a sender add before its end marker, such as USB's dribble bit, makes a good packet fail (section 11.5).
+**The check.** At the end of a reception, with CMODE 1 and CTX 0, end flag 0 sets if CRC equals CHK, which the code writes `(CHKH << 16) | CHKL`. A good reception leaves a residue that doesn't depend on the data or the initial value: 0 when the sender's CXOR is 0, and with CXOR 1 the register that *w* ones give from 0. The table below has CHK for each standard. HDLC's check includes the first six bits of the closing flag, 011111, which reach the CRC before the destuffer knows they belong to a flag, so its CHK is its residue 0x1D0F fed those six bits: 0xD0F9. The check covers every covered bit up to the end, so a bit the protocol lets a sender add before its end marker makes a good packet fail, unless the byte end below drops it, as it drops USB's dribble.
 
-**Parity.** A width of 1 with POLY *x* + 1, CW 0 and POLYH 0x8000, and CINIT 0, makes the register the running XOR of the covered bits. Then the append is a parity bit, even with CXOR 0 and odd with CXOR 1, and the check is a parity check, with CHK 0 for even parity and 0x80000000 for odd. CINIT 1 starts the register at 1, which swaps even and odd.
+**Parity.** A width of 1 with POLY *x* + 1, CW 0 and POLYH 0x8000, and CINIT 0, makes the register the running XOR of the covered bits. Then the append is a parity bit, even with CXOR 0 and odd with CXOR 1, and the check is a parity check, with CHK 0 for even parity and 0x80000000 for odd. CINIT 1 starts the register at 1, which swaps even and odd. A receiver that covers the stop bit as well, to check parity and framing with one residue, moves CHK by the stop bit's 1: 0x80000000 for even parity and 0 for odd.
 
 **Six standards.** CHK is used on receive only. The check value is the CRC of the nine ASCII bytes `123456789`, sent as the unit appends it and read in the standard's own bit order; each is the catalogue's value.
 
@@ -1208,11 +1261,13 @@ What a violation means, per standard:
 
 **The end test.** With REOP, a timed sample at which RPIN and RCLK both read 0 in SYNC2 ends the reception, and that sample gives no bit. For a USB receiver RPIN is D+ and RCLK is D-, so the test sees the SE0 that starts an end of packet, and the CRC ends at the packet's last bit. Only timed samples (RKIND 0) test it.
 
+**The byte end.** USB lets the last bit before an end of packet stretch by up to six bit times with no transition, which a receiver must accept (dribble, USB 2.0 7.1.9.1). The decoder reads it as ones after the packet's last whole byte. So the receive half keeps copies at every byte boundary: `rx_byte` sets RXSR8, RXN8 and RXC8 to RXSR, RXN and the CRC register's bits 31 to 16 at the start, which is the state the sync pattern leaves, and after every 8th bit after the sync pattern, and RXONES says whether every bit since is a 1. When the end test ends a reception with 1 to 6 bits after the last byte boundary, all of them ones, and no stuff violation, `rx_eop` puts RXSR, RXN and the register's top half back to the copies before `rx_end` checks the CRC. So the last word holds whole bytes, and end flag 0 judges the CRC of the whole bytes. A stuff violation keeps every bit and end flag 1: it takes seven 1s in a row, a bit-stuffing error (USB 2.0 7.1.9), one more than the six bit times with no transition that 7.1.9.1 asks a receiver to accept. Otherwise the end test ends the reception as before: with 7 bits after the boundary, or a 0 among them, every bit stays, and a packet that isn't whole bytes fails its check. The bits counted are the ones the destuffer keeps, so a stuff bit is never one of them. The copy holds only the register's top 16 bits, which hold every CRC of up to 16 bits, USB's included; for a wider CRC the byte end leaves the low half as it was at the end (section 10). The copies are taken whether or not REOP is set, and only the end test uses them.
+
 **LFSR mode** (CMODE 2). The register runs as a Galois LFSR of POLY: each covered bit advances it with bit 31 alone as the feedback. On send, a covered data bit goes out XOR bit 31; on receive, a covered bit is XORed with bit 31 before it goes into the word. A sender and a receiver that start from the same initial value, at a send's first covered bit and a reception's first covered bit, undo each other: an additive scrambler. Words of zeros send the LFSR's own sequence, a PRBS, whose period is 2^*w* - 1 bits for a primitive POLY of width *w*. The LFSR needs CINIT 1: from 0 it stays at 0. Kind `fcs` acts as `crc`, and nothing is appended or checked. Self-synchronizing scramblers, which feed back the line bits, aren't offered.
 
 **POLY for a standard's PRBS or scrambler.** POLY, with its *x*^*w* term, is the characteristic polynomial of the sequence the line carries: bit *n* + *w* is the XOR of the bits *n* + *i* for every lower term *x*^*i* of POLY. Standards define their PRBS generators and additive scramblers as a Fibonacci register named by the polynomial *x*^*w* + *x*^*m* + 1, whose stages *m* and *w* feed back, so bit *n* is the XOR of bits *n* - *m* and *n* - *w*. That sequence's characteristic polynomial is the reciprocal, *x*^*w* + *x*^(*w* - *m*) + 1, and that is the POLY to set; the named polynomial set as POLY sends the same sequence in reverse time, which a standard's checker or descrambler can't lock to. So PRBS7 (*x*^7 + *x*^6 + 1) is POLYHI 0x0600, PRBS9 (*x*^9 + *x*^5 + 1) 0x0880, PRBS15 (*x*^15 + *x*^14 + 1) 0x0006, and the 802.11 scrambler (*x*^7 + *x*^4 + 1) 0x1200, each with POLYLO 0.
 
-**An idle send half as a CRC engine.** With no pin switched to its outputs, a send at TPER 0 takes one bit per cycle: 16 cycles for a word of kind `crc`, against 8 slots, 32 cycles, per bit for `crc32.s`. Firmware reads the register with `srd` once status bit 5 is clear. For 1-Wire's ROM code, it pushes the 64 bits and checks that both halves read 0. Use words of kind `crc` only: a word of kind `fcs` appends the CRC and then loads the initial value, so the register no longer holds the CRC.
+**An idle send half as a CRC engine.** With no pin switched to its outputs, a send at TPER 0 takes one bit per cycle: 16 cycles for a word of kind `crc`, against 8 slots, 32 cycles, per bit for `crc32.s`. Firmware reads the register with `srd` once status bit 5 is clear. A word lasts 16 cycles at TPER 0, so a feed loop of 4 slots keeps up only from the second word: queue two words before the start, or the first refill misses its word boundary, the send underruns and the next start restarts the register. For 1-Wire's ROM code, it pushes the 64 bits and checks that both halves read 0. Use words of kind `crc` only: a word of kind `fcs` appends the CRC and then loads the initial value, so the register no longer holds the CRC.
 
 ```
 crc_init():
@@ -1280,6 +1335,26 @@ rx_cbegin():
     RXRL := 0
     if not CTX and (CMODE == 1 or CMODE == 2):
         crc_init()
+    rx_byte(1)
+
+rx_byte(b):
+    if (RXTOT & 7) == 0:
+        RXSR8 := RXSR
+        RXN8 := RXN
+        if not CTX and (CMODE == 1 or CMODE == 2):
+            RXC8 := CRC >> 16
+        RXONES := 1
+    elif not b:
+        RXONES := 0
+
+rx_eop():
+    nb := RXTOT & 7
+    if RXONES and not RXVIO and nb != 0 and nb != 7:
+        RXSR := RXSR8
+        RXN := RXN8
+        if not CTX and (CMODE == 1 or CMODE == 2):
+            CRC := (RXC8 << 16) | (CRC & 0xFFFF)
+    rx_end()
 
 rx_run_len(v):
     if SMODE == 1 and v == 0:
@@ -1291,7 +1366,7 @@ rx_run_len(v):
     RXRV := v
 ```
 
-`tx_done` runs at the end of every bit of a send (5.9.5), and `rx_bit` (5.9.6) holds the destuffer's steps and the receive half's call of `crc_bit`.
+`tx_done` runs at the end of every bit of a send (5.9.5), and `rx_bit` (5.9.6) holds the destuffer's steps and the receive half's calls of `crc_bit` and `rx_byte`. `rx_byte` takes the bit as it goes into the word.
 
 **Implementation note.** This is not normative. On receive the destuffer's decision adds about two gates between a decoded bit and the word insert, because whether a bit is at the stuff position depends only on flops (RXRL, RXSYN, SMODE, SN). The CRC's next value runs beside the word path and doesn't lengthen it, and in LFSR mode the descrambling adds one XOR. On send the choice of a bit's source, data, stuff or CRC, adds a 3-to-1 multiplexer in front of the output tables. Only the half that CTX names uses the register in a cycle (section 3.2), so the register's next value is the send half's or the receive half's, chosen by CTX.
 
@@ -1553,8 +1628,10 @@ Count memory instructions as 2 slots. LATE is the ground truth, and firmware tes
 | Time from an input edge to a later `tick` | The cycle, relative to the first sample that saw the edge | Real input edges are asynchronous, so silicon adds up to 1 cycle of phase uncertainty |
 | One thread's timing against the others | Identical | Always: fixed slots, and memory use stays in the thread's own cycle |
 | Symbol edges of a send | The cycle | Symbol *k* reaches the pad at E + 1 + *k* x TPER after the start commit at E, with TPER 0 counted as 1, with no fraction and no outside clock. Stuff bits and appended CRC bits count as bits. Holds until the send ends |
+| Symbol edges of a send with THALF | The half cycle | Symbol *k* reaches the pad at E + 1 + *k* x (TPER + TFRAC / 256), rounded down to a half cycle, with TPER 1 or more and no outside clock. With a 50% clock: below |
 | Timed receive samples | The cycle, relative to the start | No RESYNC. With RESYNC and RGAIN 0, relative to the last edge |
 | Manchester decoder bits and ends | The cycle | Given the values in SYNC2. Which cycle first samples a pad edge is section 10, item 2 |
+| Manchester decoder bits and ends with RKIND 3 | The half cycle | Given the values in SYNC2F and SYNC2. With a 50% clock: below |
 | An outside clock edge to a change of a shift output | 3 cycles pad to pad | Every thread and phase |
 | One thread's unit against the others | Identical | Always. Units share only the synchroniser, which they only read, and the pads, of which a unit drives only pins its own thread owns and has switched to it |
 
@@ -1568,7 +1645,13 @@ What isn't exact:
 | Pad and board delays | Outside the ISA. Multi-corner STA has to bound them |
 | A wait that arms after a change has already passed | Fires on the cycle after it arms, so D is late by up to the arming time |
 
-Timing is in cycles, not nanoseconds, so 40 to 45 MHz silicon works by changing constants, and programs that take their bit time from the host need no change at all. UART, SPI, I2C write, WS2812 and 1-Wire ran at 40 and 45 MHz with only constants changed. Two protocols depend on the clock: USB low speed needs 33 cycles per bit, so 50 MHz, and CAN at 500 kbit/s needs at least 46 MHz to receive and 45.5 MHz to transmit.
+**Half cycles and the duty cycle.** THALF and RKIND 3 take their second edge in each cycle from the falling clock edge, so they assume a 50% duty cycle. A falling edge *d* ns off the middle of the cycle moves every falling-edge move and sample by *d* ns:
+
+- **Send.** At 10 Mbit/s with THALF, half bits alternate 50 + *d* and 50 - *d* ns, so each edge is ±*d*/2 from the ideal grid: 0, ±0.5, ±1 and ±1.65 ns at *d* = 0, 1, 2 and 3.3. 802.3 lets a DTE's encoder put ±0.5 ns on its edges (7.5.2.1), and the MAU with the twisted-pair model add ±3.5 ns more (14.3.1.2.3). Without THALF, 50 MHz forces half bits of 40 and 60 ns, ±5 ns.
+- **Receive.** With RKIND 3 the half cycles become 10 + *d* and 10 - *d* ns long, so the gap between the latest boundary edge and the earliest clock edge at ±13.5 ns of jitter (14.3.1.3.1) is 50 - 27 - (10 + *d*) = 13 - *d* ns: 13, 12, 11 and 9.7 ns. The line receiver's skew between rising and falling edges comes off that, up to 4 ns for the ISL3176E (Renesas FN6307), and so does the decoder's own phase error. With RKIND 1's 20 ns steps the gap is 3 ns. The gap is where the decoder's window must open, and it does only while its predicted clock edge sits at the mean of the clock edges: a pattern whose mid-bit edges are all early and whose boundary edges are all late puts the prediction on the clock edges themselves, and then a boundary edge 50 - 2*a* ns before a clock edge falls in the window, which opens 25 ns before it, at *a* above 12.5 ns (section 7.4).
+- **The clock.** A 50% clock needs an even divider, or duty-cycle correction, at the board's clock source. The RP2350's clock generators divide on the input clock's rising edge, so an odd divider gives 33.3% at 3 and 40% at 5 unless their DC50 correction is on (RP2350 datasheet 8.1.3.4). The chip's clock pad and clock tree add their own duty error, which only STA bounds.
+
+Timing is in cycles, not nanoseconds, so 40 to 45 MHz silicon works by changing constants, and programs that take their bit time from the host need no change at all. UART, SPI, I2C write, WS2812 and 1-Wire ran at 40 and 45 MHz with only constants changed. Three protocols depend on the clock: USB low speed needs 33 cycles per bit, so 50 MHz, CAN at 500 kbit/s needs at least 46 MHz to receive and 45.5 MHz to transmit, and a 10BASE-T half bit is 2.5 cycles at 50 MHz, exact on send only with THALF.
 
 ### 7.4 Measured limits
 
@@ -1594,8 +1677,18 @@ At 50 MHz, on the simulators, with LATE clear wherever an output is timed. A thr
 | CAN TX | 91 cycles per bit | 500 kbit/s ran, with stuffing and CRC in firmware. It needs at least 45.5 MHz for TX and 46 MHz for RX |
 | I2C controller | 100 and 400 kHz | UM10204 intervals in range, including tBUF, with rise modelled at the spec maximum. Past the spec, `i2c_write` is clean down to a 32-cycle clock at the pad, 1.56 MHz, against a target model with no interval checks |
 | I2C target ACK | 3 cycles pad to pad at 100 and 400 kHz | Firmware decides before the 8th clock falls. At 1 MHz with minimum tHIGH, reaction is 3 to 5 cycles |
+| Shift unit: UART with parity | 3 cycles a bit, 16.7 Mbaud, both directions | `uart_par_unit`, every thread pair and alignment, the sender 4% fast and slow. At 2 cycles a bit the send underruns |
+| Shift unit: SPI target | Half period 3, 8.33 MHz, with CS held low, where MISO has no setup left and half period 4 gives 20 ns. Half period 7, 3.57 MHz, with CS pulsed high for one SCK period between words | `spi_unit`, modes 0 and 3. Each framed word's restart must fit in CS's high time: 11 cycles at half period 8, 21 at 4 |
+| Shift unit: I2S and TDM controller | SCK at TPER 3, 8.33 MHz, sending and receiving, with TFRAC below 86. TPER 2, 12.5 MHz, sending only | `i2s_ctl`, 8 thread pairs and alignments. The receive half's start limits the receive side |
+| Shift unit: I2S and TDM target | SCK half period 5, 5 MHz, realigned every frame. Half period 3 for a single frame | `i2s_tgt`, 4 threads, alignments and sampling phases |
+| Shift unit: SD host, 1-bit bus | Clock 8.33 MHz | `sd_unit`. The thread that feeds the clock and takes the response sets it: at 12.5 MHz the clock stops |
+| Shift unit: CAN | 1 Mbit/s, 50 cycles a bit, both directions. Receive to 1.25 Mbit/s | `can_unit`, every thread and alignment, at the shortest interframe space |
+| Shift unit: 10BASE-T send with THALF | Every edge on the 50 ns grid: peak deviation 0.5, 1.5 and 0 ns at the transceiver's typical, slowest and fastest corners, its own skew, and the bit rate exact. A falling edge 1, 2 and 3.3 ns late adds about 0.5, 1 and 1.65 ns. Without THALF, 5.5 to 7.5 ns | `eth_arp`, 3 transceiver corners (section 7.3) |
+| Shift unit: 10BASE-T receive with RKIND 3 | ±12 ns of random edge jitter loses no frame at any phase or corner, nor do bit-boundary edges 10 ns late with mid-bit edges 10 ns early. At 802.3's ±13.5 ns random, 0 of 240 frames lost. Boundary edges 11 ns late with mid-bit edges 11 ns early lose frames at some phases, and at 13.5 ns most: 182 of 240, worse than RKIND 1's 51 of 480. The opposite pattern at 13.5 ns loses 10 of 240, all at the transceiver's slowest corner and one phase | `eth_arp`, 8 sampling phases and 3 transceiver corners. A boundary edge 23 ns before a clock edge falls in the decoder's window, which opens a quarter bit, 25 ns, before the predicted clock edge, and pulls the prediction toward it (section 7.3). The receiver's 4 ns of skew between its rising and falling edges makes pulses of 19 ns, and one that falls between two rising-edge samples is no edge (5.9.6) |
+| Shift unit: USB low speed | Every answer 4.1 to 5.5 bit times after the host's EOP, against 6.5, with host edge jitter to ±70 ns | `usb_enum`, 33 cycles a bit |
+| Shift unit: LFSR | 1 bit a cycle on send, 2 cycles a bit on receive | `lfsr_unit` |
 
-These follow from one instruction per 4 cycles. The shift units of section 5.9 move bit timing into hardware, so they lift the limits that come from bit timing. Their limits are not measured yet.
+The rows above the shift units follow from one instruction per 4 cycles. The shift units of section 5.9 move bit timing into hardware, so they lift the limits that come from bit timing, and their rows come from the programs of section 11.2 that use them. There the thread that feeds a unit often binds before the unit does. THALF and RKIND 3 run in `eth_arp`, on a bench that gives every input its level at each falling edge and reads every output in both halves (section 3.1).
 
 ## 8. Reset state
 
@@ -1609,7 +1702,7 @@ Reset is asynchronous, active low, on every flop, and its release passes a synch
 | LATE, STALE, ILL | 0 |
 | All other sequencing state in section 2 | 0 |
 | M0..M7, FULL0..7 | 0, so every word is empty |
-| SYNC1, SYNC2, SYNC3 | 0 |
+| SYNC1, SYNC2, SYNC3, SYNC1F, SYNC2F | 0 |
 | OUT, SHD | 0 |
 | OE, SHOE, OD, BYP, SHBYP | 0 |
 | SEL, SHSEL | 0, so every pin shows OUT |
@@ -1619,7 +1712,7 @@ Reset is asynchronous, active low, on every flop, and its release passes a synch
 | Every shift unit | Idle: TXARM, TXRUN, TXTL, RXARM, RXHUNT, RXRUN, RXEP 0, both buffers and both shift registers empty, LA and LB 0, TXUR, RXOVR and RXSEEN 0. RXKIND, RXPH, RXG, RXOPEN and RXCAND 0, CRC and RXPE 0, and every other state of section 5.9.2 0 |
 | Memory | Undefined |
 
-So after reset every `uio` pin is undriven, and every `uo` pin is low. A UART TX line sits low until firmware sets it, which looks like a start bit, and an active-low chip select is asserted, so boards should allow for that. Nothing runs until the host starts it. Firmware should set its idle levels before it first blocks on the host. A line that must stay high or recessive through reset belongs on an `io` pin in `OD` mode with an outside pull-up.
+So after reset every `uio` pin is undriven, and every `uo` pin is low, in both halves of the cycle, since TXH is 0. A UART TX line sits low until firmware sets it, which looks like a start bit, and an active-low chip select is asserted, so boards should allow for that. Nothing runs until the host starts it. Firmware should set its idle levels before it first blocks on the host. A line that must stay high or recessive through reset belongs on an `io` pin in `OD` mode with an outside pull-up.
 
 ## 9. Host interface
 
@@ -1771,7 +1864,7 @@ The rules above define every cycle, so two conforming simulators agree on every 
 **Undefined.** A simulator may do anything consistent with these, and should fill unwritten memory with arbitrary values so firmware can't depend on it.
 
 1. Memory contents before the first write to each address.
-2. Exactly which cycle an asynchronous pad change is first sampled, and any metastability in the synchroniser. A cycle-level simulator takes the value presented for that cycle.
+2. Exactly which cycle, or for the falling-edge sample which half cycle, an asynchronous pad change is first sampled, and any metastability in the synchroniser. A cycle-level simulator takes the values presented for that cycle, the falling-edge sample included (section 3.1).
 3. Sub-cycle behaviour of a bypass path, and of its switch at a commit, and of the output switch: a commit that changes SEL[p], or a `pcfg` that changes OWN[p] or clears SEL[p], may glitch the pad, or the enable of a pin in `OD`, between clock edges. A cycle-level simulator may lag a bypass path by one cycle, and must say so.
 4. Host SCK above clk/6, an SCK high or low shorter than 2 cycles, CS high for less than 3 cycles, CS moving while SCK is high, or CS low with SCK high as reset ends (section 9.1). Commands may be misread.
 5. Everything before the first reset.
@@ -1783,7 +1876,7 @@ The rules above define every cycle, so two conforming simulators agree on every 
 2. Every illegal word. Illegal today, and may gain a meaning.
 3. `edge -, v, n` with `v` other than 0.
 4. Host command codes not listed, and STATUS byte 3 bits 7..1.
-5. TXMODE bit 15, RKIND 3, CMODE 3, SMODE 3, SN 0, SN 1 with SMODE 2, SYNCLEN 17 to 31, and RPER 256 and up for the Manchester decoder. Today reserved bits are not stored, RKIND, CMODE and SMODE 3 act as 0, SN 0 acts as 1 with SMODE 1, SN 0 and 1 act as 2 with SMODE 2, SYNCLEN above 16 acts as 16, and the Manchester decoder takes RPER above 255 as 255.
+5. CMODE 3, SMODE 3, SN 0, SN 1 with SMODE 2, SYNCLEN 17 to 31, RPER 256 and up for the Manchester decoder, and RPER 0 and 1 with RKIND 3. Today CMODE and SMODE 3 act as 0, SN 0 acts as 1 with SMODE 1, SN 0 and 1 act as 2 with SMODE 2, SYNCLEN above 16 acts as 16, the Manchester decoder takes RPER above 255 as 255, and RKIND 3 takes RPER 0 and 1 as 2. Every configuration bit is a field, so none is left reserved.
 6. RDREG `reg8` values 32 up.
 
 **Illegal words.** A word is illegal if it matches no row in section 6.3, or has a value in a field that its type forbids. That includes any non-zero bit where a row has a fixed 0, `put` on `uo3`, `oe` on a `uo` pin, `pcfg` with `IN` or `OD` on a `uo` pin, `pcfg` with `BYP` on anything but a lane, `untilm` mode 3, `sgo` and `sstop` with a direction of 0, `smap` on `uo3` or with output value 3, and `srd` with a register of 3. Every slot of `scfg` and every kind of `txw` is legal.
@@ -1802,18 +1895,20 @@ Executing an illegal word sets ILL and runs `stop()`, whatever else is pending. 
 8. Writing a slot of a half that is armed, running, hunting or in its tail. The half uses the new value from the next cycle, mid-word. RKIND is the exception: a reception keeps the decoder it started with, and a new RKIND acts from the next reception.
 9. `smap` on a pin that no `pcfg` has claimed, and `pcfg` on a pin that is on a shift output. The second takes the pin off its output at once.
 10. A third `txw` before `sgo tx` and its commit. It blocks until a commit starts the send, and with no event pending the thread never reaches one.
-11. An outside clock pin, TCLK or RCLK, that is driven by one of the same unit's shift outputs. It is defined, and it loops.
+11. TCLK driven by one of the same unit's shift outputs. It is defined, and it loops: each symbol moves the clock that ends it. RCLK on the unit's own output doesn't loop, and is how a controller receives on its own clock (section 5.9.6).
 12. A receive loop slower than one word per 16 bit times. Full words are lost and RXOVR sets. The last word of a reception still arrives.
 13. `sgo rx` with HUNT on a pin that is already at HLVL. The hunt waits for the pin to leave HLVL and come back.
 14. RACQ on a Manchester reception that does not begin with alternating bits. The wide window can take a bit-boundary edge for a clock edge, which loses the first bits or ends the reception.
 15. RGAIN 2 or 3 against a sender whose clock is far from ours. Those gains follow only a small offset, so the bits slip and the reception ends early or decodes wrong.
 16. `sgo rx` while the receive half is receiving, hunting or holding its last word. It stays armed (status bit 15) and starts a reception at the first commit after the half is idle, which may be a commit meant for something else. With HUNT that is only after HUNT is cleared.
-17. Writing CODING, CSKIP, POLYHI, POLYLO, CHKHI or CHKLO while the half that uses the CRC register or the stuffer is running. As item 8, the half uses the new value from the next cycle, mid-frame. In particular CTX moved during a send or a reception takes the register from that half at once, in the middle of an append too, whose remaining bits are then CXOR. The half that gets the register goes on from the value the other half left, so its CRC is meaningless until its next start.
+17. Writing CODING, CSKIP, POLYHI, POLYLO, CHKHI or CHKLO while the half that uses the CRC register or the stuffer is running. As item 8, the half uses the new value from the next cycle, mid-frame. In particular CTX moved during a send or a reception takes the register from that half at once, in the middle of an append too, whose remaining bits are then CXOR. The half that gets the register goes on from the value the other half left: the CRC of the bits the other half took. That is exactly what a CAN node that loses arbitration needs, if CTX moves after the send half's last covered bit and before the receive half's next one (section 11.5). Otherwise the CRC is meaningless until that half's next start.
 18. A POLY with a bit set below 32 - *w*. The bits below the width then don't stay 0, they move up into the CRC, and the CRC is not the standard's.
 19. A word of kind `fcs` that is the last word of a send whose CRC is off, or a kind on a word while the stuffer is off. The kind has no effect.
 20. REOP with a decoder other than timed samples. It has no effect.
 21. HDLC frames that follow one another between flags. The closing flag ends the first reception and the half hunts again, so the next frame is received only if the flags between them complete the hunt's cycle (three flags with a falling-edge hunt and SYNCLEN 8), or after a gap of ones. Frames that share one flag never both arrive (section 5.9.7).
-22. Writing RXCNT with a count that RXTOT has already passed. `rx_bit` ends a reception only when RXTOT equals RCNT, so that reception ends some other way, or when RXTOT wraps at 2048.
+22. Writing RXCNT with a count that RXTOT has already passed. `rx_bit` ends a reception only when RXTOT equals RCNT, so that reception ends some other way, or when RXTOT wraps at 2048 and reaches it.
+23. REOP's end test on a protocol whose receptions need not be whole bytes. A reception that ends with 1 to 6 ones after a byte boundary loses them, and its check is on the bits before them (section 5.9.7, the byte end).
+24. REOP with a CRC wider than 16 bits. The byte end puts back only the register's bits 31 to 16, so after it the register mixes two times and the check is meaningless.
 
 ## 11. Firmware
 
@@ -1876,8 +1971,8 @@ Each program is the file named, under `programs/`. `programs/README.md` says wha
 | `advanced/usb_dev.s` | 194 | Device link in 3 threads, 512-word memory: SETUP with CRC-16 check, ACK, NAK, IN with DATA1, host ACK, address filter, bad CRC rejected. Worst turnaround 6.06 bit times against 6.5. No enumeration, data toggle or token CRC-5 check |
 | `advanced/can.s` | 166 | 3 threads, 512-word memory. 500 kbit/s, stuffing and CRC-15 in firmware, sender error 2%, 440 ns transceiver loop, ACK in the right slot, both arbitration outcomes. RX alone 92 words and TX alone 74 ran on 128. No error frames or retransmit |
 | `advanced/uart_bypass.s` | 65 | UART pass-through on the bypass lane of `uo4`, with one byte replaced in flight, chosen by its frame number or by the byte before it. 16 to 6553 cycles per bit, every thread, alignment and sender phase at 16 and 17: `uo4` equals `ui4` on every cycle but the new data bits, each on the incoming frame's bit boundary. The lane switches 3 cycles into the start bit and 9 into the stop bit, where `ui4` and OUT have been equal for 3 cycles and stay so for 3 more |
-| `advanced/eth_arp.s` | 401 | 10BASE-T node at 50 MHz in 2 threads, 512-word memory. The units send and decode 802.3 Manchester with clock recovery, append and check the CRC-32 FCS, and make TP_IDL and the link test pulses. It answers ARP requests, and ICMP echo requests of up to 57 data octets, for the MAC and IP the host posts, waits 96 bit times of quiet line before sending, and drops and counts runts, FCS errors and frames for others. Against a partner line through a transceiver model, judged by a checker of 802.3 clauses 3, 4, 7 and 14 and the RFCs: 3 transmit corners; receive at 3 corners, 8 sampling phases, 9 thread pairs and 4 alignments; partner clock +/-0.01%; 12-bit preambles; frames 96 and 47 bit times apart; an FLP burst; +/-8 ns of random jitter on every edge at 8 phases. At 802.3's +/-13.5 ns, 31 of 150 frames are lost at a sampling phase of 10 ns. No collision detection, IP options or reassembly |
-| `advanced/usb_enum.s` | 503 | USB low-speed device on endpoint 0 at 50 MHz in 3 threads, 512-word memory. The units do NRZI, bit stuffing, the CRC5 check of tokens on a second unit, the CRC16 check of the host's data and the CRC16 of its own, the end of packet and the clock recovery. It answers GET_DESCRIPTOR for its 18-byte device descriptor in packets of 8 and SET_ADDRESS, with every status stage, NAK when nothing is due and STALL for other requests, and keeps the data toggles, retries after lost ACKs, keep-alives and bus reset. Against a host model at the pins through a bus model, judged by a checker of USB 2.0 chapters 7 to 9 and by sigrok's USB decoders: the enumeration with two 10 ms resets; 8 thread placements, 4 alignments and 8 sampling phases; the host 0.05% fast and slow, edge jitter to +/-70 ns, 2-bit inter-packet delays, EOPs of 670 ns to 1.5 us; a SETUP and a reset in the middle of a transfer. Every answer comes 4.1 to 5.5 bit times after the host's EOP, against 6.5. A packet with a dribble bit before its EOP (USB 2.0 7.1.9.1) gets the answer it gets without one: the units take the bit into the CRC (section 5.9.7), and the firmware takes a last word of 8*k* + 1 bits with no end flag when `srd hi` reads the residue advanced by one 1 bit, 0xE800 for CRC5 and 0x001A for CRC16, and a handshake of 8 or 9 bits. A token's extra bit must also be a 1, as a dribble bit is in NRZI, because a 0 after a token with a wrong CRC5 reaches 0xE800 too; a data packet's is judged by the register alone, which a corrupted packet with a 0 there reaches 1 time in 65536. Tested on every kind of host packet, alone and on every packet of whole enumerations, and against extra bits that reach those register values but are not a dribble bit. Tokens to endpoints 1, 2, 4 and 8 go unanswered. Two or more bits after the last byte are refused. 3 words free: GET_DESCRIPTOR(CONFIGURATION) and SET_CONFIGURATION would need 20 more, so they are STALLed |
+| `advanced/eth_arp.s` | 401 | 10BASE-T node at 50 MHz in 2 threads, 512-word memory. The units send and decode 802.3 Manchester with clock recovery, append and check the CRC-32 FCS, and make TP_IDL and the link test pulses. It answers ARP requests, and ICMP echo requests of up to 57 data octets, for the MAC and IP the host posts, waits 96 bit times of quiet line before sending, and drops and counts runts, FCS errors and frames for others. Against a partner line through a transceiver model, judged by a checker of 802.3 clauses 3, 4, 7 and 14 and the RFCs: 3 transmit corners; receive at 3 corners, 8 sampling phases, 9 thread pairs and 4 alignments; partner clock +/-0.01%; 12-bit preambles; frames 96 and 47 bit times apart; an FLP burst; +/-8 ns of random jitter on every edge at 8 phases. Both units run on half cycles: THALF puts every half bit at exactly 2.5 cycles, so every transmit edge is within the transceiver's own skew of the 50 ns grid (0.5 ns typical, 1.5 at its slowest corner) and the bit rate is exact, and RKIND 3 times every received edge to 10 ns. Random jitter of +/-12 ns loses no frame at any phase or corner, nor do bit-boundary edges 10 ns late with mid-bit ones 10 ns early; at 802.3's +/-13.5 ns random, 0 of 240 frames are lost, but with the boundary edges 13.5 ns late and the mid-bit ones 13.5 ns early, 182 of 240 (section 7.4). No collision detection, IP options or reassembly |
+| `advanced/usb_enum.s` | 504 | USB low-speed device on endpoint 0 at 50 MHz in 3 threads, 512-word memory. The units do NRZI, bit stuffing, the CRC5 check of tokens on a second unit, the CRC16 check of the host's data and the CRC16 of its own, the end of packet and the clock recovery. It answers GET_DESCRIPTOR for its 18-byte device descriptor and for its configuration (the configuration descriptor and one interface descriptor, 18 bytes) in packets of 8, and SET_ADDRESS, with every status stage, NAK when nothing is due and STALL for other requests, and keeps the data toggles, retries after lost ACKs, keep-alives and bus reset. Against a host model at the pins through a bus model, judged by a checker of USB 2.0 chapters 7 to 9 and by sigrok's USB decoders: the enumeration with two 10 ms resets; 8 thread placements, 4 alignments and 8 sampling phases; the host 0.05% fast and slow, edge jitter to +/-70 ns, 2-bit inter-packet delays, EOPs of 670 ns to 1.5 us; a SETUP and a reset in the middle of a transfer. Every answer comes 4.1 to 5.5 bit times after the host's EOP, against 6.5. A packet with 1 to 6 dribble bit times before its EOP (USB 2.0 7.1.9.1) gets the answer it gets without them: the byte end drops them (section 5.9.7), so the firmware takes whole bytes with end flag 1 alone, and a handshake of 8 or 9 bits. Tested with one dribble bit on every kind of host packet, alone and on every packet of whole enumerations, with 2 to 6 on every packet of an enumeration, and against extra bits that are not a dribble, a 29-bit token whose CRC5 passes among them. Tokens to endpoints 1, 2, 4 and 8 go unanswered. 2 words free: SET_CONFIGURATION, 6 more, is STALLed |
 | `advanced/spi_unit.s` | 50 | SPI target in one thread on the shift unit, modes 0 and 3, MSB first. The receive half samples MOSI at each rising edge of SCK (RKIND 2), the send half moves MISO 3 cycles after each falling edge (TEXT, TFALL), with a 1-bit dummy word first in mode 3, and the wait for CS low is the commit that starts both. RXCNT ends each frame, RXEND one the controller cuts short. Against a controller modelled on the RP2350's SPI block (PL022, Motorola frame format): mode 0 with CS pulsed high for one SCK period between bytes, mode 3 with CS held low, frames of 1 to 100 bits, every thread and alignment, at 2 to 10 sampling phases; MOSI words and MISO bits checked, and decoded by sigrok. Each frame's restart has to fit in CS's high time: 11 cycles at half period 8, 21 at 4, so with a one-period pulse the fastest clock is half period 7, 3.57 MHz. One endless reception (RXCNT 0) streams through the pulses from half period 3, 8.33 MHz, where MISO has no setup left; 4 gives 20 ns. Built with MISO moved 3 cycles after the capture edge instead, it runs from half period 1.5, and at 2 with 20 ns of setup and 40 ns of hold. A reception ends by count or by REND, not when CS rises |
 | `advanced/can_unit.s` | 229 | CAN 2.0A node in one thread on the shift unit, 512-word memory, at 500 kbit/s. The unit stuffs and destuffs (SMODE 2, N 5), appends and checks the CRC-15 (CINIT 0, CXOR 0), MSB first both ways, and times every bit from a hunted SOF; the firmware writes RXCNT once the DLC is in, so that the reception ends at the CRC delimiter, with CHK 0x8B320000, the good residue fed the delimiter's 1. It checks its own bits with `xget` 40 cycles into each, and on a lost arbitration stops the send and hands the CRC register to the receive half before that half samples the lost bit, so the winner's frame is checked and acknowledged; then it sends again. The ACK is a 1-bit word of no kind, 1 to 4 cycles after the slot starts, and error flags are 6-bit words, after stuff, CRC, bit and ACK errors. TXD is an `io` pin in OD. Against frames built from the Bosch specification, another node's ACK and a rival that arbitrates by the wire, and decoded by sigrok: 0 to 8 bytes, all-zero and all-one stuffing, a stuff bit after the CRC, remote frames, back to back at the shortest interframe space at 500 kbit/s and 1 Mbit/s (receive to 1.25), every thread and alignment, the sender's clock 3% slow to 5% fast, transceiver loops of 80 to 440 ns, a corrupted CRC, six equal bits, no ACK, arbitration lost and won, and its own frames back to back with the whole end of frame and intermission between them. RESYNC pulls on rising edges too, so a dominant bit stretched by more than 25 cycles at RXD, by the transceiver or by two transmitters out of step in arbitration, moves the next sample into the next bit, where a CAN receiver allows about 75. On the simulator, RGAIN 1 with the sample at two thirds of the bit (FIRST 67) takes a stretch of 52 cycles and a lag of 63 between two other transmitters, and the sender's clock 2% off; this program keeps RGAIN 0. No extended frames, error counters or overload frames |
 | `advanced/sd_unit.s` | 192 | SD card host in SD mode, 1-bit bus, in 2 threads on their shift units, 512-word memory. One unit sends each command most significant bit first with its CRC7 appended (CW 6, CINIT 0, CXOR 0, kinds `crc` and `fcs`) and the clock on its second output (data with its clock); a committed `oe` releases CMD as the end bit ends, and the same unit receives the response at the rising edges of its own clock, read back from the pad (RKIND 2), from a hunt on the start bit, checking the CRC7 with the end bit (CHK is POLY), and for R2 with CSKIP 8. The other unit receives the data block on DAT0 the same way, with the start bit as its sync pattern and the CRC16-CCITT, and its thread rewrites RXCNT after word 130, so that the reception ends at bit 4113, past RCNT's 2047. Against a card model written from the SD Physical Layer Simplified Specification, whose CRCs reproduce the examples of its section 4.5, with commands and responses decoded by sigrok: CMD0, CMD8, CMD55 and ACMD41, CMD2 and CMD3 at 397 kHz, then CMD7 and CMD17 with a 512-byte block at 6.25 MHz; reads on all 12 thread pairs; responses 2 to 64 clocks after the command; blocks that start during the response; card output delays up to two half clocks; corrupted data, end bits and responses all fail the checks. The fastest clock is 8.33 MHz, set by the thread that keeps the clock fed and takes the response; at 12.5 MHz it reports the stopped clock. A card output delay of H - 1 to H cycles at half clock H loses the start bit, because the hunt takes no sample in the cycle it starts. No 4-bit bus, writes or busy |
@@ -1887,6 +1982,8 @@ Each program is the file named, under `programs/`. `programs/README.md` says wha
 | `advanced/lfsr_unit.s` | 110 | PRBS generator and additive scrambler on the LFSR (CMODE 2) of one unit, with another unit receiving. PRBS7 (x^7 + x^6 + 1) and ITU-T O.150's 2^9 - 1 and 2^15 - 1, with POLY the reciprocal of each (5.9.7), pass a checker built from the named Fibonacci recurrences with no error: over a whole period each at 50 Mbit/s, and after a sync byte at 2 to 10 cycles a bit on 4 thread pairs; inverted with output code 1. Frames scrambled behind a sync byte of no kind are descrambled by the other unit, whose LFSR starts at the first bit after its sync pattern, and the line XOR the data is the PRBS, for each width. The named polynomial set as POLY fails the checker. The receiver needs 2 cycles a bit |
 | `advanced/crc_unit.s` | 85 | The idle send half as a CRC engine in one thread, one bit a cycle at TPER 0 with no pin on its outputs: a buffer in memory goes through as words of kind `crc`, 4 slots a word, two words waiting before the start, and `srd` reads the register once status bit 5 clears; the thread then reflects and complements the result as the CRC asks. CRC-32 gives 0xCBF43926 for `123456789` and equals zlib.crc32 on buffers of 1 to 256 bytes on every thread, 2,520 cycles for 256 bytes. CRC-8/MAXIM gives 0xA1, and 0 over a 1-Wire ROM code with its CRC byte, on 128 words |
 | `advanced/xy2_unit.s` | 108 | XY2-100 controller in 3 threads on their shift units, started at one absolute cycle: each thread arms its send, writes the shared start cycle into D with `wrd` and commits there with `tick 0`, so all three run on one grid of 25-cycle bits, 2 Mbit/s, TPER 12 with TFRAC 128. One unit makes CLK (output codes 1, 0) and SYNC (the bit) on its two outputs; the others send the control bits 0 0 1 and the 16-bit position MSB first, as words of kind `crc` and `fcs`, so each appends the even parity bit. Read at CLK's falling edges by a frame reader written from the XY2-100 frame: frames back to back on 8 thread placements and alignments, extreme positions, SYNC low on the parity bit only, and SYNC, X and Y moving only in cycles where CLK rises |
+| `advanced/i2s_ctl.s` | 117 | I2S or TDM controller in 2 threads on their shift units, started at one absolute cycle by `wrd` and `tick 0`, 512-word memory. One unit makes SCK (output codes 2 then 3, low then high) and WS or FS (the bit) from a pattern table; the other sends SD from a table, and receives the target's SD at SCK's rising edges, read back from its `io` pad (RKIND 2), from a second commit 4 x TPER after the start. Both lines begin with 2 bits before the first word, so a receiver that latches WS only at SCK's edges sees it change. Against a slave transmitter model written from the I2S bus specification (Philips, 1996) and the TLV320ADC3140 data sheet's TDM mode (TX_OFFSET 1, BCLK_POL 1), read by readers written from them and decoded by sigrok's `i2s` and `tdm_audio`: I2S at 48 kHz with 2 x 32 bits (TPER 8 with TFRAC 35, 48,008 Hz) and 2 x 16, and at 8 kHz; TDM at 48 kHz with 8 x 16 and 4 x 32 bits (6.144 MHz) and at 8 kHz with one 8-bit slot; 8 thread pairs and alignments; the specification's Table 1 timing on every edge. Transmit and receive are clean from TPER 3 (8.33 MHz) with TFRAC below 86, from 4 up to 170 and from 5 at any fraction; at TPER 2 (12.5 MHz) the bus is right, but the receive half's start comes too late |
+| `advanced/i2s_tgt.s` | 55 | I2S or TDM target in one thread on the shift unit, 512-word memory. The receive half samples SD at SCK's rising edges (RKIND 2, RXCNT the frame's bits), the send half moves SD out 3 cycles after each rising edge (TEXT, TFALL 0), and a wait `untilm` on SCK high with WS low (FS high), armed while WS is high (FS low), is the commit that starts both on the edge that first latches the frame's WS (FS) change, so the first bit is the next edge's, as I2S puts the MSB one SCK after WS changes. Each later frame is armed by `sgo` during the frame and started by `now` 2 to 5 cycles after its first edge. Against a controller model written from the same documents, with WS (FS) and SD 0 to 2 cycles after its falling edges, on 4 threads, alignments and sampling phases, decoded by sigrok: I2S at 48 kHz (2 x 32 and 2 x 16 bits) and at 8 kHz, TDM at 48 kHz (4 x 16 and 2 x 32 bits) and at 8 kHz with one 8-bit slot; every frame received, SD out latched right with setup of at least 0.2T. The restart sets the limit: SCK half period 5 (5 MHz) is clean, 4.5 is not, because a later frame's first bit goes out up to 8 cycles after the frame's first edge; a single frame runs at half period 3. TDM at 128 fs (6.144 MHz) needs one endless send from the first frame instead. WS (FS) must change while SCK is low, as a controller that changes it on the falling edge does |
 | `standard/cec.s` | 50 | HDMI CEC initiator. All bit windows met. A start bit falls only after 7 bit periods of free line, so another initiator's frame is waited out. Each block's ACK is judged by the frame's destination, inverted for a broadcast; a block that fails ends the frame, and its later blocks are taken unsent. No arbitration or retransmission |
 | `extra/lin.s` | 52 | LIN responder header with auto-baud at +/-14%. Header only |
 | `extra/nec_tx.s` | 41 | NEC IR transmit. Carrier exact, 1316 cycles with 439 high |
@@ -1988,23 +2085,29 @@ Most of these cost a real bug while writing programs for this ISA.
 - A bit error in a preamble can complete the sync pattern early. That reception gives a runt of a few bits, and the next one, still in the preamble, gives the frame. Drop receptions shorter than the protocol's minimum.
 - A new RKIND acts from the next reception, not the one in progress.
 - A thread stop doesn't stop a send. Use ABORT to cut one.
+- THALF and RKIND 3 are only as exact as the clock's duty cycle (section 7.3). A test that gives one input level per cycle puts every edge in the first half, so it times edges to the cycle even with RKIND 3, and it reads THALF's moves half a cycle late.
+- With timed samples or an outside clock, the cycle that starts a reception takes no sample. With HUNT on a start bit whose edge reaches SYNC2 in the same cycle as a clock edge, that bit is lost. An SD card's start bit does that when its output delay, with pads and board, is H - 1 to H cycles at half clock H: keep the delay out of that window.
+- A send's first symbol lands at the commit that starts it. An SPI target with CPHA 1 moves MISO on the edge before each capture, so that first edge would move MISO on too soon: send a 1-bit dummy word first, which that edge ends.
+- REND 1 ends an outside-clock reception in the first cycle with no active edge, so RXEND written as 1 when CS rises ends the frame there, with its last word partial and marked last. A thread that waits for CS can't take words meanwhile, so that end holds only for frames of up to 31 bits.
+- RCNT counts to 2047. For a longer reception, such as an SD block's 4113 bits, write RXCNT with the length modulo 2048 during the reception, after RXTOT has passed that value for the last time before the end (section 10, item 22). That is the opposite of CAN's rule below.
+- `sgo txrx` while the send half is busy starts the idle receive half at that commit and the send half at the first commit after it goes idle, so the two halves leave one grid with no sign. Wait for status bit 5 to clear first.
 
 **CRC and stuffing**
 
-- The CRC register serves one half at a time. Set CTX to 1 before a send that appends, and back to 0 before the next reception begins: a reception that begins with CTX 1 starts its CRC from the register's old value, not its initial value, so its check is meaningless.
+- The CRC register serves one half at a time. Set CTX to 1 before a send that appends, and back to 0 before the next reception begins: a reception that begins with CTX 1 starts its CRC from the register's old value, not its initial value, so its check is meaningless. A CAN node that loses arbitration hands the register over on purpose: CTX moves to 0 after the send half's last covered bit and before the receive half's next sample, and the receive half goes on with the CRC of the bus bits so far.
 - One configuration checks one CRC: CW, CINIT and POLY at a reception's start and bits, CHK at its end. A USB device writes CODING, POLYHI and CHKHI for CRC-16 after a SETUP or OUT token and before the data packet's SYNC, and back for CRC-5 after the data packet.
 - On a shared line, such as USB's pair, CAN or a loopback, the receive half receives its own unit's send, because a `uio` pin reads its own drive. Take or drop those words, or `sstop rx` before the send and arm the half again after it. Otherwise the self-reception's last word waits in RXSR, the half doesn't hunt, and the reply is lost. For USB keep REOP set in the send value of CODING (0xE6EF), or the self-reception doesn't end at the EOP and runs into the reply.
-- USB lets the last bit before an EOP stretch by up to six bit times (dribble). The check covers every bit up to the SE0, so such a packet fails it although it is good, and its bits after the PID are then not a whole number of bytes. Check those packets again in firmware, with another unit's idle send half as the CRC engine, or accept them on the bit count.
+- USB lets the last bit before an EOP stretch by up to six bit times (dribble). With REOP the end test drops 1 to 6 ones after the last whole byte, so such a packet arrives as whole bytes with its check, as a clean one does (section 5.9.7, the byte end). Use REOP only where receptions are whole bytes: elsewhere a reception that ends in ones after a byte boundary loses them.
 - A word with no kind is not stuffed and breaks the run. Give every word the stuffer must see its kind, USB's SYNC and PID included (`stuff`).
 - The receive CRC covers every bit from CSKIP after the sync pattern to the end, the received CRC included, so a good reception leaves the residue, not 0. With HDLC it also covers the closing flag's first six bits, so CHK is 0xD0F9, not 0x1D0F.
 - An HDLC reception's last word ends with the closing flag's first six bits, 011111. Drop them. The closing flag ends the reception and the half hunts again, so it receives one frame per hunt: with a falling-edge hunt and SYNCLEN 8, a run of flags gives one six-bit reception for every three flags, and a frame arrives only if its opening flag falls on that cycle, as after 3, 6 or 9 flags or after a gap of ones. Drop the six-bit receptions. A sender that puts 1, 2, 4 or 5 flags between frames, or idles on flags, loses frames.
 - The end flags belong to the last word. Read them with `srd Rd, end` after the `rxw` that sets T and before the next `rxw`.
 - `srd` reads the register as it is: the remainder in wire order, left-aligned, neither reflected nor complemented.
-- An idle send half used as a CRC engine needs words of kind `crc`: after a word of kind `fcs` the register holds its initial value again.
+- An idle send half used as a CRC engine needs words of kind `crc`: after a word of kind `fcs` the register holds its initial value again. Queue two words before its start, or a feed loop of 4 slots misses the first word boundary and the send underruns.
 - POLY is the reciprocal of the polynomial a standard names for a Fibonacci PRBS or scrambler, and the LFSR needs CINIT 1 (section 5.9.7).
 - The end test needs RCLK set to the second line, and works only with timed samples.
 - A stuff violation on USB or CAN ends a reception early, and the line goes on: with HUNT, the half hunts again in the middle of the frame. Drop receptions with end flag 1 set, and on CAN expect the error frame next.
 - On CAN, with HUNT, the half hunts again as soon as RCNT ends a frame, so a stuff bit after the CRC, or another node's ACK, can start a short reception that ends on a stuff violation in the recessive tail. Drop it: it has end flag 1 set.
-- On CAN, write RXCNT before RXTOT reaches the new count. `rx_bit` ends a reception only when RXTOT equals RCNT, so a late write never ends it: it runs into the recessive tail, ends on a stuff violation and fails its check. With MSB-first words the DLC is complete only with the second word, at bit 32, 2 bit times before the end of a frame with no data.
-- With RESYNC every edge of RPIN pulls the sample countdown, rising and falling alike. CAN resynchronizes only on recessive-to-dominant edges, so with a transceiver whose rising and falling delays differ, the sample point moves by that difference after each dominant-to-recessive edge.
+- On CAN, write RXCNT before RXTOT reaches the new count. `rx_bit` ends a reception only when RXTOT equals RCNT, so a late write never ends it: it runs into the recessive tail, ends on a stuff violation and fails its check. With MSB-first words the DLC is complete only with the second word, at bit 32, 2 bit times before the end of a frame with no data, or 3 when RCNT ends at the CRC delimiter (section 5.9.7).
+- With RESYNC every edge of RPIN pulls the sample countdown, rising and falling alike. CAN resynchronizes only on recessive-to-dominant edges, so with a transceiver whose rising and falling delays differ, the sample point moves by that difference after each dominant-to-recessive edge. Two other transmitters out of step in arbitration stretch every dominant bit by their offset, which moves the sample the same way: with RGAIN 0, a stretch longer than the bit minus FIRST moves the next sample into the next bit, 25 cycles at 500 kbit/s with FIRST 75. RGAIN 1 with FIRST at about two thirds of the bit takes about twice that (section 11.2, `can_unit`).
 - A data packet with no data, such as a USB zero-length packet, can't use `fcs`, which covers its own word: send the CRC of no data as a word of kind `stuff`, 0x0000 for USB's CRC-16.

@@ -45,7 +45,7 @@ Each row of the instruction table runs its Semantics cell, which `isatable.py` c
 
 ## The checks
 
-`python3 sim/compare.py` runs every program of `programs/` three ways, and 300 random images, and compares the three simulators after every cycle. It compares the pads, every thread's registers and flags, every shift unit's state and slots, the pin flops and owners, the output switch, the mailbox, BUSY and the memory, and the reply to every host command. The images are drawn uniformly over the table's rows, or biased to the shift-unit rows with settings that make the units run. It prints one line for each run that differs, naming the simulator that stands apart and the first thing in which it differs, with its value and the others', then a summary, and exits 1 if any run differs. That is about 3 million cycles, a few minutes on one core: `--jobs 4` runs it in 4 processes, and `--quick` is a shorter run. Its docstring lists the options.
+`python3 sim/compare.py` runs every program of `programs/` three ways, 300 random images and 100 with half cycles, and compares the three simulators after every cycle. It compares the pads in both halves of the cycle, every thread's registers and flags, every shift unit's state and slots, the pin flops and owners, the output switch, the mailbox, BUSY and the memory, and the reply to every host command. The images are drawn uniformly over the table's rows, or biased to the shift-unit rows with settings that make the units run. The half-cycle images set THALF, RKIND 3 and REOP's byte end going, and give every input its own level at each falling edge (section 3.1). It prints one line for each run that differs, naming the simulator that stands apart and the first thing in which it differs, with its value and the others', then a summary, and exits 1 if any run differs. That is about 3 million cycles, a few minutes on one core: `--jobs 4` runs it in 4 processes, and `--quick` is a shorter run. Its docstring lists the options.
 
 `python3 sim/claims.py` checks 226 statements, each named by the section it tests, and prints PASS or FAIL for each, then the count. It exits 1 if any fails.
 
@@ -86,7 +86,7 @@ for cycle in range(100000):
     chip.cycle(ui, uio_in)
 ```
 
-`chip.host_take(n)` returns `(full, word)`. `chip.th[i].LATE` and `chip.th[i].ILL` are thread flags. `ui` and `uio_in` are 8-bit integers. An undriven `uio` pad has whatever level your board model gives it.
+`chip.pads(ui)` gives the pads in the first half of the cycle, from its rising edge, and `chip.pads2(ui)` in the second, from its falling edge; they differ only on a pin that THALF moved at the falling edge (sections 3.1, 5.2, 5.9.5). `chip.cycle(ui, uio_in, ui_f, uio_f)` also takes the levels at the falling edge, which only RKIND 3 reads; left out, they are the same as `ui` and `uio_in`, one level for the whole cycle. `chip.host_take(n)` returns `(full, word)`. `chip.th[i].LATE` and `chip.th[i].ILL` are thread flags. `ui` and `uio_in` are 8-bit integers. An undriven `uio` pad has whatever level your board model gives it.
 
 To start at a chosen alignment, call `chip.cycle` n times before `chip.host_run`: *h* is n - 1. With n = 0 the simulator gives *h* = 65535, which section 9.1 rules out on a chip, and it behaves as n = 4.
 

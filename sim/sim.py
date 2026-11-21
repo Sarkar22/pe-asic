@@ -8,6 +8,13 @@ Each thread's shift unit (section 5.9) is a Unit, run by the Chip methods under
 5.9.4 to 5.9.7, one per code block. Step 2b runs every unit, then step 3 runs on
 the state it left, so the instruction wins where both write. The rows that read
 what step 2b writes read the unit as it was before step 2b instead (3.2).
+
+Half cycles (3.1). pads() gives the pads in the first half of a cycle, from its
+rising edge, and pads2() in the second half, from its falling edge (5.2). cycle()
+takes the levels at the rising edge that ends the cycle and, optionally, the levels
+at its falling edge; without them the falling-edge sample is the same level, which
+is a test that gives one level per cycle. Only THALF moves an output at a falling
+edge, and only RKIND 3 reads the falling-edge sample (5.9.5, 5.9.6).
 """
 import random
 
@@ -23,7 +30,7 @@ HOLD, PCSET = 1, 2                      # run_row outcomes; None retires with PC
 FIELDS = (
     ('SYMS', 0, 0, 2), ('TMSB', 0, 2, 1), ('TGLA', 0, 3, 1), ('TGLB', 0, 4, 1), ('IDLEA', 0, 5, 1),
     ('IDLEB', 0, 6, 1), ('ENDA', 0, 7, 1), ('ENDB', 0, 8, 1), ('TEXT', 0, 9, 1), ('TFALL', 0, 10, 1),
-    ('TCLK', 0, 11, 4),
+    ('TCLK', 0, 11, 4), ('THALF', 0, 15, 1),
     ('MAPA', 1, 0, 8), ('MAPB', 1, 8, 8),
     ('TPER', 2, 0, 16),
     ('TAIL', 3, 0, 8), ('TFRAC', 3, 8, 8),
@@ -43,7 +50,7 @@ FIELDS = (
     ('SMODE', 15, 10, 2), ('SN', 15, 12, 3), ('REOP', 15, 15, 1),
 )
 SLOT_FIELDS = [[(n, lo, (1 << w) - 1) for n, s, lo, w in FIELDS if s == k] for k in range(16)]
-KEEP = [sum(m << lo for _, lo, m in SLOT_FIELDS[k]) for k in range(16)]     # 5.9.4; TXMODE bit 15 is reserved
+KEEP = [sum(m << lo for _, lo, m in SLOT_FIELDS[k]) for k in range(16)]     # 5.9.4: 0xFFFF, every bit is a field
 OUTPUT_CODE = ((0, 1, 0, 1), (1, 0, 0, 1))      # 5.9.3 output codes: OUTPUT_CODE[b][code] = b, 1 - b, 0, 1
 
 # 5.9.2: the state of one unit. CFG, CRC and RXPE can be seen; the rest is sequencing state.
@@ -51,7 +58,8 @@ UNIT_STATE = ('TXARM', 'TXRUN', 'TXTL', 'TXSR', 'TXN', 'TXLW', 'TXBUF', 'TXBN', 
               'TXACC', 'LA', 'LB', 'TXUR', 'TXK', 'TXBK', 'TXB', 'TXSTF', 'TXAN', 'TXRL', 'TXRV',
               'RXARM', 'RXHUNT', 'RXRUN', 'RXEP', 'RXSR', 'RXN', 'RXTOT', 'RXSYN', 'RXKIND', 'RXPH', 'RXG',
               'RXOPEN', 'RXCAND', 'RXIC', 'RXLAST', 'RXWIN', 'RXBUF', 'RXBN', 'RXBL', 'RXFULL', 'RXPN', 'RXOVR',
-              'RXSEEN', 'RXRL', 'RXRV', 'RXVIO', 'RXCOV', 'RXEF', 'RXBE', 'CMT', 'CRC', 'RXPE')
+              'RXSEEN', 'RXRL', 'RXRV', 'RXVIO', 'RXCOV', 'RXEF', 'RXBE', 'CMT', 'CRC', 'RXPE',
+              'TXH', 'OLA', 'OLB', 'RXSR8', 'RXN8', 'RXC8', 'RXONES')
 
 
 class Unit:
@@ -106,6 +114,7 @@ class Chip:
         self.M = [0] * 8
         self.FULL = [0] * 8
         self.SYNC1 = self.SYNC2 = self.SYNC3 = 0
+        self.SYNC1F = self.SYNC2F = 0   # 3.1: the falling-edge samples
         self.SEL = [0] * 16             # 5.9.2: 0 is OUT, 1 shift output A, 2 shift output B of the pin's owner
         self.SHSEL = [0] * 16
         self.busy = False               # not architectural: some unit may be running (units_and_slot)
@@ -364,6 +373,7 @@ class Chip:
 
     # ---- 5.2 --------------------------------------------------------------
     def V(self, p):
+        """Pin p in the second half of the cycle, from its falling edge."""
         s = self.SEL[p]
         if s == 1:
             return self.th[self.OWN[p]].u.LA
@@ -371,14 +381,19 @@ class Chip:
             return self.th[self.OWN[p]].u.LB
         return self.OUT[p]
 
-    def pads(self, ui_in):
-        """uo_out, uio_out, uio_oe for the cycle whose ui_in is given.
+    def V0(self, p):
+        """Pin p in the first half of the cycle, from its rising edge: A0 and B0 in place of LA and LB."""
+        s = self.SEL[p]
+        if s == 1:
+            u = self.th[self.OWN[p]].u
+            return u.OLA if u.TXH else u.LA
+        if s == 2:
+            u = self.th[self.OWN[p]].u
+            return u.OLB if u.TXH else u.LB
+        return self.OUT[p]
 
-        The bypass path reads ui_in of this same cycle, so there is no lag.
-        """
-        if not self._dirty and not any(self.BYP) and not self._sel:     # a shift output moves by itself
-            return self._pads
-        OD, V = self.OD, self.V
+    def _drive(self, ui_in, V):
+        OD = self.OD
         uo = uio = oe = 0
         for i in range(8):
             if i == 3:
@@ -393,9 +408,26 @@ class Chip:
             else:
                 uio |= V(8 + i) << i
                 oe |= self.OE[i] << i
-        self._pads = (uo, uio, oe)
+        return uo, uio, oe
+
+    def pads(self, ui_in):
+        """uo_out, uio_out, uio_oe in the first half of the cycle whose ui_in is given (5.2, with V0).
+
+        The bypass path reads ui_in of this same cycle, so there is no lag. A reader that takes one level per
+        cycle takes this one (3.1).
+        """
+        if not self._dirty and not any(self.BYP) and not self._sel:     # a shift output moves by itself
+            return self._pads
+        self._pads = self._drive(ui_in, self.V0)
         self._dirty = False
         return self._pads
+
+    def pads2(self, ui_in):
+        """The same in the second half of the cycle, from its falling edge (5.2, with V). It differs from pads()
+        only on a pin switched to a shift output that THALF moved at this falling edge (5.9.5)."""
+        if not self._sel:
+            return self.pads(ui_in)
+        return self._drive(ui_in, self.V)
 
     # ---- 5.9.4: the helpers of the eight rows. Reads of the unit go to t.pre, writes to t.u (3.2) ------------
     def tx_push(self, t, v, n, last, kind):
@@ -454,6 +486,7 @@ class Chip:
     def sstop(self, t, m):
         if m & 1:
             self.tx_stop(t.u)
+            self.busy = True
         if m & 2:
             self.rx_stop(t.u)
 
@@ -463,6 +496,9 @@ class Chip:
 
     # ---- 5.9.5 send. Each function takes the unit u ---------------------------------------------------------
     def tx_step(self, u):
+        u.OLA = u.LA
+        u.OLB = u.LB
+        u.TXH = 0
         if u.TXRUN:
             self.tx_run(u)
         elif u.TXTL:
@@ -472,15 +508,19 @@ class Chip:
                 self.tx_load(u)
             if u.TXARM and u.CMT:
                 u.TXARM = 0
+                u.TXACC = 0
                 if u.TXN == 0:
                     u.TXUR = 1
                     self.tx_end(u)
                 else:
                     u.TXRUN = 1
                     u.TXSYM = 0
-                    u.TXACC = 0
                     self.tx_begin(u)
                     self.tx_symbol(u)
+
+    @staticmethod
+    def tx_half(u):
+        u.TXH = 1 if u.THALF and not u.TEXT and u.TPER != 0 and (u.TXACC >> 7) & 1 else 0
 
     @staticmethod
     def tx_load(u):
@@ -506,6 +546,7 @@ class Chip:
         vb = code[(u.MAPB >> (2 * u.TXSYM)) & 3]
         u.LA = (u.LA ^ va) if u.TGLA else va
         u.LB = (u.LB ^ vb) if u.TGLB else vb
+        Chip.tx_half(u)
         if u.TPER == 0:
             u.TXCD = 1
         else:
@@ -542,6 +583,7 @@ class Chip:
     @staticmethod
     def tx_end(u):
         u.TXRUN = 0
+        Chip.tx_half(u)
         if u.TAIL == 0:
             u.LA = u.IDLEA
             u.LB = u.IDLEB
@@ -555,6 +597,7 @@ class Chip:
     def tx_tail(u):
         if u.TXCD <= 1:
             u.TXTL = 0
+            Chip.tx_half(u)
             u.LA = u.IDLEA
             u.LB = u.IDLEB
         else:
@@ -570,6 +613,7 @@ class Chip:
         u.TXSYM = 0
         u.TXSTF = 0
         u.TXAN = 0
+        u.TXH = 0
         u.LA = u.IDLEA
         u.LB = u.IDLEB
 
@@ -594,6 +638,7 @@ class Chip:
                 self.rx_begin(u)
 
     def rx_begin(self, u):
+        h = u.RXHUNT and u.RKIND == 3 and ((self.SYNC2F ^ self.SYNC2) >> u.RPIN) & 1
         u.RXHUNT = 0
         u.RXRUN = 1
         u.RXSEEN = 1
@@ -609,8 +654,8 @@ class Chip:
         u.RXCAND = 0
         u.RXG = 1
         self.rx_cbegin(u)
-        if u.RXKIND == 1:
-            u.RXPH = 256
+        if u.RXKIND == 1 or u.RXKIND == 3:
+            u.RXPH = 128 if h else 256
             if not u.RDIFF:
                 self.rx_bit(u, (self.SYNC2 >> u.RPIN) & 1)
         else:
@@ -624,7 +669,18 @@ class Chip:
         if u.RXKIND == 1:
             if u.RPER > 255:
                 p = 0xFF00 | u.RFRAC
-            self.rx_manch(u, e, p)
+            self.rx_manch(u, e, (self.SYNC2 >> u.RPIN) & 1, p, 256)
+        elif u.RXKIND == 3:                         # two half steps: the falling-edge sample, then SYNC2
+            if u.RPER > 255:
+                p = 0xFF00 | u.RFRAC
+            elif u.RPER < 2:
+                p = 512
+            f = (self.SYNC2F >> u.RPIN) & 1
+            v = (self.SYNC2 >> u.RPIN) & 1
+            e1 = e and f == v
+            self.rx_manch(u, e1, f, p, 128)
+            if u.RXRUN:
+                self.rx_manch(u, e and not e1, v, p, 128)
         elif u.RXKIND == 2:
             now = (self.SYNC2 >> u.RCLK) & 1
             if now != ((self.SYNC3 >> u.RCLK) & 1) and now != u.RFALL:
@@ -639,7 +695,7 @@ class Chip:
         if u.RXPH < 256:
             u.RXPH = u.RXPH - 256 + p
             if u.REOP and ((self.SYNC2 >> u.RPIN) & 1) == 0 and ((self.SYNC2 >> u.RCLK) & 1) == 0:
-                self.rx_end(u)
+                self.rx_eop(u)
             else:
                 self.rx_sample(u)
         else:
@@ -650,7 +706,7 @@ class Chip:
                 self.rx_pull(u, (u.FIRST - 1 if u.FIRST else 0) << 8)
                 self.rx_gear(u)
 
-    def rx_manch(self, u, e, p):
+    def rx_manch(self, u, e, v, p, s):
         w = (p >> 1) if u.RACQ and u.RGAIN != 0 and u.RXG < 16 else (p >> 2)
         if u.RXPH >= p - w:
             if u.RXOPEN:
@@ -668,7 +724,7 @@ class Chip:
                 u.RXOPEN = 0
                 u.RXCAND = 0
                 u.RXIC = 0
-                self.rx_bit(u, u.RXWIN if u.RDIFF else (self.SYNC2 >> u.RPIN) & 1)
+                self.rx_bit(u, u.RXWIN if u.RDIFF else v)
                 u.RXWIN = 0
                 if e:
                     self.rx_pull(u, 0)
@@ -676,7 +732,7 @@ class Chip:
         elif u.RXRUN and e:
             u.RXWIN = 1
             self.rx_pull(u, p >> 1)
-        u.RXPH += 256
+        u.RXPH += s
 
     @staticmethod
     def rx_pull(u, r):
@@ -751,6 +807,7 @@ class Chip:
                 self.rx_deliver(u, u.RXSR, 16, 0)
                 u.RXSR = 0
                 u.RXN = 0
+            self.rx_byte(u, b)
 
     @staticmethod
     def rx_deliver(u, v, n, last):
@@ -851,6 +908,28 @@ class Chip:
         u.RXRL = 0
         if not u.CTX and (u.CMODE == 1 or u.CMODE == 2):
             self.crc_init(u)
+        self.rx_byte(u, 1)
+
+    @staticmethod
+    def rx_byte(u, b):
+        if (u.RXTOT & 7) == 0:
+            u.RXSR8 = u.RXSR
+            u.RXN8 = u.RXN
+            if not u.CTX and (u.CMODE == 1 or u.CMODE == 2):
+                u.RXC8 = u.CRC >> 16
+            u.RXONES = 1
+        elif not b:
+            u.RXONES = 0
+
+    def rx_eop(self, u):
+        """The end test of REOP, with the byte end (5.9.7)."""
+        nb = u.RXTOT & 7
+        if u.RXONES and not u.RXVIO and nb != 0 and nb != 7:
+            u.RXSR = u.RXSR8
+            u.RXN = u.RXN8
+            if not u.CTX and (u.CMODE == 1 or u.CMODE == 2):
+                u.CRC = (u.RXC8 << 16) | (u.CRC & 0xFFFF)
+        self.rx_end(u)
 
     @staticmethod
     def rx_run_len(u, v):
@@ -863,8 +942,12 @@ class Chip:
         u.RXRV = v
 
     # ---- 3.2 --------------------------------------------------------------
-    def cycle(self, ui_in, uio_in):
-        """Steps 2 to 5 of one cycle. Step 1 is pads() plus the board."""
+    def cycle(self, ui_in, uio_in, ui_f=None, uio_f=None):
+        """Steps 2 to 5 of one cycle. Step 1 is pads(), pads2() and the board.
+
+        ui_in and uio_in are the levels at the rising edge that ends the cycle, ui_f and uio_f those at its falling
+        edge. Either of the two left out is the same as the rising-edge level: one level for the whole cycle (3.1).
+        """
         c = self.c
         TB = c & 0xFFFF
         th = self.th
@@ -885,6 +968,11 @@ class Chip:
         self.SYNC3 = self.SYNC2
         self.SYNC2 = self.SYNC1
         self.SYNC1 = (uio_in << 8) | ui_in
+        self.SYNC2F = self.SYNC1F
+        if ui_f is None and uio_f is None:
+            self.SYNC1F = self.SYNC1
+        else:
+            self.SYNC1F = ((uio_in if uio_f is None else uio_f) << 8) | (ui_in if ui_f is None else ui_f)
         self.c = c + 1
 
     def units_and_slot(self, t, P_start, a):
@@ -896,7 +984,9 @@ class Chip:
 
         A half whose state the code would leave alone is skipped. An idle unit, both halves idle, leaves step 2b
         idle, and only tx_push and sgo start one, so they set busy, and step 2b clears it once every unit is idle
-        again. A caller that writes a unit's state by hand sets busy too.
+        again. A caller that writes a unit's state by hand sets busy too. On an idle send half tx_step only sets OLA
+        and OLB to LA and LB and clears TXH, which matters after a half-cycle move or a stop, so that runs alone, and
+        sstop and ABORT set busy for it.
         """
         if t.IR >> 12 == 13:
             t.u0.__dict__.update(t.u.__dict__)
@@ -908,6 +998,10 @@ class Chip:
                 if u.TXRUN or u.TXTL or u.TXFULL or u.TXARM:
                     self.tx_step(u)
                     busy = True
+                elif u.TXH or u.OLA != u.LA or u.OLB != u.LB:
+                    u.OLA = u.LA                    # tx_step on an idle send half
+                    u.OLB = u.LB
+                    u.TXH = 0
                 if u.RXEP or u.RXRUN or u.RXHUNT or u.RXARM:
                     self.rx_step(u)
                     busy = True
@@ -1027,6 +1121,7 @@ class Chip:
                 t.STOPREQ = 1
             self.tx_stop(t.u)
             self.rx_stop(t.u)
+        self.busy = True
         for i in range(8):                  # abort_pins()
             self.OE[i] = 0
             self.SHOE[i] = 0

@@ -1,2 +1,3 @@
-# Reads one shift unit for a proof, with slang as the flow reads it.
+# Reads one shift unit for a proof, with slang as the flow reads it, and its output latches' model.
+read_verilog -formal cells_formal.v
 read_slang --top pe_shift pe_shift.sv

@@ -37,6 +37,7 @@
  *   rst_n      reset, asynchronous, active low
  *   sync2      SYNC2: {uio_in, ui_in} after the synchroniser
  *   sync3      SYNC3: SYNC2 one cycle older
+ *   sync2f     SYNC2F: the falling-edge sample, half a cycle after SYNC3's and before SYNC2's (section 3.1)
  *   cmt        CMT: this thread's prepared pins commit in this cycle (section 5.4)
  *   cfg_we     scfg runs in this cycle: set_cfg(cfg_slot, cfg_data)
  *   cfg_slot   scfg's slot k
@@ -57,6 +58,9 @@
  *   rd_reg     RDREG's register number, bits 4:0
  *   la         LA, shift output A
  *   lb         LB, shift output B
+ *   pad_a      shift output A as the pads show it: V0's level in the first half of the cycle, LA's in the
+ *              second (section 5.2, two halves)
+ *   pad_b      the same for shift output B
  *   txfull     TXFULL, which txw's need() tests
  *   rxfull     RXFULL, which rxw's need() tests
  *   rxbuf      RXBUF, the word rxw takes
@@ -84,6 +88,7 @@ module pe_shift #(
     input  logic        rst_n,
     input  logic [15:0] sync2,
     input  logic [15:0] sync3,
+    input  logic [15:0] sync2f,
     input  logic        cmt,
     // Step 3: this thread's instruction. A strobe is set only in the cycle its row runs.
     input  logic        cfg_we,
@@ -107,6 +112,8 @@ module pe_shift #(
     input  logic [4:0]  rd_reg,
     output logic        la,
     output logic        lb,
+    output logic        pad_a,
+    output logic        pad_b,
     output logic        txfull,
     output logic        rxfull,
     output logic [15:0] rxbuf,
@@ -120,7 +127,7 @@ module pe_shift #(
   // Configuration (section 5.9.3). KEEP[k] of section 5.9.4 masks each write, so reserved bits
   // aren't stored and read 0. A cut piece's fields are reserved too.
 
-  localparam logic [15:0] KEEP0  = CUT_OCK ? 16'h01FF : 16'h7FFF;
+  localparam logic [15:0] KEEP0  = CUT_OCK ? 16'h81FF : 16'hFFFF;
   localparam logic [15:0] KEEP3  = CUT_TFRAC ? 16'h00FF : 16'hFFFF;
   localparam logic [15:0] KEEP4  = 16'hFFFF & ~(CUT_OCK ? 16'h0080 : 16'h0000)
                                            & ~((CUT_OCK && CUT_EOP) ? 16'hF000 : 16'h0000);
@@ -138,7 +145,7 @@ module pe_shift #(
 
   // Send fields.
   logic [1:0]  syms;
-  logic        tmsb, tgla, tglb, idlea, idleb, enda, endb, text, tfall;
+  logic        tmsb, tgla, tglb, idlea, idleb, enda, endb, text, tfall, thalf;
   logic [3:0]  tclk;
   logic [7:0]  mapa, mapb;
   logic [15:0] tper;
@@ -155,6 +162,7 @@ module pe_shift #(
   assign text  = CUT_OCK ? 1'b0 : txmode_q[9];
   assign tfall = CUT_OCK ? 1'b0 : txmode_q[10];
   assign tclk  = CUT_OCK ? 4'd0 : txmode_q[14:11];
+  assign thalf = txmode_q[15];
   assign mapa  = txmap_q[7:0];
   assign mapb  = txmap_q[15:8];
   assign tper  = txper_q;
@@ -244,6 +252,7 @@ module pe_shift #(
   // Send half (sections 5.9.5 and 5.9.7).
 
   logic        tx_arm_q, tx_run_q, tx_tl_q, tx_lw_q, tx_bl_q, tx_full_q, la_q, lb_q, tx_ur_q;
+  logic        tx_h_q, ola_q, olb_q;
   logic [15:0] tx_sr_q, tx_buf_q;
   logic [4:0]  tx_n_q, tx_bn_q;
   logic [1:0]  tx_sym_q, tx_k_q, tx_bk_q;
@@ -280,7 +289,7 @@ module pe_shift #(
   logic [5:0]  tx_an_a;
   logic [2:0]  tx_rl_a;
   logic [31:0] crc_t;
-  logic        do_sym, do_end;
+  logic        do_sym, do_end, tail_end;
 
   always_comb begin
     tx_arm_a  = tx_arm_q;
@@ -304,6 +313,7 @@ module pe_shift #(
     crc_t     = crc_q;
     do_sym    = 1'b0;
     do_end    = 1'b0;
+    tail_end  = 1'b0;
     if (tx_run_q) begin
       // tx_run()
       if (!tx_due) begin
@@ -362,9 +372,10 @@ module pe_shift #(
     end else if (tx_tl_q) begin
       // tx_tail()
       if (tx_cd_q <= 17'd1) begin
-        tx_tl_a = 1'b0;
-        la_a    = idlea;
-        lb_a    = idleb;
+        tx_tl_a  = 1'b0;
+        tail_end = 1'b1;
+        la_a     = idlea;
+        lb_a     = idleb;
       end else begin
         tx_cd_a = tx_cd_q - 17'd1;
       end
@@ -379,13 +390,13 @@ module pe_shift #(
       end
       if (tx_arm_q && cmt) begin
         tx_arm_a = 1'b0;
+        tx_acc_a = 8'd0;
         if (tx_n_a == 5'd0) begin
           tx_ur_a = 1'b1;
           do_end  = 1'b1;
         end else begin
           tx_run_a = 1'b1;
           tx_sym_a = 2'd0;
-          tx_acc_a = 8'd0;
           // tx_begin()
           tx_stf_a = 1'b0;
           tx_an_a  = 6'd0;
@@ -419,9 +430,15 @@ module pe_shift #(
   assign sym_cd   = (tper == 16'd0) ? 17'd1 : ({1'b0, tper} + {16'd0, sym_carry});
   assign sym_acc  = (tper == 16'd0) ? tx_acc_a : sym_frac;
 
+  // tx_half(), which tx_symbol(), tx_end() and the end of tx_tail() call: with THALF, a move whose TXACC,
+  // the fraction carried into it, is 128 or more shows on the pads from the next falling edge (section 5.9.5).
+  logic        tx_half;
+
+  assign tx_half = (do_sym | do_end | tail_end) & thalf & ~text & (tper != 16'd0) & tx_acc_a[7];
+
   // The rest of tx_step(): tx_symbol() or tx_end(), whichever the branch calls last. Then step 3
-  // and ABORT, which win.
-  logic        tx_arm_d, tx_run_d, tx_tl_d, tx_lw_d, tx_bl_d, tx_full_d, la_d, lb_d, tx_ur_d;
+  // and ABORT, which win. tx_step() clears TXH first, and tx_stop() clears it.
+  logic        tx_arm_d, tx_run_d, tx_tl_d, tx_lw_d, tx_bl_d, tx_full_d, la_d, lb_d, tx_ur_d, tx_h_d;
   logic [15:0] tx_sr_d, tx_buf_d;
   logic [4:0]  tx_n_d, tx_bn_d;
   logic [1:0]  tx_sym_d, tx_k_d, tx_bk_d;
@@ -455,6 +472,7 @@ module pe_shift #(
     tx_rv_d   = tx_rv_a;
     tx_an_d   = tx_an_a;
     tx_rl_d   = tx_rl_a;
+    tx_h_d    = tx_half;
     if (do_sym) begin
       // tx_symbol()
       tx_b_d   = sym_bit;
@@ -488,6 +506,7 @@ module pe_shift #(
       tx_sym_d  = 2'd0;
       tx_stf_d  = 1'b0;
       tx_an_d   = 6'd0;
+      tx_h_d    = 1'b0;
       la_d      = idlea;
       lb_d      = idleb;
     end
@@ -512,6 +531,7 @@ module pe_shift #(
       tx_sym_d  = 2'd0;
       tx_stf_d  = 1'b0;
       tx_an_d   = 6'd0;
+      tx_h_d    = 1'b0;
       la_d      = idlea_n;
       lb_d      = idleb_n;
     end
@@ -547,6 +567,9 @@ module pe_shift #(
   logic [2:0]  rx_rl_q;
   logic        rx_rv_q, rx_vio_q, rx_cov_q;
   logic [2:0]  rx_ef_q, rx_be_q, rx_pe_q;
+  logic [15:0] rx_sr8_q, rx_c8_q;     // RXSR8 and RXC8 (section 5.9.7, the byte end)
+  logic [4:0]  rx_n8_q;               // RXN8
+  logic        rx_ones_q;             // RXONES
 
   // The window points p - p/4 and p - p/2, loaded in the cycle of an scfg that writes RXPER or
   // RXOPT, from the value written and the other slot as stored.
@@ -575,7 +598,7 @@ module pe_shift #(
   assign hunt_hit = (lvl2 == hlvl) & (lvl3 != hlvl);
 
   // Which branch of rx_step() runs. A start is rx_begin(), from a hunt or from an arm.
-  logic b_ep, b_run, b_hunt, b_arm, do_begin, man, tim, ock, acq, rz;
+  logic b_ep, b_run, b_hunt, b_arm, do_begin, man, man3, tim, ock, acq, rz;
 
   assign b_ep     = rx_ep_q;
   assign b_run    = ~rx_ep_q & rx_run_q;
@@ -583,8 +606,9 @@ module pe_shift #(
   assign b_arm    = ~rx_ep_q & ~rx_run_q & ~rx_hunt_q & rx_arm_q & cmt;
   assign do_begin = (b_hunt & hunt_hit) | (b_arm & ~hunt);
   assign man      = rx_kind_q == 2'd1;
-  assign tim      = (rx_kind_q == 2'd0) | (rx_kind_q == 2'd3) | (CUT_OCK & (rx_kind_q == 2'd2));
+  assign tim      = (rx_kind_q == 2'd0) | (CUT_OCK & (rx_kind_q == 2'd2));
   assign ock      = ~CUT_OCK & (rx_kind_q == 2'd2);
+  assign man3     = rx_kind_q == 2'd3;
   assign acq      = rx_g_q[4:2] == 3'd0;    // RXG <= 3: RXG is 1 to 16 once started
   assign rz       = rper == 16'd0;
 
@@ -652,14 +676,15 @@ module pe_shift #(
 
   // The bit of this cycle, at most one. REOP's end test takes the place of a timed sample.
   logic eop_hit, tsamp, osamp, samp, begin_bit, bit_v, bit_r, bv;
+  logic bit3, blv3, endw3;   // RKIND 3: a bit in this cycle, its value, a window closed empty (below)
 
   assign eop_hit   = trun & smp & reop & ~lvl2 & ~ck2;
   assign tsamp     = trun & smp & ~eop_hit;
   assign osamp     = b_run & ock & cedge;
   assign samp      = tsamp | osamp;
-  assign begin_bit = do_begin & (rkind == 2'd1) & ~rdiff;
-  assign bit_v     = clk_hit | samp | begin_bit;
-  assign bit_r     = clk_hit ? (rdiff ? rx_win_q : lvl2) :
+  assign begin_bit = do_begin & rkind[0] & ~rdiff;    // RKIND 1 or 3
+  assign bit_v     = clk_hit | bit3 | samp | begin_bit;
+  assign bit_r     = clk_hit ? (rdiff ? rx_win_q : lvl2) : bit3 ? blv3 :
                      samp ? (rdiff ? (lvl2 == rx_last_q) : lvl2) : lvl2;
   assign bv        = bit_r ^ rinv;    // rx_bit()'s b after RINV
 
@@ -706,7 +731,16 @@ module pe_shift #(
   assign rx_fb    = cm1 ? (crc_base[31] ^ bv) : crc_base[31];
   assign crc_r    = rx_crc ? ({crc_base[30:0], 1'b0} ^ (rx_fb ? poly : 32'd0)) : crc_base;
   assign bw       = (rx_crc & cm2) ? (bv ^ crc_base[31]) : bv;    // descrambled
-  assign crc_pass = cm1 & ~ctx & (crc_r == chk);
+  // The byte end (section 5.9.7): at the end test, with 1 to 6 ones after the last byte boundary and no stuff
+  // violation, rx_eop() puts RXSR, RXN and the register's bits 31 to 16 back to their copies before the check. No
+  // bit enters the register in that cycle, so the check of the copy is formed from flops beside the other.
+  logic        eop_rest, c8_on;
+  logic [31:0] crc_e;
+
+  assign c8_on    = ~ctx & cmode_on;
+  assign eop_rest = eop_hit & rx_ones_q & ~rx_vio_q & (rx_tot_q[2:0] != 3'd0) & (rx_tot_q[2:0] != 3'd7);
+  assign crc_e    = {(eop_rest & c8_on) ? rx_c8_q : crc_r[31:16], crc_r[15:0]};
+  assign crc_pass = cm1 & ~ctx & ((eop_rest & c8_on) ? ({rx_c8_q, crc_q[15:0]} == chk) : (crc_r == chk));
 
   // The sync search and the words.
   logic [15:0] lowmask, highmask;
@@ -737,17 +771,170 @@ module pe_shift #(
   assign n_b      = dbit ? (full16 ? 5'd0 : n1) : n0;
   assign tot_b    = dbit ? tot1 : tot0;
 
+  // RKIND 3 (section 5.9.6): rx_manch() twice a cycle, half a cycle each (s = 128), first with the falling-edge
+  // sample SYNC2F, then with SYNC2. The cycle's one edge, SYNC2 against SYNC3, falls in the first half if SYNC2F
+  // already shows the new level, and in the second if it still shows the old one. RPER 0 and 1 act as 2, so p is
+  // 512 and the window points 384 and 256. With p at least 512 a cycle has at most one bit and one pull (one edge),
+  // and the second half step runs only while the reception goes on: a window that closes empty, or a bit that ends
+  // the reception (the bit after a stuff violation, or RCNT's), ends it, and the half steps after it don't run.
+  // The bit and the end come from the compares below; RXPH and the window flags from one pull, fed by the half step
+  // that has the edge (the implementation note's shape).
+  logic               lvlf, e1h, e2h, clamp3, bit_ends;
+  logic [15:0]        p3, pq3, ph3w;
+  logic signed [17:0] r3;
+  logic               op3, cd3, wn3;
+  logic [4:0]         g3;
+
+  assign lvlf     = sync2f[rpin];
+  assign e1h      = e & (lvlf == lvl2);
+  assign e2h      = e & ~e1h;
+  assign clamp3   = rper[15:1] == 15'd0;
+  assign p3       = clamp3 ? 16'd512 : {rs, rfrac};
+  assign pq3      = clamp3 ? 16'd384 : pwq_q;
+  assign ph3w     = clamp3 ? 16'd256 : pwh_q;
+  // A bit that ends the reception: the bit after a violation, or a data bit that reaches RCNT. Flops only.
+  assign bit_ends = vio0 | (~stuffpos & syn0 & (rcnt != 11'd0) & (tot1 == rcnt));
+
+  // The same cycle's bit and end, from compares that all start at the flops, for the long path behind the bit (the
+  // destuffer, the CRC check, the word). Whatever the half steps do to RXPH in between is folded into thresholds:
+  // - First half: the window opens if RXPH >= w1 (o1), then RXPH or RXPH - p decides as it stands.
+  // - Second half after a first-half candidate (an edge before the predicted clock edge, pulled toward 0): the bit
+  //   comes now if the pulled phase plus 128 is 0 or more. rx_pull moves x < 0 to x - (x >> k), which is monotone
+  //   in x, so that is x >= -M with M = 257, 171, 137, 133 for k = 1, 2, 4, 5, and always with RGAIN 0. Its window
+  //   can't open there: the pulled phase is at most 0, and the window points are 256 or more.
+  // - Second half with no edge in the first: RXPH + 128, less p for each window opened, against w1 and 0.
+  // - A first-half edge that is no candidate and no bit is a boundary edge: the window was closed, so the second
+  //   half can open it but has no candidate and no edge, so no bit.
+  // With p at least 512 a cycle has at most one bit, and the code's window points w <= p - 128 keep a second-half
+  // bit out of a cycle whose first half gave one. The code's half steps, run one after the other, give the same bit
+  // and end in every state (a combinational equivalence check, not part of this file).
+  logic               f_o1, f_sr, f_sa1, f_end1, f_op1, f_cd1, f_pos1, f_bit1, f_cand1, f_run2, f_thr, f_bit2a;
+  logic               f_nb, f_o2, f_end2, f_op2, f_cd2, f_pos2, f_bit2b, f_acq;
+  logic signed [18:0] f_r, f_a1, f_dw, f_dwa, f_t0, f_t1;
+  logic [15:0]        f_w1;
+  logic [8:0]         f_m;
+
+  assign f_acq   = rx_g_q[4:2] == 3'd0;                         // RXG <= 3
+  assign f_w1    = (racq & (rgain != 2'd0) & ~rx_g_q[4]) ? ph3w : pq3;
+  assign f_r     = {ph[17], ph};
+  assign f_a1    = f_r - $signed({3'b000, p3});                 // RXPH - p
+  assign f_dw    = f_r - $signed({3'b000, f_w1});               // RXPH - w1
+  assign f_dwa   = f_r - $signed({3'b000, p3}) - $signed({3'b000, f_w1});    // RXPH - p - w1, in one sum
+  assign f_m     = f_acq ? 9'd257 : (rgain == 2'd1) ? 9'd171 : (rgain == 2'd2) ? 9'd137 : 9'd133;
+  assign f_t0    = f_r + $signed({10'd0, f_m});                 // RXPH + M
+  assign f_t1    = f_r - $signed({3'b000, p3}) + $signed({10'd0, f_m});      // RXPH - p + M, in one sum
+  assign f_o1    = ~f_dw[18];
+  assign f_sr    = ~f_r[18];
+  assign f_sa1   = ~f_a1[18];
+  assign f_end1  = f_o1 & rx_open_q;
+  assign f_op1   = rx_open_q | f_o1;
+  assign f_cd1   = ~f_o1 & rx_cand_q;
+  assign f_pos1  = f_o1 ? f_sa1 : f_sr;
+  assign f_bit1  = ~f_end1 & f_op1 & f_pos1 & (e1h | f_cd1);
+  assign f_cand1 = ~f_end1 & f_op1 & e1h & ~f_pos1;
+  assign f_run2  = ~f_end1 & ~(f_bit1 & bit_ends);
+  assign f_thr   = (rgain == 2'd0) | ~(f_o1 ? f_t1[18] : f_t0[18]);
+  assign f_bit2a = f_run2 & f_cand1 & f_thr;
+  assign f_nb    = f_run2 & ~e1h & ~f_bit1;
+  assign f_o2    = f_o1 ? (f_dwa >= -19'sd128) : (f_dw >= -19'sd128);    // RXPH (- p) + 128 >= w1
+  assign f_end2  = f_nb & f_o2 & f_op1;
+  assign f_op2   = f_op1 | f_o2;
+  assign f_cd2   = ~f_o2 & f_cd1;
+  assign f_pos2  = (f_o1 | f_o2) ? (f_a1 >= -19'sd128) : (f_r >= -19'sd128);
+  assign f_bit2b = f_nb & ~f_end2 & f_op2 & f_pos2 & (e2h | f_cd2);
+  assign bit3    = b_run & man3 & (f_bit1 | f_bit2a | f_bit2b);
+  assign endw3   = b_run & man3 & (f_end1 | f_end2);
+  assign blv3    = f_bit1 ? (rdiff ? rx_win_q : lvlf) : rdiff ? (rx_win_q | (f_bit2a & f_cd1)) : lvl2;
+
+  // RXPH, RXOPEN, RXCAND, RXWIN and RXG after the two half steps, with one rx_pull. A cycle's edge is in one half,
+  // so only that half pulls: from the first half's phase if it has the edge, else from the second half's, whose
+  // window opened (or not) on the first half's phase + 128 with no pull. Every phase the code can reach without the
+  // pull is formed from the flops, beside the window compares: RXPH + 128 and + 256, less 0, p or 2p (one window
+  // opening per half step), and the boundary pulls' errors less p/2. So the pull's error is a choice, then the
+  // gain's shift, and what follows the pull (the phase + 128 or + 256, less p if the second half's window opens on
+  // it, and that compare) are sums of three that run side by side. The second half's bit is the fast block's. The
+  // same values as the code's half steps in every state (a combinational equivalence check, not part of this file).
+  logic               s_c1, s_k1, s_b1, s_pl1, s_opa, s_cda, s_wna, s_run2, s_ob, s_o2, s_op2, s_cd2, s_w1h, s_w2h;
+  logic               s_h2, s_c2, s_k2, s_b2, s_pl2, s_tp, s_oa, s_neg2b;
+  logic [4:0]         s_g1, s_gp;
+  logic [15:0]        s_w2;
+  logic signed [18:0] q_p, q_p2, q_r128, q_a128, q_aa128, q_rq, q_aq, q_bh1, q_bh2, q_r256, q_a256, q_aa256;
+  logic signed [18:0] s_r1, s_r1b, s_r2b, s_r2b2, s_x, s_t, s_d, s_sh, s_base, s_f3, s_f1, s_f2, s_fo, s_rn;
+
+  assign q_p     = $signed({3'b000, p3});
+  assign q_p2    = $signed({4'b0000, p3[15:1]});
+  assign q_r128  = f_r + 19'sd128;                                      // RXPH + 128
+  assign q_a128  = f_r - q_p + 19'sd128;                                // RXPH - p + 128
+  assign q_aa128 = f_r - q_p - q_p + 19'sd128;                          // RXPH - 2p + 128
+  assign q_rq    = f_r - $signed({3'b000, pq3}) + 19'sd128;             // RXPH + 128 - (p - p/4)
+  assign q_aq    = f_r - q_p - $signed({3'b000, pq3}) + 19'sd128;       // RXPH - p + 128 - (p - p/4)
+  assign q_bh1   = f_r - q_p2;                                          // RXPH - p/2
+  assign q_bh2   = f_r - q_p2 + 19'sd128;                               // RXPH + 128 - p/2
+  assign q_r256  = f_r + 19'sd256;
+  assign q_a256  = f_r - q_p + 19'sd256;
+  assign q_aa256 = f_r - q_p - q_p + 19'sd256;
+
+  // The first half's decision, before its pull (the fast block's state).
+  assign s_c1   = ~f_end1 & f_op1 & e1h & ~f_pos1;                      // a candidate
+  assign s_k1   = ~f_end1 & f_op1 & f_pos1 & (e1h | f_cd1);             // a bit (f_bit1)
+  assign s_b1   = ~f_end1 & ~f_op1 & e1h;                               // a boundary edge
+  assign s_pl1  = ~f_end1 & e1h;                                        // the first half pulls
+  assign s_r1   = f_o1 ? f_a1 : f_r;
+  assign s_r1b  = f_o1 ? q_a128 : q_r128;                               // the first half's phase + 128
+  assign s_opa  = f_op1 & ~s_k1;
+  assign s_cda  = s_c1 | (~s_k1 & f_cd1);
+  assign s_wna  = s_c1 ? (rx_win_q | f_cd1) : s_k1 ? 1'b0 : s_b1 ? 1'b1 : rx_win_q;
+  assign s_g1   = (s_k1 & ~rx_g_q[4]) ? rx_g_q + 5'd1 : rx_g_q;
+  assign s_run2 = ~f_end1 & ~(s_k1 & bit_ends);
+  // The second half's window. Its point is the first half's unless the first half's bit ended RACQ's wide window.
+  assign s_w1h  = racq & (rgain != 2'd0) & ~rx_g_q[4];
+  assign s_w2h  = racq & (rgain != 2'd0) & ~s_g1[4];
+  assign s_w2   = s_w2h ? ph3w : pq3;
+  assign s_ob   = (s_w1h & ~s_w2h) ? ~(f_o1 ? q_aq[18] : q_rq[18]) : f_o2;   // on the unpulled phase + 128
+  assign s_r2b  = f_o1 ? (s_ob ? q_aa128 : q_a128) : (s_ob ? q_a128 : q_r128);
+  assign s_r2b2 = f_o1 ? (s_ob ? q_aa256 : q_a256) : (s_ob ? q_a256 : q_r256);    // + 128 more
+  assign s_neg2b = s_r2b[18];
+  // The one pull: x, the target (0, or p/2 for a boundary edge), the error, the gain's shift.
+  assign s_tp   = s_pl1 ? ~f_op1 : ~(s_opa | s_ob);
+  assign s_x    = s_pl1 ? s_r1 : s_r2b;
+  assign s_t    = s_tp ? q_p2 : 19'sd0;
+  assign s_d    = s_tp ? (s_pl1 ? q_bh1 : q_bh2) : s_x;
+  assign s_gp   = s_pl1 ? rx_g_q : s_g1;
+  assign s_sh   = (rgain == 2'd0) ? 19'sd0 : (s_gp <= 5'd3) ? (s_d >>> 1) : (rgain == 2'd1) ? (s_d >>> 2) :
+                  (rgain == 2'd2) ? (s_d >>> 4) : (s_d >>> 5);
+  assign s_base = (rgain == 2'd0) ? s_t : s_x;                          // RGAIN 0 pulls all the way
+  assign s_f3   = s_base - s_sh + 19'sd128;                             // pulled + 128
+  assign s_f1   = s_base - s_sh + 19'sd256;                             // pulled + 256
+  assign s_f2   = s_base - s_sh - q_p + 19'sd256;                       // pulled + 256 - p
+  assign s_fo   = s_base - s_sh + 19'sd128 - $signed({3'b000, s_w2});   // pulled + 128 - w2
+  assign s_oa   = ~s_fo[18];                                            // the second half's window, after a pull
+  // The second half.
+  assign s_o2   = s_pl1 ? s_oa : s_ob;
+  assign s_op2  = s_opa | s_o2;
+  assign s_cd2  = ~s_o2 & s_cda;
+  assign s_h2   = s_run2 & ~(s_o2 & s_opa);                             // it decides
+  assign s_k2   = f_bit2a | f_bit2b;                                    // a bit
+  assign s_c2   = s_h2 & s_op2 & e2h & s_neg2b;                         // a candidate (its edge: no first-half pull)
+  assign s_b2   = s_h2 & ~s_op2 & e2h;                                  // a boundary edge
+  assign s_pl2  = s_h2 & e2h;
+  assign s_rn   = ~s_run2 ? (s_pl1 ? s_f3 : s_r1b) : s_pl2 ? s_f3 : s_pl1 ? (s_oa ? s_f2 : s_f1) : s_r2b2;
+  assign r3     = s_rn[17:0];
+  assign op3    = ~s_run2 ? s_opa : (s_op2 & ~s_k2);
+  assign cd3    = ~s_run2 ? s_cda : (s_c2 | (~s_k2 & s_cd2));
+  assign wn3    = ~s_run2 ? s_wna : s_c2 ? (s_wna | s_cd2) : s_k2 ? 1'b0 : s_b2 ? 1'b1 : s_wna;
+  assign g3     = (s_run2 & s_k2 & ~s_g1[4]) ? s_g1 + 5'd1 : s_g1;
+
   // RXIC and the ends of a reception, at most one per cycle.
   logic [15:0] ic_inc, ic_run;
   logic        vio_end, rend_end, end_now;
   logic [2:0]  ef_b;
 
   assign ic_inc   = (rx_ic_q != 16'hFFFF) ? rx_ic_q + 16'd1 : rx_ic_q;
-  assign ic_run   = (clk_hit | (trun & e) | osamp) ? 16'd0 : ic_inc;
+  assign ic_run   = (clk_hit | bit3 | (trun & e) | osamp) ? 16'd0 : ic_inc;
   assign vio_end  = vbit;
-  assign rend_end = b_run & ~endw & ~rcnt_end & ~vio_end & ~eop_hit & (rend != 16'd0) &
+  assign rend_end = b_run & ~endw & ~endw3 & ~rcnt_end & ~vio_end & ~eop_hit & (rend != 16'd0) &
                     (ic_run >= rend);
-  assign end_now  = endw | rcnt_end | rend_end | vio_end | eop_hit;
+  assign end_now  = endw | endw3 | rcnt_end | rend_end | vio_end | eop_hit;
   assign ef_b     = ef0 | {vbit & (bv == rx_rv_q), pvio, end_now & crc_pass};
 
   // rx_deliver(): a full word, or the last word of a reception once the buffer is empty.
@@ -780,8 +967,11 @@ module pe_shift #(
   assign open_b = open1 & ~clk_hit;
   assign cand_b = cand_hit | (cand1 & ~clk_hit);
   assign win_b  = clk_hit ? 1'b0 : (bnd_hit | (cand_hit & cand1)) ? 1'b1 : rx_win_q;
-  assign ph_run = man ? {{8{mph3[16]}}, mph3[16:0]} : tim ? tnxt[24:0] : rx_ph_q;
-  assign ph_beg = (rkind == 2'd1) ? 25'sd256 : rt[24:0];
+  assign ph_run = man ? {{8{mph3[16]}}, mph3[16:0]} : man3 ? {{8{r3[16]}}, r3[16:0]} : tim ? tnxt[24:0] : rx_ph_q;
+  // rx_begin(): the Manchester decoders start at 256; RKIND 3 at 128 when a hunt's start edge falls in the second
+  // half of its cycle (SYNC2F still shows the old level).
+  assign ph_beg = (rkind == 2'd1) ? 25'sd256 : (rkind == 2'd3) ? ((b_hunt & (lvlf != lvl2)) ? 25'sd128 : 25'sd256) :
+                  rt[24:0];
 
   // ============================================================================================
   // Flops.
@@ -839,7 +1029,7 @@ module pe_shift #(
   // The CRC register: the half that CTX names writes it, and the other leaves it alone.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) crc_q <= 32'd0;
-    else        crc_q <= CUT_CRC ? 32'd0 : ctx ? crc_t : crc_r;
+    else        crc_q <= CUT_CRC ? 32'd0 : ctx ? crc_t : crc_e;
   end
 
   // The send half. Its next values already hold step 3 and ABORT.
@@ -868,6 +1058,9 @@ module pe_shift #(
       tx_rv_q   <= 1'b0;
       tx_an_q   <= 6'd0;
       tx_rl_q   <= 3'd0;
+      tx_h_q    <= 1'b0;
+      ola_q     <= 1'b0;
+      olb_q     <= 1'b0;
     end else begin
       tx_arm_q  <= tx_arm_d;
       tx_run_q  <= tx_run_d;
@@ -892,8 +1085,44 @@ module pe_shift #(
       tx_rv_q   <= tx_rv_d;
       tx_an_q   <= tx_an_d;
       tx_rl_q   <= tx_rl_d;
+      tx_h_q    <= tx_h_d;
+      ola_q     <= la_q;      // tx_step(): OLA := LA, every cycle
+      olb_q     <= lb_q;
     end
   end
+
+  // The pads' view of shift outputs A and B, in the two halves of a cycle (section 5.2): V0's A0 = OLA if TXH else
+  // LA in the first half, LA in the second. Flop P moves the pad at the rising edge, flop N moves it at the falling
+  // edge through a latch that is open while the clock is low, and the pad is P XOR the latch. For the next cycle's
+  // levels v1 (first half) and v2 (second), P takes v1 XOR N and N takes P's new value XOR v2, so N changes only
+  // when the halves differ, and the XOR's two inputs never change in the same half cycle. TXH next and OLA next = LA
+  // give v1 = LA next XOR dh, with dh = TXH next AND (LA XOR LA next), and v2 = LA next. At reset P, N and the latch
+  // are 0, so every shift output shows 0 (section 5.2).
+  logic dha, dhb, pa_q, na_q, pb_q, nb_q, na_lat, nb_lat;
+
+  assign dha = tx_h_d & (la_q ^ la_d);
+  assign dhb = tx_h_d & (lb_q ^ lb_d);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      pa_q <= 1'b0;
+      na_q <= 1'b0;
+      pb_q <= 1'b0;
+      nb_q <= 1'b0;
+    end else begin
+      pa_q <= la_d ^ dha ^ na_q;
+      na_q <= na_q ^ dha;
+      pb_q <= lb_d ^ dhb ^ nb_q;
+      nb_q <= nb_q ^ dhb;
+    end
+  end
+
+  // Library latches, open while GATE_N (the clock) is low, cleared by RESET_B.
+  sg13cmos5l_dllrq_1 lat_na (.D(na_q), .GATE_N(clk), .RESET_B(rst_n), .Q(na_lat));
+  sg13cmos5l_dllrq_1 lat_nb (.D(nb_q), .GATE_N(clk), .RESET_B(rst_n), .Q(nb_lat));
+
+  assign pad_a = pa_q ^ na_lat;
+  assign pad_b = pb_q ^ nb_lat;
 
   // The receive half: rx_step() (step 2b), then the flops that step 3 or ABORT also write.
   always_ff @(posedge clk or negedge rst_n) begin
@@ -928,10 +1157,31 @@ module pe_shift #(
       rx_ef_q   <= 3'd0;
       rx_be_q   <= 3'd0;
       rx_pe_q   <= 3'd0;
+      rx_sr8_q  <= 16'h0000;
+      rx_n8_q   <= 5'd0;
+      rx_c8_q   <= 16'h0000;
+      rx_ones_q <= 1'b0;
     end else begin
+      // rx_byte() (section 5.9.7): the copies at the start, which rx_cbegin() takes, and after every 8th data bit;
+      // RXONES clears at a 0 between. The start's own bit, for the Manchester decoders, is bit 1.
+      if (do_begin) begin
+        rx_sr8_q  <= 16'h0000;
+        rx_n8_q   <= 5'd0;
+        if (c8_on) rx_c8_q <= crc_base[31:16];
+        rx_ones_q <= ~dbit | bw;
+      end else if (dbit) begin
+        if (tot1[2:0] == 3'd0) begin
+          rx_sr8_q  <= sr_b;
+          rx_n8_q   <= n_b;
+          if (c8_on) rx_c8_q <= crc_r[31:16];
+          rx_ones_q <= 1'b1;
+        end else if (!bw) begin
+          rx_ones_q <= 1'b0;
+        end
+      end
       if (rx_upd) begin
-        rx_sr_q  <= sr_b;
-        rx_n_q   <= n_b;
+        rx_sr_q  <= eop_rest ? rx_sr8_q : sr_b;
+        rx_n_q   <= eop_rest ? rx_n8_q : n_b;
         rx_tot_q <= tot_b;
         rx_syn_q <= syn_b;
         rx_rl_q  <= rl_b;
@@ -955,6 +1205,12 @@ module pe_shift #(
           rx_open_q <= open_b;
           rx_cand_q <= cand_b;
           rx_win_q  <= win_b;
+        end
+        if (man3) begin
+          rx_g_q    <= g3;
+          rx_open_q <= op3;
+          rx_cand_q <= cd3;
+          rx_win_q  <= wn3;
         end
         rx_ic_q <= ic_run;
         if (samp) rx_last_q <= lvl2;
@@ -1028,8 +1284,10 @@ module pe_shift #(
     endcase
   end
 
-  // Bits the arithmetic forms and nothing reads.
+  // Bits the arithmetic forms and nothing reads. TXH, OLA and OLB are section 5.9.2's names for what P, N and the
+  // latch hold in another form: the pads take them from there, so nothing reads them here.
   logic _unused;
-  assign _unused = &{mph3[17], tnxt[25], 1'b0};
+  assign _unused = &{mph3[17], tnxt[25], r3[17], tx_h_q, ola_q, olb_q, f_t0[17:0], f_t1[17:0], q_rq[17:0],
+                     q_aq[17:0], s_fo[17:0], s_rn[18], 1'b0};
 
 endmodule

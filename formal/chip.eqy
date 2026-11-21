@@ -2,8 +2,8 @@
 # the flow's synthesis output or the final netlist after placement and routing (with its repair buffers, hold
 # cells and clock tree): the same file serves both. run.sh fills in @ROOT@ (this repository), @PDK_ROOT@ and
 # @NETLIST@ (FORMAL_NETLIST). The cells' functions come from the PDK's liberty. The SRAM macro is a black box
-# on both sides, so its inputs must match and its outputs are shared; so are the SRAM's 44 pin buffers, which
-# the RTL instantiates by name (pinbuf_box.v).
+# on both sides, so its inputs must match and its outputs are shared; so are the SRAM's 44 pin buffers and the
+# 40 half-cycle latches, which the RTL instantiates by name (pinbuf_box.v, latch_box.v).
 #
 # EQY matches nets of the same name on both sides (flop outputs and the RTL names the synthesis kept), cuts
 # the two designs at those nets, and proves each piece in between: first by k-induction (ind), and where that
@@ -17,15 +17,23 @@ splitnets on
 
 [gold]
 read_verilog -sv @ROOT@/verif/sram_blackbox.v
-# The RTL instantiates the library's sg13cmos5l_buf_2 for the SRAM's pin buffers (pe_mem.sv); slang needs a
-# module for it, and those 44 cells then become the pin buffer box.
+# The RTL instantiates the library's sg13cmos5l_buf_2 for the SRAM's pin buffers (pe_mem.sv) and its two latch
+# cells for the half cycles (pe_core.sv, pe_shift.sv); slang needs a module for each (buf_bbox.v). The 44 buffers
+# then become the pin buffer box, and the 40 latches the latch boxes.
 read_verilog -sv @ROOT@/formal/buf_bbox.v
 read_slang --top tt_um_sarkar22_pe @ROOT@/src/project.sv @ROOT@/src/pe_pkg.sv @ROOT@/src/pe_decode.sv @ROOT@/src/pe_core.sv @ROOT@/src/pe_thread.sv @ROOT@/src/pe_exec.sv @ROOT@/src/pe_regfile.sv @ROOT@/src/pe_mailbox.sv @ROOT@/src/pe_pins.sv @ROOT@/src/pe_shift.sv @ROOT@/src/pe_mem.sv @ROOT@/src/pe_host.sv @ROOT@/src/pe_spi.sv
 read_verilog -sv @ROOT@/formal/pinbuf_box.v
+read_verilog -sv @ROOT@/formal/latch_box.v
 hierarchy -top tt_um_sarkar22_pe
 select -assert-count 44 t:sg13cmos5l_buf_2
 chtype -set pe_sram_pinbuf t:sg13cmos5l_buf_2
 delete =sg13cmos5l_buf_2
+# The latches: 16 sg13cmos5l_dlhq_1 and 16 sg13cmos5l_dllrq_1 in the falling-edge pairs, 8 sg13cmos5l_dllrq_1
+# behind the units' N flops; each becomes its box, without the gate pin (latch_box.v).
+select -assert-count 16 t:sg13cmos5l_dlhq_1
+select -assert-count 24 t:sg13cmos5l_dllrq_1
+techmap -map @ROOT@/formal/latch_map.v t:sg13cmos5l_dlhq_1 t:sg13cmos5l_dllrq_1
+delete =sg13cmos5l_dlhq_1 =sg13cmos5l_dllrq_1
 proc
 flatten
 # slang joins each port to its connection with a $buf cell; make those plain connections again.
@@ -42,6 +50,7 @@ cd ..
 [gate]
 read_verilog -sv @ROOT@/verif/sram_blackbox.v
 read_verilog -sv @ROOT@/formal/pinbuf_box.v
+read_verilog -sv @ROOT@/formal/latch_box.v
 read_liberty -nooverwrite -ignore_miss_func @PDK_ROOT@/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/lib/sg13cmos5l_stdcell_typ_1p20V_25C.lib
 read_verilog @NETLIST@
 hierarchy -top tt_um_sarkar22_pe
@@ -52,29 +61,29 @@ select -assert-count 44 c:core.mem.*pinbuf*
 chtype -set pe_sram_pinbuf c:core.mem.*pinbuf*
 # The reset-to-1 bits of each unit's window points (pwq_q[7:6], pwh_q[7]; section 8: 192 and 128) are held
 # inverted in reset-to-0 flops that have no name, the library's only kind. Each cell sits in its register's
-# numbering (_49293_ is pwh_q[6], _49294_ this bit, _49295_ pwh_q[8]; _49308_ pwq_q[5], _49311_ pwq_q[8]), and
-# the mux for pw = wide ? pwh_q : pwq_q takes _49294_'s output on A1 and _49310_'s on A0. inv_flops.v puts two
-# inverters after each cell, and the net between them, the RTL's value, gets the RTL's name.
-techmap -map @ROOT@/formal/inv_flops.v c:_49294_ c:_49309_ c:_49310_ c:_49768_ c:_49783_ c:_49784_ c:_50242_ c:_50257_ c:_50258_ c:_50716_ c:_50731_ c:_50732_
+# numbering (_63217_ is pwh_q[6], _63218_ this bit, _63219_ pwh_q[8]; _63232_ pwq_q[5], _63235_ pwq_q[8]; each
+# unit's cells 503 further on), and the mux for pw = wide ? pwh_q : pwq_q takes _63218_'s output on A1 and
+# _63234_'s on A0. inv_flops.v puts two inverters after each cell, and the net between them, the RTL's value,
+# gets the RTL's name.
+techmap -map @ROOT@/formal/inv_flops.v c:_63218_ c:_63233_ c:_63234_ c:_63721_ c:_63736_ c:_63737_ c:_64224_ c:_64239_ c:_64240_ c:_64727_ c:_64742_ c:_64743_
 chtype -map $__pe_dfrbpq_1 sg13cmos5l_dfrbpq_1
-rename _49294_.rtl \core.gen_shift[0].shift.pwh_q[7]
-rename _49309_.rtl \core.gen_shift[0].shift.pwq_q[6]
-rename _49310_.rtl \core.gen_shift[0].shift.pwq_q[7]
-rename _49768_.rtl \core.gen_shift[1].shift.pwh_q[7]
-rename _49783_.rtl \core.gen_shift[1].shift.pwq_q[6]
-rename _49784_.rtl \core.gen_shift[1].shift.pwq_q[7]
-rename _50242_.rtl \core.gen_shift[2].shift.pwh_q[7]
-rename _50257_.rtl \core.gen_shift[2].shift.pwq_q[6]
-rename _50258_.rtl \core.gen_shift[2].shift.pwq_q[7]
-rename _50716_.rtl \core.gen_shift[3].shift.pwh_q[7]
-rename _50731_.rtl \core.gen_shift[3].shift.pwq_q[6]
-rename _50732_.rtl \core.gen_shift[3].shift.pwq_q[7]
+rename _63218_.rtl \core.gen_shift[0].shift.pwh_q[7]
+rename _63233_.rtl \core.gen_shift[0].shift.pwq_q[6]
+rename _63234_.rtl \core.gen_shift[0].shift.pwq_q[7]
+rename _63721_.rtl \core.gen_shift[1].shift.pwh_q[7]
+rename _63736_.rtl \core.gen_shift[1].shift.pwq_q[6]
+rename _63737_.rtl \core.gen_shift[1].shift.pwq_q[7]
+rename _64224_.rtl \core.gen_shift[2].shift.pwh_q[7]
+rename _64239_.rtl \core.gen_shift[2].shift.pwq_q[6]
+rename _64240_.rtl \core.gen_shift[2].shift.pwq_q[7]
+rename _64727_.rtl \core.gen_shift[3].shift.pwh_q[7]
+rename _64742_.rtl \core.gen_shift[3].shift.pwq_q[6]
+rename _64743_.rtl \core.gen_shift[3].shift.pwq_q[7]
 # Pin flop bits the synthesis found constant and removed (its log: "Setting constant 0-bit at position ..."
 # for pins.shsel_q, sel_q, shbyp_q, byp_q, shd_q and out_q; no legal word sets them): a net of each name, tied
 # to 0, stands for the missing flop, so the RTL's flop is compared with 0 in its piece. Only that piece reads
-# them. Bit 15 of each unit's TXMODE was removed the same way (KEEP0), but the host's RDREG reads it in another
-# piece, where EQY would give the RTL a free value for it and the netlist its 0; it is left unmatched, so the
-# host's piece holds the RTL's four flops, and PDR shows they stay 0.
+# them. (A constant that another piece reads must not be matched this way: there EQY would give the RTL a free
+# value for it and the netlist its 0.)
 add -wire \core.pins.shsel_q[6] 1
 add -wire \core.pins.shsel_q[7] 1
 add -wire \core.pins.sel_q[6] 1
@@ -99,6 +108,82 @@ connect -set \core.pins.byp_q[2] 1'0
 connect -set \core.pins.byp_q[3] 1'0
 connect -set \core.pins.shd_q[3] 1'0
 connect -set \core.pins.out_q[3] 1'0
+# RKIND 3 reads RXPH through f_r = {ph[17], ph} (pe_shift.sv), and the synthesis kept that name, not rx_ph_q,
+# on RXPH's flops for bits 0 to 16: the netlist has f_r[0..16] on those flops' outputs and no rx_ph_q[0..16]. In
+# the RTL f_r[k] is a copy of rx_ph_q[k] (f_r[17] and f_r[18] of rx_ph_q[16]). With the flops given the
+# register's name, the two sides match flop to flop, and the RTL's f_r is left unmatched.
+rename \core.gen_shift[0].shift.f_r[0] \core.gen_shift[0].shift.rx_ph_q[0]
+rename \core.gen_shift[0].shift.f_r[1] \core.gen_shift[0].shift.rx_ph_q[1]
+rename \core.gen_shift[0].shift.f_r[2] \core.gen_shift[0].shift.rx_ph_q[2]
+rename \core.gen_shift[0].shift.f_r[3] \core.gen_shift[0].shift.rx_ph_q[3]
+rename \core.gen_shift[0].shift.f_r[4] \core.gen_shift[0].shift.rx_ph_q[4]
+rename \core.gen_shift[0].shift.f_r[5] \core.gen_shift[0].shift.rx_ph_q[5]
+rename \core.gen_shift[0].shift.f_r[6] \core.gen_shift[0].shift.rx_ph_q[6]
+rename \core.gen_shift[0].shift.f_r[7] \core.gen_shift[0].shift.rx_ph_q[7]
+rename \core.gen_shift[0].shift.f_r[8] \core.gen_shift[0].shift.rx_ph_q[8]
+rename \core.gen_shift[0].shift.f_r[9] \core.gen_shift[0].shift.rx_ph_q[9]
+rename \core.gen_shift[0].shift.f_r[10] \core.gen_shift[0].shift.rx_ph_q[10]
+rename \core.gen_shift[0].shift.f_r[11] \core.gen_shift[0].shift.rx_ph_q[11]
+rename \core.gen_shift[0].shift.f_r[12] \core.gen_shift[0].shift.rx_ph_q[12]
+rename \core.gen_shift[0].shift.f_r[13] \core.gen_shift[0].shift.rx_ph_q[13]
+rename \core.gen_shift[0].shift.f_r[14] \core.gen_shift[0].shift.rx_ph_q[14]
+rename \core.gen_shift[0].shift.f_r[15] \core.gen_shift[0].shift.rx_ph_q[15]
+rename \core.gen_shift[0].shift.f_r[16] \core.gen_shift[0].shift.rx_ph_q[16]
+rename \core.gen_shift[1].shift.f_r[0] \core.gen_shift[1].shift.rx_ph_q[0]
+rename \core.gen_shift[1].shift.f_r[1] \core.gen_shift[1].shift.rx_ph_q[1]
+rename \core.gen_shift[1].shift.f_r[2] \core.gen_shift[1].shift.rx_ph_q[2]
+rename \core.gen_shift[1].shift.f_r[3] \core.gen_shift[1].shift.rx_ph_q[3]
+rename \core.gen_shift[1].shift.f_r[4] \core.gen_shift[1].shift.rx_ph_q[4]
+rename \core.gen_shift[1].shift.f_r[5] \core.gen_shift[1].shift.rx_ph_q[5]
+rename \core.gen_shift[1].shift.f_r[6] \core.gen_shift[1].shift.rx_ph_q[6]
+rename \core.gen_shift[1].shift.f_r[7] \core.gen_shift[1].shift.rx_ph_q[7]
+rename \core.gen_shift[1].shift.f_r[8] \core.gen_shift[1].shift.rx_ph_q[8]
+rename \core.gen_shift[1].shift.f_r[9] \core.gen_shift[1].shift.rx_ph_q[9]
+rename \core.gen_shift[1].shift.f_r[10] \core.gen_shift[1].shift.rx_ph_q[10]
+rename \core.gen_shift[1].shift.f_r[11] \core.gen_shift[1].shift.rx_ph_q[11]
+rename \core.gen_shift[1].shift.f_r[12] \core.gen_shift[1].shift.rx_ph_q[12]
+rename \core.gen_shift[1].shift.f_r[13] \core.gen_shift[1].shift.rx_ph_q[13]
+rename \core.gen_shift[1].shift.f_r[14] \core.gen_shift[1].shift.rx_ph_q[14]
+rename \core.gen_shift[1].shift.f_r[15] \core.gen_shift[1].shift.rx_ph_q[15]
+rename \core.gen_shift[1].shift.f_r[16] \core.gen_shift[1].shift.rx_ph_q[16]
+rename \core.gen_shift[2].shift.f_r[0] \core.gen_shift[2].shift.rx_ph_q[0]
+rename \core.gen_shift[2].shift.f_r[1] \core.gen_shift[2].shift.rx_ph_q[1]
+rename \core.gen_shift[2].shift.f_r[2] \core.gen_shift[2].shift.rx_ph_q[2]
+rename \core.gen_shift[2].shift.f_r[3] \core.gen_shift[2].shift.rx_ph_q[3]
+rename \core.gen_shift[2].shift.f_r[4] \core.gen_shift[2].shift.rx_ph_q[4]
+rename \core.gen_shift[2].shift.f_r[5] \core.gen_shift[2].shift.rx_ph_q[5]
+rename \core.gen_shift[2].shift.f_r[6] \core.gen_shift[2].shift.rx_ph_q[6]
+rename \core.gen_shift[2].shift.f_r[7] \core.gen_shift[2].shift.rx_ph_q[7]
+rename \core.gen_shift[2].shift.f_r[8] \core.gen_shift[2].shift.rx_ph_q[8]
+rename \core.gen_shift[2].shift.f_r[9] \core.gen_shift[2].shift.rx_ph_q[9]
+rename \core.gen_shift[2].shift.f_r[10] \core.gen_shift[2].shift.rx_ph_q[10]
+rename \core.gen_shift[2].shift.f_r[11] \core.gen_shift[2].shift.rx_ph_q[11]
+rename \core.gen_shift[2].shift.f_r[12] \core.gen_shift[2].shift.rx_ph_q[12]
+rename \core.gen_shift[2].shift.f_r[13] \core.gen_shift[2].shift.rx_ph_q[13]
+rename \core.gen_shift[2].shift.f_r[14] \core.gen_shift[2].shift.rx_ph_q[14]
+rename \core.gen_shift[2].shift.f_r[15] \core.gen_shift[2].shift.rx_ph_q[15]
+rename \core.gen_shift[2].shift.f_r[16] \core.gen_shift[2].shift.rx_ph_q[16]
+rename \core.gen_shift[3].shift.f_r[0] \core.gen_shift[3].shift.rx_ph_q[0]
+rename \core.gen_shift[3].shift.f_r[1] \core.gen_shift[3].shift.rx_ph_q[1]
+rename \core.gen_shift[3].shift.f_r[2] \core.gen_shift[3].shift.rx_ph_q[2]
+rename \core.gen_shift[3].shift.f_r[3] \core.gen_shift[3].shift.rx_ph_q[3]
+rename \core.gen_shift[3].shift.f_r[4] \core.gen_shift[3].shift.rx_ph_q[4]
+rename \core.gen_shift[3].shift.f_r[5] \core.gen_shift[3].shift.rx_ph_q[5]
+rename \core.gen_shift[3].shift.f_r[6] \core.gen_shift[3].shift.rx_ph_q[6]
+rename \core.gen_shift[3].shift.f_r[7] \core.gen_shift[3].shift.rx_ph_q[7]
+rename \core.gen_shift[3].shift.f_r[8] \core.gen_shift[3].shift.rx_ph_q[8]
+rename \core.gen_shift[3].shift.f_r[9] \core.gen_shift[3].shift.rx_ph_q[9]
+rename \core.gen_shift[3].shift.f_r[10] \core.gen_shift[3].shift.rx_ph_q[10]
+rename \core.gen_shift[3].shift.f_r[11] \core.gen_shift[3].shift.rx_ph_q[11]
+rename \core.gen_shift[3].shift.f_r[12] \core.gen_shift[3].shift.rx_ph_q[12]
+rename \core.gen_shift[3].shift.f_r[13] \core.gen_shift[3].shift.rx_ph_q[13]
+rename \core.gen_shift[3].shift.f_r[14] \core.gen_shift[3].shift.rx_ph_q[14]
+rename \core.gen_shift[3].shift.f_r[15] \core.gen_shift[3].shift.rx_ph_q[15]
+rename \core.gen_shift[3].shift.f_r[16] \core.gen_shift[3].shift.rx_ph_q[16]
+# The latches, by type: the same 40 instances as in the RTL, under the same names (latch_box.v).
+select -assert-count 16 t:sg13cmos5l_dlhq_1
+select -assert-count 24 t:sg13cmos5l_dllrq_1
+techmap -map @ROOT@/formal/latch_map.v t:sg13cmos5l_dlhq_1 t:sg13cmos5l_dllrq_1
 cd ..
 flatten
 # Every name the RTL has is core.* or a port. Flattening names the cells' port wires after the cells
@@ -145,11 +230,13 @@ gold-match core.host.spi.sck_q core.gen_shift[0].shift.sync3[1]
 # The pieces are merged per block. Two names are kept out of unit 0's and the host's merges by the patterns
 # themselves (this EQY's nomerge has no effect): the host's reg_q flops, which the netlist names after unit 0's
 # port rd_reg, go with the host, whose command FSM their logic reads; and the SCK flop, one net with unit 0's
-# sync3[1], stays with unit 0. Either one would join the two pieces into one too large for PDR.
-merge /core\.gen_shift\[0\]\.(?!shift\.rd_reg\[).*/
-merge /core\.gen_shift\[1\]\..*/
-merge /core\.gen_shift\[2\]\..*/
-merge /core\.gen_shift\[3\]\..*/
+# sync3[1], stays with unit 0. Either one would join the two pieces into one too large for PDR. The names of the
+# units' latch boxes (lat_na, lat_nb) are kept out too: they are cells, not nets, and a merge that names a box
+# crashed EQY's partitioning (a segfault in yosys 0.69's eqy_partition).
+merge /core\.gen_shift\[0\]\.(?!shift\.rd_reg\[)(?!shift\.lat_n[ab]$).*/
+merge /core\.gen_shift\[1\]\.(?!shift\.lat_n[ab]$).*/
+merge /core\.gen_shift\[2\]\.(?!shift\.lat_n[ab]$).*/
+merge /core\.gen_shift\[3\]\.(?!shift\.lat_n[ab]$).*/
 merge /core\.gen_thread\[0\]\..*/
 merge /core\.gen_thread\[1\]\..*/
 merge /core\.gen_thread\[2\]\..*/

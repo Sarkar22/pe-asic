@@ -17,7 +17,10 @@ Points, by group:
   every CMODE, SMODE with every SN, TPER, TFRAC and TAIL ranges, line codes, the decoders and their options; every
   change of a half's state (idle, armed, running, tail; idle, armed, hunting, receiving, holding its last word); the
   things a half does (5.9.5 to 5.9.7: underruns, overruns, stuff bits, appends, sync, ends by each cause, the CRC
-  check); and sstop and ABORT in each state of each half;
+  check); and sstop and ABORT in each state of each half; the half cycles (3.1, 5.2): THALF at a start, a move put
+  at the falling edge by each of its causes and one cancelled by sstop or ABORT, and with RKIND 3 an edge, a window
+  opening and a bit in each half, a hunt's start in the second half, RPER 0 or 1 taken as 2; and REOP's byte end
+  (5.9.7): 1 to 6 bits dropped, and each reason it keeps every bit;
 - host: RUN's stop, start and both masks, STEP, SETPC, RDREG and ABORT on a running and on a stopped thread, RDREG of
   each reg8 group, POST and TAKE on a full and an empty word, STATUS with BUSY 0 and 1, memory commands with a free
   memory cycle and with every thread running (lockstep.py counts the last two, since it sets sim.py's BUSY itself
@@ -119,6 +122,9 @@ def points():
         p.append(('unit', 'tx TPER %s' % r))
         p.append(('unit', 'rx timed RPER %s' % r))
         p.append(('unit', 'rx Manchester RPER %s' % r))
+        p.append(('unit', 'rx half-cycle Manchester RPER %s' % r))
+    for x in range(2):
+        p.append(('unit', 'tx THALF %d' % x))
     for x in ('0', 'not 0'):
         p += [('unit', 'tx TFRAC %s' % x), ('unit', 'rx RFRAC %s' % x), ('unit', 'rx REND %s' % x),
               ('unit', 'rx RCNT %s' % x), ('unit', 'rx CSKIP %s' % x)]
@@ -131,6 +137,19 @@ def points():
             p.append(('unit', 'tx TGLA %d TGLB %d' % (a, b)))
     for x in ('own timing', 'outside clock, rising', 'outside clock, falling'):
         p.append(('unit', 'tx %s' % x))
+    for x in ('a symbol', 'the end of a send', 'the end of a tail'):
+        p.append(('unit', 'tx moved at the falling edge: %s' % x))
+    p.append(('unit', 'tx a falling-edge move cancelled by sstop or ABORT'))
+    for h in ('first', 'second'):
+        for x in ('edge', 'window opened', 'bit', 'candidate'):
+            p.append(('unit', 'rx RKIND 3 %s in the %s half' % (x, h)))
+    p += [('unit', 'rx RKIND 3 hunt started in the second half'), ('unit', 'rx RKIND 3 RPER 0 or 1 taken as 2'),
+          ('unit', 'rx RKIND 3 pulse inside one cycle, no edge')]
+    for n in range(1, 7):
+        p.append(('unit', 'rx byte end: %d bit%s dropped' % (n, '' if n == 1 else 's')))
+    for x in ('no bit past the last byte', 'a 0 past the last byte', 'seven bits past the last byte',
+              'a stuff violation'):
+        p.append(('unit', 'rx byte end kept every bit: %s' % x))
     for x in range(2):
         p.append(('unit', 'tx TMSB %d' % x))
     for code in range(4):
@@ -349,6 +368,7 @@ def install(cov):
             hit('unit: tx TPER %s' % per_range(u.TPER))
             if u.TPER:
                 hit('unit: tx TFRAC %s' % ('0' if u.TFRAC == 0 else 'not 0'))
+                hit('unit: tx THALF %d' % u.THALF)
         hit('unit: tx TAIL %s' % ('0' if u.TAIL == 0 else '1' if u.TAIL == 1 else '2..255'))
         hit('unit: tx SYMS %d' % u.SYMS)
         hit('unit: tx TGLA %d TGLB %d' % (u.TGLA, u.TGLB))
@@ -380,15 +400,21 @@ def install(cov):
         if k == 2:
             hit('unit: rx outside clock, %s' % ('falling' if u.RFALL else 'rising'))
         else:
-            hit('unit: rx %s RPER %s' % ('Manchester' if k == 1 else 'timed', per_range(u.RPER)))
+            hit('unit: rx %s RPER %s' % ({0: 'timed', 1: 'Manchester', 3: 'half-cycle Manchester'}[k],
+                                         per_range(u.RPER)))
             if u.RPER:
                 hit('unit: rx RFRAC %s' % ('0' if u.RFRAC == 0 else 'not 0'))
-        if k in (0, 3):
+        if k == 0:
             hit('unit: rx RESYNC %d' % u.RESYNC)
             hit('unit: rx REOP %d' % u.REOP)
             hit('unit: rx timed FIRST %s' % ('0' if u.FIRST == 0 else '1' if u.FIRST == 1 else '2 and up'))
-        if k == 1 and u.RGAIN:
+        if k in (1, 3) and u.RGAIN:
             hit('unit: rx RACQ %d' % u.RACQ)
+        if k == 3:
+            if u.RPER < 2:
+                hit('unit: rx RKIND 3 RPER 0 or 1 taken as 2')
+            if u.RXHUNT and ((c.SYNC2F ^ c.SYNC2) >> u.RPIN) & 1:
+                hit('unit: rx RKIND 3 hunt started in the second half')
     wrap('rx_begin', rx_begin_before)
 
     # sstop and ABORT in each state
@@ -422,7 +448,7 @@ def install(cov):
             hit('unit: rx end by RCNT')
         elif u.REND and u.RXIC >= u.REND:
             hit('unit: rx end by REND')
-        elif u.RXKIND == 1:
+        elif u.RXKIND in (1, 3):
             hit('unit: rx end by the Manchester window')
         elif u.REOP:
             hit('unit: rx end by REOP')
@@ -433,6 +459,77 @@ def install(cov):
     def pull_before(u, r):
         hit('unit: rx phase pulled by an edge')
     wrap('rx_pull', pull_before, static=True)
+
+    # the half cycles: which call of tx_half() set TXH, and the two half steps of RKIND 3
+    caller = {}
+
+    def tx_caller(name):
+        def b(u):
+            caller[id(u)] = name
+        return b
+    wrap('tx_symbol', tx_caller('a symbol'), static=True)
+    wrap('tx_end', tx_caller('the end of a send'), static=True)
+
+    def tx_tail_before(u):
+        caller[id(u)] = 'the end of a tail'
+    wrap('tx_tail', tx_tail_before, static=True)
+
+    def tx_half_after(ctx, out, u):
+        if u.TXH:
+            hit('unit: tx moved at the falling edge: %s' % caller.get(id(u), '?'))
+    wrap('tx_half', None, tx_half_after, static=True)
+
+    def tx_stop_before(u):
+        if u.TXH:
+            hit('unit: tx a falling-edge move cancelled by sstop or ABORT')
+    wrap('tx_stop', tx_stop_before, static=True)
+
+    half_step = {}
+
+    def run_before(c, u):
+        half_step[id(u)] = 0
+        if u.RXKIND == 3 and u.RXRUN:
+            e = ((c.SYNC2 ^ c.SYNC3) >> u.RPIN) & 1
+            f = ((c.SYNC2F ^ c.SYNC3) >> u.RPIN) & 1
+            g = ((c.SYNC2 ^ c.SYNC2F) >> u.RPIN) & 1
+            if not e and f and g:
+                hit('unit: rx RKIND 3 pulse inside one cycle, no edge')
+    wrap('rx_run', run_before)
+
+    def manch_before(c, u, e, v, p, s):
+        if u.RXKIND != 3:
+            return None
+        h = ('first', 'second')[half_step.get(id(u), 0)]
+        half_step[id(u)] = 1
+        w = (p >> 1) if u.RACQ and u.RGAIN != 0 and u.RXG < 16 else (p >> 2)
+        if e:
+            hit('unit: rx RKIND 3 edge in the %s half' % h)
+        if u.RXPH >= p - w:
+            hit('unit: rx RKIND 3 window opened in the %s half' % h)
+        return h, u.RXTOT, u.RXN, u.RXCAND
+    def manch_after(ctx, out, c, u, e, v, p, s):
+        if ctx is None:
+            return
+        h, tot, n, cand = ctx
+        if u.RXTOT != tot or u.RXN != n:
+            hit('unit: rx RKIND 3 bit in the %s half' % h)
+        if u.RXCAND and not cand:
+            hit('unit: rx RKIND 3 candidate in the %s half' % h)
+    wrap('rx_manch', manch_before, manch_after)
+
+    def eop_before(c, u):
+        nb = u.RXTOT & 7
+        if u.RXONES and not u.RXVIO and 1 <= nb <= 6:
+            hit('unit: rx byte end: %d bit%s dropped' % (nb, '' if nb == 1 else 's'))
+        elif nb == 0:
+            hit('unit: rx byte end kept every bit: no bit past the last byte')
+        elif u.RXVIO:
+            hit('unit: rx byte end kept every bit: a stuff violation')
+        elif not u.RXONES:
+            hit('unit: rx byte end kept every bit: a 0 past the last byte')
+        else:
+            hit('unit: rx byte end kept every bit: seven bits past the last byte')
+    wrap('rx_eop', eop_before)
 
     # events
     def events_before(c, t, TB):
@@ -553,10 +650,10 @@ def install(cov):
         return (tx_state(u), rx_state(u), u.TXUR, u.TXSTF, u.TXAN != 0, u.RXFULL, u.RXOVR, u.RXSYN, u.RXEF,
                 u.RXG, u.RXBL, u.TXLW, u.RXRL)
 
-    def cycle_before(c, ui, uio):
+    def cycle_before(c, ui, uio, ui_f=None, uio_f=None):
         return [snap(t.u) for t in c.th]
 
-    def cycle_after(pre, out, c, ui, uio):
+    def cycle_after(pre, out, c, ui, uio, ui_f=None, uio_f=None):
         for t, a in zip(c.th, pre):
             u = t.u
             b = snap(u)

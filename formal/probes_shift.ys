@@ -28,3 +28,5 @@ connect -nomap -nounset -set rxep u.rx_ep_q
 connect -nomap -nounset -set rxfullq u.rx_full_q
 connect -nomap -nounset -set rxvio u.rx_vio_q
 connect -nomap -nounset -set rxseen u.rx_seen_q
+connect -nomap -nounset -set fa u.lat_na.first
+connect -nomap -nounset -set fb u.lat_nb.first

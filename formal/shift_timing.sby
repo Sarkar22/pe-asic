@@ -27,6 +27,7 @@ cd ..
 
 [files]
 ../src/pe_shift.sv
+cells_formal.v
 read_shift.ys
 probes_shift.ys
 shift_timing.sv

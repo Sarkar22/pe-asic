@@ -8,9 +8,15 @@ The script first checks the structure, and stops with an error if any of these f
   - every flop is an asynchronous-load flop ($aldff) with a constant load value, active low;
   - its load comes from rst_n itself (the reset synchroniser) or from the synchronised reset core.rst_n_sync;
   - its value under reset is the value section 8 gives: 0, except the two window points of each shift
-    unit, p - p/4 = 192 and p - p/2 = 128 for p = 256 (section 5.9.6, implementation note).
+    unit, p - p/4 = 192 and p - p/2 = 128 for p = 256 (section 5.9.6, implementation note);
+  - every latch cell (the library's sg13cmos5l_dllrq_1 and sg13cmos5l_dlhq_1, section 5.2's implementation
+    note) is gated by clk itself; every sg13cmos5l_dllrq_1 is cleared by the synchronised reset; and every
+    sg13cmos5l_dlhq_1, which has no reset, drives nothing but the D input of one sg13cmos5l_dllrq_1, so its
+    level (a pad's at the last falling edge) reaches the chip only through a latch that reset clears.
 Then it writes a wrapper that asserts, for every flop, that it holds that value in every cycle of reset and
-in the first cycle after reset ends (cycle 0, section 3.1), and the probes that connect it.
+in the first cycle after reset ends (cycle 0, section 3.1), and for every sg13cmos5l_dllrq_1 that it shows 0
+in every cycle of reset, in either half (cells_formal.v), and in cycle 0 too where its input is a flop; and the
+probes that connect it.
 SPDX-License-Identifier: Apache-2.0
 """
 import json
@@ -106,6 +112,44 @@ def main():
         if rv != spec_value(name):
             errors.append(f"{name}: resets to {rv}, section 8 says {spec_value(name)}")
         flops.append((name, len(q), rv, group))
+    # The latch cells.
+    clk = source(nets["clk"]["bits"])
+    flop_q = set()
+    for cell in mod["cells"].values():
+        if cell["type"] == "$aldff":
+            flop_q.update(source(cell["connections"]["Q"]))
+    readers = {}
+    for cname, cell in mod["cells"].items():
+        for port, bits in cell["connections"].items():
+            if cell.get("port_directions", {}).get(port) == "input":
+                for b in source(bits):
+                    readers.setdefault(b, []).append((cname, cell["type"], port))
+    for port in mod["ports"].values():
+        if port["direction"] == "output":
+            for b in source(port["bits"]):
+                readers.setdefault(b, []).append(("port", "output", ""))
+    latches = []
+    for cname, cell in sorted(mod["cells"].items()):
+        t, c = cell["type"], cell["connections"]
+        if t == "sg13cmos5l_dllrq_1":
+            if source(c["GATE_N"]) != clk:
+                errors.append(f"{cname}: GATE_N is not clk")
+            if source(c["RESET_B"]) != source(rst_core):
+                errors.append(f"{cname}: RESET_B is not core.rst_n_sync")
+            q = tuple(c["Q"])
+            name = by_bits.get(q) or slice_of(q)
+            if name is None:
+                errors.append(f"{cname}: no wire carries exactly its output")
+                continue
+            latches.append((name, all(b in flop_q for b in source(c["D"]))))
+        elif t == "sg13cmos5l_dlhq_1":
+            if source(c["GATE"]) != clk:
+                errors.append(f"{cname}: GATE is not clk")
+            r = [x for b in source(c["Q"]) for x in readers.get(b, [])]
+            if len(r) != 1 or r[0][1:] != ("sg13cmos5l_dllrq_1", "D"):
+                errors.append(f"{cname}: its output reaches {r}, not just one sg13cmos5l_dllrq_1's D")
+        elif "latch" in t or t.startswith("sg13cmos5l_dl"):
+            errors.append(f"{cname}: latch cell {t} the checks don't know")
     if errors:
         print("\n".join(errors))
         sys.exit(1)
@@ -115,6 +159,8 @@ def main():
           f" * {len(flops)} flops, {nbits} bits. Section 8: reset is asynchronous on every flop, and after it every",
           " * flop holds its reset value. The checks: in every cycle of reset, and in cycle 0, the first cycle after",
           " * the synchronised reset ends (sections 3.1 and 9.1), each flop holds the value section 8 gives.",
+          f" * {len(latches)} latches open while the clock is low (section 5.2, implementation note) show 0 in every cycle",
+          " * of reset, in either half; the ones behind a flop (each unit's N) in cycle 0 too.",
           " * SPDX-License-Identifier: Apache-2.0",
           " */", "", "`default_nettype none", "",
           "module reset_flops (", "    input wire       clk,", "    input wire       rst_n,", "    input wire       ena,",
@@ -128,6 +174,9 @@ def main():
     for i, (name, w, rv, group) in enumerate(flops):
         sv.append(f"  wire [{w - 1}:0] f{i};  // {name}")
         probes.append(f"connect -nomap -nounset -set f{i} dut.{name}")
+    for i, (name, _) in enumerate(latches):
+        sv.append(f"  wire l{i};  // {name}, a sg13cmos5l_dllrq_1's output")
+        probes.append(f"connect -nomap -nounset -set l{i} dut.{name}")
     sv += ["", "  always @* if ($initstate) assume (!rst_n);", "",
            "  reg p_rst_ok = 1'b1;", "  always @(posedge clk) p_rst_ok <= rst_ok;", "",
            "  wire cycle0 = !$initstate && !p_rst_ok && rst_ok;", "",
@@ -135,6 +184,9 @@ def main():
     for i, (name, w, rv, group) in enumerate(flops):
         cond = "!rst_n" if group == "pad" else "(!rst_ok || cycle0)"
         sv.append(f"    if ({cond}) assert (f{i} == {w}'d{rv});")
+    for i, (name, from_flop) in enumerate(latches):
+        cond = "(!rst_ok || cycle0)" if from_flop else "!rst_ok"
+        sv.append(f"    if ({cond}) assert (!l{i});")
     sv += ["  end", "",
            "  // Covers: reset ends, and in cycle 0 the pads show section 8: every uio pad undriven, every uo pin low.",
            "  always @* begin",
@@ -147,7 +199,8 @@ def main():
            "  end", "", "endmodule", "", "`default_nettype wire", ""]
     open(f"{out}/reset_flops.sv", "w").write("\n".join(sv))
     open(f"{out}/probes_reset.ys", "w").write("\n".join(probes) + "\n")
-    print(f"{len(flops)} flops, {nbits} bits: every flop resets asynchronously to the value of section 8")
+    print(f"{len(flops)} flops, {nbits} bits: every flop resets asynchronously to the value of section 8; "
+          f"{len(latches)} latches cleared by the synchronised reset, {sum(f for _, f in latches)} of them behind a flop")
 
 
 main()

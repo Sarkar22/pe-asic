@@ -37,7 +37,7 @@ cd ..
 ../src/pe_mem.sv
 ../src/pe_host.sv
 ../src/pe_spi.sv
-../verif/cells_rtl.v
+cells_formal.v
 sram_free.v
 read_chip.ys
 probes_pins.ys

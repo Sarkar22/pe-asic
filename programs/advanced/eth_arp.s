@@ -18,9 +18,11 @@
 ;   (10) frames dropped while both buffers were in use. Every frame with an SFD lands in exactly one.
 ;
 ; R: every frame. 802.3 Manchester has a rising mid-bit edge for a 1 on the pair (7.3.1.1, 14.2.1.1), so a falling
-;   one on RO: the decoder (RKIND 1, RPER 5, RACQ and RGAIN 3, section 5.9.6) hunts for RO falling, the first
+;   one on RO: the decoder (RKIND 3, RPER 5, RACQ and RGAIN 3, section 5.9.6) hunts for RO falling, the first
 ;   preamble bit's mid-bit edge, RINV makes the level after each clock edge the bit, and the reception ends at the
-;   first bit with no clock edge, inside TP_IDL (14.3.1.3.3). Sync is the last preamble octet and the SFD, 0xD555
+;   first bit with no clock edge, inside TP_IDL (14.3.1.3.3). RKIND 3 times every edge to the half cycle, 10 ns,
+;   with the falling-edge sample (section 3.1), which leaves 13 ns between the latest bit-boundary edge and the
+;   earliest clock edge at 802.3's +/-13.5 ns of jitter (14.3.1.3.1), less the clock's duty error (section 7.3). Sync is the last preamble octet and the SFD, 0xD555
 ;   (3.2.2, 5.9.6), so 8 preamble bits are enough. A link pulse or an FLP pulse starts a reception that finds no
 ;   sync and gives no word. The receive half's CRC-32 covers DA to FCS and checks the residue (5.9.7). Full words
 ;   go into the next free buffer, at most BUFW of them; the rest of a longer frame is taken unstored. A frame is
@@ -39,8 +41,9 @@
 ;   (5.9.5) holds DE high for TAIL = 5 cycles with DI already high (IDLEA 1), so only DE moves and the transceiver
 ;   never shows the old DI (FN6307: tZH is shorter than tDD). A frame is 4 preamble words of no kind, then the frame
 ;   words of kind crc, the last one fcs and last: the unit appends the FCS, x^31 first (5.9.7, 3.2.8), and its tail
-;   of 15 cycles with DI and DE high is TP_IDL (14.3.1.2.1). Half bits of 2 and 3 cycles (TPER 2, TFRAC 128) make
-;   exactly 5 cycles per bit, 10 Mb/s from a 50 MHz clock (5.9.5, 7.3.2). Two words wait before the start commit
+;   of 15 cycles with DI and DE high is TP_IDL (14.3.1.2.1). TPER 2 with TFRAC 128 and THALF puts every half bit
+;   on the half-cycle grid, exactly 2.5 cycles, 50 ns, so 10 Mb/s from a 50 MHz clock (5.9.5, 7.3.2) with no
+;   deterministic jitter at a 50% clock; a duty error of d ns puts each edge d/2 ns off the grid (section 7.3). Two words wait before the start commit
 ;   and the feed loop takes 4 slots a word against 20 (5.9.4), so a send never underruns. The next pulse is due 12
 ;   wraps of TB after a pulse or a frame, 14.4 to 15.7 ms, inside 16 +/- 8 ms (14.2.1.1); T samples TB at least
 ;   every 7,000 cycles (its longest work, a reply's checks and send), far inside a wrap of 65,536, so it misses
@@ -91,8 +94,8 @@
         .org  BUF1 + BUFW + 1
 ; ------------------------------------------------------------------------------------------------- R: receive
 rx:     sstop txrx
-        li    R0, 0x0029 | (RON << 8)
-        scfg  R0, RXMODE     ; Manchester decoder, RINV, hunt for RO falling, LSB first
+        li    R0, 0x002B | (RON << 8)
+        scfg  R0, RXMODE     ; Manchester decoder on half cycles, RINV, hunt for RO falling, LSB first
         ldi   R0, 5
         scfg  R0, RXPER      ; 5 cycles per bit
         li    R0, RXOPTV
@@ -188,8 +191,8 @@ rcnt:   ld    R0, R1
         goto  rframe
 ; ------------------------------------------------------------------------------------------------- T: send
 tx:     sstop txrx
-        li    R0, 0x01A1
-        scfg  R0, TXMODE     ; 2 symbols per bit, LSB first; idle A 1, B 0; tail A 1, B 1
+        li    R0, 0x81A1
+        scfg  R0, TXMODE     ; 2 symbols per bit, LSB first, THALF; idle A 1, B 0; tail A 1, B 1
         li    R0, 0x0F01
         scfg  R0, TXMAP      ; A: 1 - b, then b (802.3: a 1 is low then high). B: 1 throughout
         ldi   R0, 2

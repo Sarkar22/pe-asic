@@ -1,0 +1,22 @@
+# The probes of pads.sv for the two halves of a cycle: each unit's TXH, OLA and OLB, and the half each of its
+# two output latches shows (cells_formal.v), after the wrapper and the chip are flattened. "dut" is the chip.
+connect -nomap -nounset -set txh[0] dut.core.gen_shift[0].shift.tx_h_q
+connect -nomap -nounset -set txh[1] dut.core.gen_shift[1].shift.tx_h_q
+connect -nomap -nounset -set txh[2] dut.core.gen_shift[2].shift.tx_h_q
+connect -nomap -nounset -set txh[3] dut.core.gen_shift[3].shift.tx_h_q
+connect -nomap -nounset -set ola[0] dut.core.gen_shift[0].shift.ola_q
+connect -nomap -nounset -set ola[1] dut.core.gen_shift[1].shift.ola_q
+connect -nomap -nounset -set ola[2] dut.core.gen_shift[2].shift.ola_q
+connect -nomap -nounset -set ola[3] dut.core.gen_shift[3].shift.ola_q
+connect -nomap -nounset -set olb[0] dut.core.gen_shift[0].shift.olb_q
+connect -nomap -nounset -set olb[1] dut.core.gen_shift[1].shift.olb_q
+connect -nomap -nounset -set olb[2] dut.core.gen_shift[2].shift.olb_q
+connect -nomap -nounset -set olb[3] dut.core.gen_shift[3].shift.olb_q
+connect -nomap -nounset -set fa[0] dut.core.gen_shift[0].shift.lat_na.first
+connect -nomap -nounset -set fa[1] dut.core.gen_shift[1].shift.lat_na.first
+connect -nomap -nounset -set fa[2] dut.core.gen_shift[2].shift.lat_na.first
+connect -nomap -nounset -set fa[3] dut.core.gen_shift[3].shift.lat_na.first
+connect -nomap -nounset -set fb[0] dut.core.gen_shift[0].shift.lat_nb.first
+connect -nomap -nounset -set fb[1] dut.core.gen_shift[1].shift.lat_nb.first
+connect -nomap -nounset -set fb[2] dut.core.gen_shift[2].shift.lat_nb.first
+connect -nomap -nounset -set fb[3] dut.core.gen_shift[3].shift.lat_nb.first

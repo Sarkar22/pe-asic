@@ -35,7 +35,9 @@ module pe_pins
     input  logic        smap,       // shadow_sel(pin, smap_l)
     input  logic [1:0]  smap_l,
     output logic        shd_pin,    // shadow value of pin
-    // The shift outputs A and B of each thread's unit.
+    // The shift outputs A and B of each thread's unit, as the pads show them: A0 and B0 in the first
+    // half of a cycle, LA and LB in the second (section 5.2, two halves). They move at the falling
+    // edge only when THALF put a move there, so every pad equation below holds in both halves.
     input  logic [3:0]  la,
     input  logic [3:0]  lb,
     // The host.

@@ -8,7 +8,7 @@ import zlib
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, FallingEdge, Timer
+from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer
 from cocotb.utils import get_sim_time
 
 CS, SCK, MOSI = 0, 1, 2     # bits of ui_in
@@ -126,7 +126,9 @@ def pin(dut, n):
 
 
 class Host:
-    """The host at the pads: SPI mode 0, MSB first. Inputs change on the falling clock edge."""
+    """The host at the pads: SPI mode 0, MSB first. Inputs change, and outputs are read, at tb.v's tick, 5 ns after
+    each rising clock edge: inside the first half of the cycle, never at an edge, since both clock edges sample the
+    input pads (section 3.1). Such an input holds one level for the whole cycle: both samples of that cycle see it."""
 
     def __init__(self, dut):
         self.dut = dut
@@ -138,7 +140,7 @@ class Host:
         self.dut.ui_in.value = (self.other & 0xF8) | self.link
 
     async def wait(self, cycles):
-        await ClockCycles(self.dut.clk, cycles, rising=False)
+        await ClockCycles(self.dut.tick, cycles, rising=False)
 
     async def shift(self, data, cut=None):
         """Sends data, or only its first `cut` bits. Returns the whole bytes read back."""
@@ -160,7 +162,7 @@ class Host:
         return reply
 
     async def xfer(self, data, cut=None):
-        await FallingEdge(self.dut.clk)
+        await FallingEdge(self.dut.tick)
         self.drive(0, 0, 0)
         await self.wait(HALF)
         reply = await self.shift(data, cut)
@@ -208,16 +210,16 @@ class Host:
 
 
 async def start(dut):
-    """Clock, reset and an idle link."""
+    """Clock, reset and an idle link. rst_n moves at tb.v's tick, like every other input."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     host = Host(dut)
     dut.ena.value = 1
     dut.uio_in.value = 0
     host.drive(1, 0, 0)
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    await ClockCycles(dut.tick, 10, rising=False)
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 8)
+    await ClockCycles(dut.tick, 8, rising=False)
     return host
 
 
@@ -232,11 +234,11 @@ async def receive(dut, bit, limit=4000):
     for _ in range(limit):
         if not pin(dut, 0):
             break
-        await FallingEdge(dut.clk)
+        await FallingEdge(dut.tick)
     assert not pin(dut, 0), f"no start bit within {limit} cycles"
     levels = [0]
     for _ in range(10 * bit - 1):
-        await FallingEdge(dut.clk)
+        await FallingEdge(dut.tick)
         levels.append(pin(dut, 0))
     for k in range(1, len(levels)):
         if levels[k] != levels[k - 1]:
@@ -262,7 +264,7 @@ async def test_caps(dut):
 @cocotb.test()
 async def test_miso_moves_three_cycles_after_sck(dut):
     host = await start(dut)
-    await FallingEdge(dut.clk)
+    await FallingEdge(dut.tick)
     host.drive(0, 0, 0)
     await host.wait(HALF)
     await host.shift([0x00])            # CAPS: the first reply byte is 0x01
@@ -274,7 +276,7 @@ async def test_miso_moves_three_cycles_after_sck(dut):
         host.drive(0, 1, 0)             # SCK rises at the pad, seen by the next rising clock edge
         seen = []
         for _ in range(HALF):
-            await FallingEdge(dut.clk)
+            await FallingEdge(dut.tick)
             seen.append(pin(dut, MISO))
         changes.append((before, seen))
     host.drive(0, 0, 0)                 # SCK falls, and CS rises only after it (9.1)
@@ -428,7 +430,7 @@ async def test_transaction_rules(dut):
     assert (await host.status())[0] >> 4 == 0, "an unknown code ignores the rest of the transaction"
 
     # A rising CS discards a partial byte.
-    await FallingEdge(dut.clk)
+    await FallingEdge(dut.tick)
     host.drive(0, 0, 0)
     await host.wait(HALF)
     for i in range(5):
@@ -563,7 +565,7 @@ async def test_reset_in_mid_run(dut):
 
     # Reset partway into a byte, with CS low and SCK low, as 9.1 asks while rst_n is low. CS stays low through the
     # reset and after it.
-    await FallingEdge(dut.clk)
+    await FallingEdge(dut.tick)
     host.drive(0, 0, 0)
     await host.wait(HALF)
     for _ in range(3):
@@ -574,9 +576,9 @@ async def test_reset_in_mid_run(dut):
     host.drive(0, 0, 0)
     await host.wait(HALF)
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 3, rising=False)
+    await ClockCycles(dut.tick, 3, rising=False)
     assert int(dut.uo_out.value) == 0 and int(dut.uio_oe.value) == 0, "outputs clear in reset"
-    await ClockCycles(dut.clk, 3, rising=False)
+    await ClockCycles(dut.tick, 3, rising=False)
     dut.rst_n.value = 1
     host.other = 0
     dut.uio_in.value = 0
@@ -1193,8 +1195,8 @@ start:  sstop txrx
 spin:   goto  spin
 """
 
-# Every slot written with a value that has bits in reserved places, then one word with its CRC-16 appended, which
-# leaves the CRC register at its initial value: the top 16 bits all ones. Then halt.
+# Every slot written, TXMODE with its top bit (THALF) set, then one word with its CRC-16 appended, which leaves the
+# CRC register at its initial value: the top 16 bits all ones. Then halt.
 UNIT_SLOTS = (0x8061, 0x0401, 0x0003, 0x1200, 0xA5C3, 0x1234, 0x0005, 0x00C8, 0x4010, 0x8000, 0x0C55, 0x8005,
               0x0F0F, 0x800D, 0xF0F0, 0x02AF)
 SLOT_NAMES = ('TXMODE', 'TXMAP', 'TXPER', 'TXTAIL', 'RXMODE', 'RXPER', 'RXFIRST', 'RXEND', 'RXCNT', 'RXSYNC', 'RXOPT',
@@ -1263,22 +1265,30 @@ async def post_wait(host, n, value, limit=200):
 
 class Board:
     """The uio pads as on the demo board: a pin the chip drives reads its own drive (section 5.2), one it doesn't reads
-    1 through a pull-up. Records every pad, uo in bits 7:0 and io in bits 15:8, once per cycle. uo3 is MISO, the host
-    link's, and records as 0: after an RDMEM's last word it shows the word after it, which may never have been written."""
+    1 through a pull-up, in both halves of every cycle, so the falling-edge sample sees a pad's first-half level and
+    the rising-edge sample its second-half level (section 3.1). Records every pad, uo in bits 7:0 and io in bits 15:8,
+    once per cycle, in its first half. uo3 is MISO, the host link's, and records as 0: after an RDMEM's last word it
+    shows the word after it, which may never have been written."""
 
     def __init__(self, dut):
         self.dut = dut
         self.levels = []
 
+    def loop(self):
+        en = int(self.dut.uio_oe.value)
+        io = (int(self.dut.uio_out.value) & en) | (~en & 0xFF)
+        self.dut.uio_in.value = io
+        return io
+
     async def run(self):
         while True:
-            await FallingEdge(self.dut.clk)
-            en = int(self.dut.uio_oe.value)
-            io = (int(self.dut.uio_out.value) & en) | (~en & 0xFF)
-            self.dut.uio_in.value = io
+            await FallingEdge(self.dut.tick)            # the first half
+            io = self.loop()
             uo = str(self.dut.uo_out.value)[::-1]        # bit 0 first
             assert all(c in '01' for i, c in enumerate(uo) if i != MISO), f"uo_out {uo[::-1]}"
             self.levels.append(sum(1 << i for i, c in enumerate(uo) if c == '1' and i != MISO) | io << 8)
+            await RisingEdge(self.dut.tick)             # the second half
+            self.loop()
 
     def pin(self, p, c):
         return (self.levels[c] >> p) & 1
@@ -1491,14 +1501,14 @@ async def test_unit_abort(dut):
     assert (int(dut.uio_oe.value) & 1) == 1, "io0 driven"
     levels = set()
     for _ in range(400):
-        await FallingEdge(dut.clk)
+        await FallingEdge(dut.tick)
         levels.add((int(dut.uio_out.value) & 1, pin(dut, 1)))
     assert levels == {(0, 0), (1, 1)}, f"io0 and uo1 both follow output A through the send: {levels}"
     await host.abort()
     assert int(dut.uio_oe.value) == 0, "ABORT releases io0"
     assert pin(dut, 1) == 1, "uo1 stays on output A, at its idle level"
     for _ in range(200):
-        await FallingEdge(dut.clk)
+        await FallingEdge(dut.tick)
         assert pin(dut, 1) == 1, "the send stopped"
     assert ((await host.rdreg(0, 12)) & 0x2020) == 0x2000, "the send half is idle, LA 1"
     await host.setpc(0, img.labels['after'])
@@ -1583,8 +1593,9 @@ async def test_unit_world_stall(dut):
 
 @cocotb.test()
 async def test_unit_rdreg(dut):
-    """9.2: RDREG 16 + k is slot k without its reserved bits, 12 the status word with nothing cleared, 13 and 14 the
-    CRC register's halves, 15 RXPE, and 32 up read 0. A unit's registers read 0 after reset."""
+    """9.2: RDREG 16 + k is slot k, every bit of it (5.9.3: no slot has a reserved bit, TXMODE's bit 15 is THALF), 12
+    the status word with nothing cleared, 13 and 14 the CRC register's halves, 15 RXPE, and 32 up read 0. A unit's
+    registers read 0 after reset."""
     host = await start(dut)
     for t in range(THREADS):
         for reg in (12, 13, 14, 15, 16, 21, 31):
@@ -1595,9 +1606,8 @@ async def test_unit_rdreg(dut):
     await host.run(0, 1 << 2)
     await host.wait(400)
     assert (await host.status())[0] >> 4 == 0, "halted after the send"
-    keep = [0x7FFF] + [0xFFFF] * 15
     for k, v in enumerate(UNIT_SLOTS):
-        assert await host.rdreg(2, 16 + k) == v & keep[k], f"slot {k}"
+        assert await host.rdreg(2, 16 + k) == v, f"slot {k}"
     status = await host.rdreg(2, 12)
     assert status == 0x6000, f"idle, nothing sticky, LA and LB at their idle levels 1: {status:#06x}"
     assert (await host.rdreg(2, 13), await host.rdreg(2, 14)) == (0x0000, 0xFFFF), "CRC-16 at its initial value"
@@ -1625,8 +1635,8 @@ PROGRAMS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'p
 
 class Line:
     """Drives ui4 with 8N1 frames, LSB first, on an exact grid of cycles, and records once per cycle, 1 ns after the
-    falling edge where the inputs change, ui4, uo4 and the lane's switch: what the pad equation of 5.2 shows in that
-    cycle. Cycles count from the line's start."""
+    tick where the inputs change, ui4, uo4 and the lane's switch: what the pad equation of 5.2 shows in that cycle.
+    Cycles count from the line's start."""
 
     def __init__(self, dut, host, byp):
         self.dut, self.host, self.byp = dut, host, byp
@@ -1644,7 +1654,7 @@ class Line:
     async def run(self):
         level, i = 1, 0
         while True:
-            await FallingEdge(self.dut.clk)
+            await FallingEdge(self.dut.tick)
             while i < len(self.sched) and self.sched[i][0] <= self.c:
                 level = self.sched[i][1]
                 i += 1
@@ -1657,7 +1667,7 @@ class Line:
 
     async def until(self, c):
         while self.c < c:
-            await FallingEdge(self.dut.clk)
+            await FallingEdge(self.dut.tick)
 
 
 @cocotb.test()
@@ -1717,49 +1727,74 @@ async def test_bypass_override(dut):
 
 class EthPartner:
     """The other end of a 10BASE-T link, at the pins. Drives ui4 with RO as an RS-485 receiver gives it from the
-    partner's pair (programs/bench/frontend.py, FN6307 typical delays), sampled `phase` ns after each clock edge,
-    and records uo4 (DI) and uo5 (DE) once per cycle, 1 ns after the falling edge where the inputs change. Times
-    count from the partner's start, 20 ns a cycle."""
+    partner's pair (programs/bench/frontend.py, FN6307 typical delays), to the half cycle (section 3.1): RO's level
+    `phase` ns after each rising edge's time goes to the rising-edge sample, and its level half a cycle earlier to the
+    falling-edge sample, which RKIND 3 reads (5.9.6). Each is driven 5 ns into the half cycle before its edge, at
+    tb.v's tick. Records uo4 (DI) and uo5 (DE) in both halves of every cycle, 1 ns after each tick: half cycle 2c is
+    the first half of cycle c, from its rising edge, and 2c + 1 the second, from its falling edge, where THALF moves
+    a pad (5.9.5). Times count from the partner's start, 20 ns a cycle."""
 
     def __init__(self, dut, host, phase=7.0):
         self.dut, self.host, self.phase = dut, host, phase
-        self.c, self.sched, self.rec = 0, [], []
+        self.c, self.sched, self.sched_f, self.rec = 0, [], [], []
 
     def drive(self, ro):
-        """RO changes (ns from the partner's start, level), all later than now."""
-        self.sched = sorted(self.sched + [(int(-(-(t - self.phase) // 20)), lv) for t, lv in ro])
+        """RO changes (ns from the partner's start, level), all later than now. Cycle c's rising-edge sample is RO at
+        c * 20 + phase, and its falling-edge sample RO at c * 20 + phase - 10, as programs/bench/eth.py has it."""
+        def cycles(at):
+            return [(int(-(-(t - at) // 20)), lv) for t, lv in ro]
+        self.sched = sorted(self.sched + cycles(self.phase))
+        self.sched_f = sorted(self.sched_f + cycles(self.phase - 10.0))
+
+    def put(self, level):
+        self.host.other = (self.host.other & ~0x10) | level << 4
+        self.dut.ui_in.value = (self.host.other & 0xF8) | self.host.link
+
+    def look(self, h, last):
+        uo = str(self.dut.uo_out.value)[::-1]        # bit 0 first; MISO, bit 3, is not read
+        pads = int(uo[4]) << 4 | int(uo[5]) << 5
+        if pads != last:
+            self.rec.append((h, pads))
+        return pads
 
     async def run(self):
-        level, i, last = 1, 0, None
+        level, level_f, i, j, last = 1, 1, 0, 0, None
         while True:
-            await FallingEdge(self.dut.clk)
+            await FallingEdge(self.dut.tick)        # the first half of cycle c: the falling-edge sample's level
+            while j < len(self.sched_f) and self.sched_f[j][0] <= self.c:
+                level_f = self.sched_f[j][1]
+                j += 1
+            self.put(level_f)
+            await Timer(1, unit="ns")
+            last = self.look(2 * self.c, last)
+            await RisingEdge(self.dut.tick)         # the second half: the rising-edge sample's level
             while i < len(self.sched) and self.sched[i][0] <= self.c:
                 level = self.sched[i][1]
                 i += 1
-            self.host.other = (self.host.other & ~0x10) | level << 4
-            self.dut.ui_in.value = (self.host.other & 0xF8) | self.host.link
+            self.put(level)
             await Timer(1, unit="ns")
-            uo = str(self.dut.uo_out.value)[::-1]        # bit 0 first; MISO, bit 3, is not read
-            pads = int(uo[4]) << 4 | int(uo[5]) << 5
-            if pads != last:
-                self.rec.append((self.c, pads))
-                last = pads
+            last = self.look(2 * self.c + 1, last)
             self.c += 1
 
     async def until(self, c):
         while self.c < c:
-            await FallingEdge(self.dut.clk)
+            await FallingEdge(self.dut.tick)
 
 
 @cocotb.test()
 async def test_eth_arp(dut):
-    """5.9 end to end, through programs/advanced/eth_arp.s on threads 0 and 1: the host loads the program and posts
-    the MAC and IP; a partner sends an ARP request, an ICMP echo request and an ARP request with an FCS error, built
-    from IEEE 802.3 and RFCs 826 and 792 (programs/bench/eth_check_test.py), through the transceiver model to ui4.
-    The record of uo4 (DI) and uo5 (DE), turned back into the transmit pair by the same model, must pass every check
-    of programs/bench/eth_check.py: a link pulse at start, an ARP reply and an echo reply field by field, the
-    Manchester code, bit rate, preamble, FCS, TP_IDL and the gap before each frame, and no reply to the bad frame.
-    The program's counters, read with RDMEM, must show 2 frames kept and 1 dropped."""
+    """5.9 end to end on half cycles, through programs/advanced/eth_arp.s on threads 0 and 1, whose units receive with
+    RKIND 3 (edges timed to the half cycle, 5.9.6) and send with THALF (half bits of exactly 2.5 cycles, 5.9.5): the
+    host loads the program and posts the MAC and IP; a partner sends an ARP request, an ICMP echo request and an ARP
+    request with an FCS error, built from IEEE 802.3 and RFCs 826 and 792 (programs/bench/eth_check_test.py), every
+    transition moved by a random amount up to 802.3's +/-13.5 ns of zero-crossing jitter (14.3.1.3.1), through the
+    transceiver model to ui4, at both clock edges. The record of uo4 (DI) and uo5 (DE) in both halves of every cycle,
+    turned back into the transmit pair by the same model, must pass every check of programs/bench/eth_check.py: a
+    link pulse at start, an ARP reply and an echo reply field by field, the Manchester code, bit rate, preamble, FCS,
+    TP_IDL and the gap before each frame, and no reply to the bad frame; and every transmitted edge must lie within
+    the transceiver's own skew of the grid of exact 50 ns half bits (tSKEW/2 + 0.05 ns), so the chip adds no edge
+    jitter at a 50% clock (7.5.2.1, section 7.3). The program's counters, read with RDMEM, must show 2 frames kept and
+    1 dropped."""
     sys.path.insert(0, os.path.join(PROGRAMS_DIR, 'bench'))
     sys.dont_write_bytecode = True      # leave no cache in programs/
     import eth_check
@@ -1782,28 +1817,39 @@ async def test_eth_arp(dut):
     fe = frontend.Rs485Eth('typ')
     t = (partner.c + 200) * 20.0
     rx = []
+    rng = random.Random(14)
     data = bytes((7 * i + 1) & 255 for i in range(56))
     for f in (G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, G.arp(1, G.PEER_MAC, G.PEER_IP, bytes(6), G.IP)),
               G.frame(G.MAC, G.PEER_MAC, 0x0800, G.echo(8, G.PEER_IP, G.IP, 0x4321, 9, data)),
               G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, G.arp(1, G.PEER_MAC, G.PEER_IP, bytes(6), G.IP),
                       bad_fcs=True)):
-        line, end = G.manchester(G.preamble() + f, t)
+        bits = G.preamble() + f
+        jitter = {h: rng.uniform(-13.5, 13.5) for h in range(2 * len(bits))}
+        line, end = G.manchester(bits, t, jitter=jitter)
         rx += line
         t = end + 150e3
     partner.drive(fe.ro(G.merge(rx)))
     await partner.until(int(t / 20))
-    di = [(c * 20.0, (v >> 4) & 1) for c, v in partner.rec]
-    de = [(c * 20.0, (v >> 5) & 1) for c, v in partner.rec]
-    di = [x for k, x in enumerate(di) if k == 0 or x[1] != di[k - 1][1]]
-    de = [x for k, x in enumerate(de) if k == 0 or x[1] != de[k - 1][1]]
+
+    def changes(bit):
+        out = [(h * 10.0, (v >> bit) & 1) for h, v in partner.rec]
+        return [x for k, x in enumerate(out) if k == 0 or x[1] != out[k - 1][1]]
+    di, de = changes(4), changes(5)
+    moves = sum(1 for h, _ in partner.rec if h & 1)
     tx = fe.tx_line(di, de, di0=0, de0=0)
     rep = eth_check.check(tx, G.merge(rx), mac=G.MAC, ip=G.IP, t_start=0.0, t_end=t)
     assert rep.ok, f"eth_check: {rep.failed()[:4]}"
     n = rep.checks()
     assert n['arp_reply'] == (1, 0) and n['icmp_reply'] == (1, 0), f"replies: {n['arp_reply']}, {n['icmp_reply']}"
     assert n['link_pulse'][0] >= 1 and n['tp_idl'] == (2, 0) and n['fcs'] == (2, 0), f"checks {n}"
+    dev = [f.jitter for f in rep.tx_frames if f.jitter is not None]
+    limit = fe.p['skew_dd'] / 2 + 0.05
+    assert len(dev) == 2 and max(dev) <= limit, f"transmit edges {dev} ns from the half-bit grid, limit {limit:.2f}"
+    assert moves > 100, f"only {moves} pad moves at a falling edge: THALF did not run"
     keep, bad = await host.rdmem(7, 2)
     assert (keep, bad) == (2, 1), f"counters: {keep} kept, {bad} dropped; want 2 and 1"
+    dut._log.info(f"eth: {partner.c} cycles, {moves} pad moves at a falling edge, transmit edges within "
+                  f"{max(dev):.2f} ns of the half-bit grid (limit {limit:.2f})")
 
 
 # ---- USB low speed: programs/advanced/usb_enum.s -------------------------------------------------------------------
@@ -1811,16 +1857,16 @@ async def test_eth_arp(dut):
 class UsbPartner:
     """The other end of a USB low-speed cable, at the pins: the bus of programs/bench/frontend.py (the device's
     1.5 kohm pull-up on D-, the host's pull-downs) between the chip's io0 (D+) and io1 (D-) and the host model of
-    programs/bench/usb_enum.py, which runs `script`. Each falling clock edge it gives the bus the pads the chip drives
-    since the rising edge, lets the host act, and drives uio_in with the bus as it is `phase` ns after that rising
-    edge. Times count from the partner's start, 20 ns a cycle."""
+    programs/bench/usb_enum.py, which runs `script`. At each tick, 5 ns after a rising clock edge, it gives the bus the
+    pads the chip drives since that edge, lets the host act, and drives uio_in with the bus as it is `phase` ns after
+    the edge, one level for the whole cycle (section 3.1). Times count from the partner's start, 20 ns a cycle."""
 
-    def __init__(self, dut, script, phase=6.0):
+    def __init__(self, dut, script, phase=6.0, host_cls=None):
         import frontend
         import usb_enum
         self.dut, self.phase, self.c = dut, phase, 0
         self.bus = frontend.UsbLs()
-        self.host = usb_enum.Host(self.bus)
+        self.host = (host_cls or usb_enum.Host)(self.bus)
         self.value, self.done = None, False
         self.gen = self.wrap(script)
         self.wake = 0.0
@@ -1830,7 +1876,7 @@ class UsbPartner:
 
     async def run(self):
         while True:
-            await FallingEdge(self.dut.clk)
+            await FallingEdge(self.dut.tick)
             t = self.c * 20.0
             io, oe = int(self.dut.uio_out.value), int(self.dut.uio_oe.value)
             self.bus.device(t, io & 1, (io >> 1) & 1, oe & 1, (oe >> 1) & 1)
@@ -1845,6 +1891,29 @@ class UsbPartner:
             self.c += 1
 
 
+def dribble_host(U):
+    """The usb_enum.py host with dribble bits before every EOP it sends (USB 2.0 7.1.9.1: the last bit before the
+    EOP stretched by up to six bit times with no transition, which a receiver must accept): 1, 2, ... 6 bit times on
+    its packets in turn, tokens, data and handshakes alike, fewer where the packet's own final 1s leave less room
+    for the six. Counts the packets by the dribble bit times they got."""
+    class DribbleHost(U.Host):
+        def __init__(self, bus):
+            super().__init__(bus, dribble_fit=True)
+            self.n, self.dribbled = 0, [0] * 7
+
+        def tx(self, bits, t0, eop=None, jitter=None, dribble=None, nostuff=None):
+            if dribble is None:
+                self.n += 1
+                dribble = 1 + (self.n - 1) % 6
+            raw = U.G.stuff(bits)
+            run1 = 0
+            while run1 < len(raw) and raw[-1 - run1] == 1:
+                run1 += 1
+            self.dribbled[max(0, min(dribble, 6 - run1))] += 1
+            return super().tx(bits, t0, eop, jitter, dribble, nostuff)
+    return DribbleHost
+
+
 @cocotb.test()
 async def test_usb_enumerate(dut):
     """5.9 end to end, through programs/advanced/usb_enum.s on threads 0 (the device), 1 (the token check) and 2 (the
@@ -1853,11 +1922,12 @@ async def test_usb_enumerate(dut):
     programs/bench/usb_check_test.py) reads the 18-byte device descriptor at address 0 in packets of 8, sets address
     12, reads the descriptor there again with one of its ACKs lost, gets a NAK for an IN with nothing due, drives a
     50 us SE0 (longer than TDETRST, 2.5 us, so the device may take it as a reset: 7.1.7.5), then reads 8 bytes at
-    address 0 and finds address 12 silent. The record of D+ and D- must pass every check of
-    programs/bench/usb_check.py, told to take that SE0 as a reset (a 10 ms one would be 500,000 cycles): bit rate,
-    jitter, SYNC, stuffing, PIDs, CRC5 and CRC16, EOP and the J after it, inter-packet delay and response time, the
-    control transfers with toggles, the retry and the address change, the descriptor. The counters read with RDMEM
-    must show address 0, 4 SETUPs ACKed and 4 transfers completed."""
+    address 0 and finds address 12 silent. Every packet the host sends carries dribble bits before its EOP, 1 to 6
+    bit times in turn (7.1.9.1), which the units' byte end drops in hardware (5.9.7). The record of D+ and D- must
+    pass every check of programs/bench/usb_check.py, told to take that SE0 as a reset (a 10 ms one would be 500,000
+    cycles): bit rate, jitter, SYNC, stuffing, PIDs, CRC5 and CRC16, EOP and the J after it, inter-packet delay and
+    response time, the control transfers with toggles, the retry and the address change, the descriptor. The
+    counters read with RDMEM must show address 0, 4 SETUPs ACKed and 4 transfers completed."""
     sys.path.insert(0, os.path.join(PROGRAMS_DIR, 'bench'))
     sys.dont_write_bytecode = True      # leave no cache in programs/ or sim/
     import usb_check
@@ -1885,7 +1955,7 @@ async def test_usb_enumerate(dut):
         old = yield from h.setup(12, U.GET_DEV(8), tries=1)
         yield from h.wait(50e3)
         return dict(d1=d1, set=ok, d2=d2, nak=nak, d3=d3, old=old)
-    partner = UsbPartner(dut, script)
+    partner = UsbPartner(dut, script, host_cls=dribble_host(U))
     await host.run(0, 7)
     cocotb.start_soon(partner.run())
     for _ in range(400):
@@ -1902,6 +1972,9 @@ async def test_usb_enumerate(dut):
         f"checks {n}"
     addr, nsetup, nreq = await host.rdmem(13, 3)
     assert (addr, nsetup, nreq) == (0, 4, 4), f"counters: address {addr}, {nsetup} SETUPs, {nreq} transfers"
+    got = partner.host.dribbled
+    assert all(got[1:]), f"host packets by dribble bit times 0 to 6: {got}"
+    dut._log.info(f"usb: {partner.c} cycles; host packets by dribble bit times 0 to 6: {got}")
 
 
 # ---- test_matches_simulator: the RTL beside the published simulator ------------------------------------
@@ -2095,8 +2168,8 @@ async def test_matches_simulator(dut):
     """Random programs on all four threads against the published simulator in sim/, with host traffic over the
     real link at the limits of section 9.1: SCK low or high for 2 cycles at a period of 6, CS falling 1 cycle before
     the first rising SCK and rising 1 cycle after the last falling one, CS high for 3 cycles between transactions,
-    cut commands, bytes past a reply and every unlisted code. Every output pin but MISO is compared on every cycle,
-    and every MISO byte with what its command returns. MISO may move only 3 cycles after a rising SCK or after CS
+    cut commands, bytes past a reply and every unlisted code. Every output pin but MISO is compared in both halves of
+    every cycle (3.1, 5.2: sim.pads() and pads2()), and every MISO byte with what its command returns. MISO may move only 3 cycles after a rising SCK or after CS
     rises.
 
     Each thread starts on a block that claims its pins, a lane with BYP and any other pin with PP, so the lanes show
@@ -2197,22 +2270,22 @@ async def test_matches_simulator(dut):
     kinds = ('caps', 'wrmem', 'rdmem', 'run', 'run', 'run', 'setpc', 'status', 'status', 'step', 'rdreg', 'rdreg', 'rdreg',
              'post', 'post', 'take', 'take', 'abort')
     count = restarted = 0
-    toggles = running = retired = cycles = driven = 0
+    toggles = running = retired = cycles = driven = halves = 0
     last_pads = None
     for image in range(LOCK_IMAGES):
-        await FallingEdge(dut.clk)
+        await FallingEdge(dut.tick)
         dut.rst_n.value = 0                             # CS high and SCK low, as 9.1 asks while rst_n is low
-        await ClockCycles(dut.clk, 4, rising=False)
+        await ClockCycles(dut.tick, 4, rising=False)
         dut.rst_n.value = 1                             # between two rising edges
         released = get_sim_time(unit="ns")
-        await ClockCycles(dut.clk, 8, rising=False)
+        await ClockCycles(dut.tick, 8, rising=False)
         words = [random_word(rng) if rng.random() < .99 else noise(rng) for _ in range(DEPTH)]
         for t, claim in enumerate(CLAIMS):              # each thread starts by claiming pins, so its events show,
             block = [(0x90F8 if p in LANE_PINS else 0x90E8) | p << 8 for p in claim]   # and lanes follow their inputs
             block += [0x0100, 0x1000 | rng.randrange(64, DEPTH)]                        # pcfg ... / now / goto
             words[16 + 8 * t:16 + 8 * t + len(block)] = block
         await host.wrmem(0, words)
-        await FallingEdge(dut.clk)
+        await FallingEdge(dut.tick)
         host.other = 0
         host.drive(1, 0, 0)
         dut.uio_in.value = 0
@@ -2265,8 +2338,8 @@ async def test_matches_simulator(dut):
                 if hold == 1 or rng.randrange(hold) == 0:
                     ui_hi, io = rng.getrandbits(8), rng.getrandbits(8)
                 ui = (ui_hi & 0xF8) | cs | sck << 1 | mosi << 2
-                dut.ui_in.value = ui
-                dut.uio_in.value = io
+                dut.ui_in.value = ui                        # at the tick in the first half: one level for the
+                dut.uio_in.value = io                       # whole cycle, so both samples take it (3.1)
                 await Timer(1, unit="ns")
                 got = (int(dut.uo_out.value), int(dut.uio_out.value), int(dut.uio_oe.value))
                 want = sim.pads(ui)
@@ -2278,6 +2351,13 @@ async def test_matches_simulator(dut):
                 running += any(th.RUN for th in sim.th)
                 assert (got[0] & ~8, got[1], got[2]) == (want[0] & ~8, want[1], want[2]), \
                     f"image {image} transaction {n} ({tx.kind}): pads {got}, simulator {want}"
+                await RisingEdge(dut.tick)                  # the second half, from the falling edge (5.2, 5.9.5)
+                await Timer(1, unit="ns")
+                got2 = (int(dut.uo_out.value), int(dut.uio_out.value), int(dut.uio_oe.value))
+                want2 = sim.pads2(ui)
+                assert (got2[0] & ~8, got2[1], got2[2]) == (want2[0] & ~8, want2[1], want2[2]), \
+                    f"image {image} transaction {n} ({tx.kind}): second half {got2}, simulator {want2}"
+                halves += (got2[0] & ~8, got2[1], got2[2]) != last_pads
                 miso = (got[0] >> MISO) & 1
                 if miso != last_miso:
                     assert c - 3 in rises or c - 3 in cs_rises, f"image {image} transaction {n}: MISO moved in cycle {c}"
@@ -2296,7 +2376,7 @@ async def test_matches_simulator(dut):
                 for k in here:
                     tx.on_byte(k, sim, pre, lock)
                 c += 1
-                await FallingEdge(dut.clk)
+                await FallingEdge(dut.tick)
             got = [sum(b << (7 - i) for i, b in enumerate(sampled[j:j + 8])) for j in range(0, len(sampled) - 7, 8)]
             if tx.rdreg is not None and len(got) > 4:
                 fits = [v for v in tx.rdreg if v >> 8 == got[4] and (len(got) < 6 or v & 255 == got[5])]
@@ -2310,8 +2390,8 @@ async def test_matches_simulator(dut):
         retired += sum(th.retired for th in sim.th)
         cycles += c
     dut._log.info(f"seed {seed}: {cycles} cycles, {retired} instructions retired, {toggles} output changes "
-                  f"({driven} of them not only on a lane in bypass), {running} cycles with a thread running, "
-                  f"{restarted} threads restarted")
+                  f"({driven} of them not only on a lane in bypass), {halves} cycles whose two halves differ, "
+                  f"{running} cycles with a thread running, {restarted} threads restarted")
     assert count >= 40, "too few unlisted codes"
     assert retired >= cycles // 8 and toggles >= cycles // 100, "stimulus too weak"
 
@@ -2333,7 +2413,7 @@ async def test_netlist_matches_rtl(dut):
     async def inputs():
         last = 0
         while True:
-            await FallingEdge(dut.clk)
+            await FallingEdge(dut.tick)
             host.other = rng.getrandbits(8)
             dut.ui_in.value = (host.other & 0xF8) | host.link
             dut.uio_in.value = rng.getrandbits(8)
@@ -2363,9 +2443,9 @@ async def test_netlist_matches_rtl(dut):
                 await host.rdreg(rng.randrange(4), rng.randrange(12))
         await host.rdmem(rng.randrange(DEPTH), 32)
         dut.rst_n.value = 0
-        await ClockCycles(dut.clk, 4)
+        await ClockCycles(dut.tick, 4, rising=False)
         dut.rst_n.value = 1
-        await ClockCycles(dut.clk, 8)
+        await ClockCycles(dut.tick, 8, rising=False)
     pins.cancel()
     assert int(dut.mismatches.value) == 0, f"{int(dut.mismatches.value)} cycles differ"
     assert toggles[0] >= MIN_TOGGLES, f"only {toggles[0]} output changes: stimulus too weak"

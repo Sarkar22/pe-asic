@@ -8,14 +8,15 @@ cycle the bench picks), and sim/sim.py. After every cycle the bench compares eve
 only if no image differs, and prints the first difference of each image that does.
 
 Compared after every cycle:
-- the pads: uo_out, uio_out and uio_oe, the bypass lanes on this cycle's ui (sim.py doesn't lag them, section 10);
+- the pads: uo_out, uio_out and uio_oe in both halves of the cycle (3.1, 5.2), the bypass lanes on this cycle's ui
+  (sim.py doesn't lag them, section 10);
 - every thread: PC, R0..R7, T, D, S, LATE, STALE, ILL, RUN, P, WAITING, STOPREQ, STEPPING, MEM, MEM_DONE, MEM_KIND
   and MEM_REG, and while P the event: KIND, DUE, MASK, PAT, BANK, NE, TIMED and INBOX;
 - the pipeline, by where each thread's memory cycle puts its word (3.1, 4.2): IV and IR in stages 2 to 4, a load's
-  data, and a ld or st's address and data in its memory cycle; TB, SYNC1, SYNC2 and SYNC3;
+  data, and a ld or st's address and data in its memory cycle; TB, SYNC1, SYNC2, SYNC3, SYNC1F and SYNC2F;
 - every shift unit: each name of section 5.9.2 (CMT aside: it lasts one cycle, so between cycles it reads 0) and
-  the 16 slots of 5.9.3; and the RTL's window points PWQ and PWH (5.9.6, implementation note) against p - p/4 and
-  p - p/2 of the slots as they stand;
+  the 16 slots of 5.9.3; the RTL's window points PWQ and PWH (5.9.6, implementation note) against p - p/4 and
+  p - p/2 of the slots as they stand; and its pad flops P and N (5.2, implementation note), with P = L xor N;
 - the pin layer of 5.2 to 5.4 and 5.9.2: OUT, SHD, OE, SHOE, OD, BYP, SHBYP, OWN, SEL and SHSEL;
 - M0..M7, FULL and BUSY;
 - all of memory, every 64 cycles and at the end.
@@ -39,6 +40,15 @@ Images (--gen):
 - directed: hand-written programs (the assembly of 6.6, in DIRECTED below) for corners chance doesn't reach, one case
   per seed: RXIC saturating at 65535 and starting again at an edge, TPER 65535 with a TFRAC carry, and CTX moved in
   the middle of a CRC append. No host traffic.
+- half: half cycles (3.1). Even seeds take sim/compare.py's directed half image (a THALF Manchester sender on io0
+  and io1 looped back into an RKIND 3 receiver at its bit time or near it, and an NRZ sender whose tail is an SE0
+  into timed samples with REOP, for the byte end of 5.9.7), with host traffic in one gap of 33, and on every other
+  one no sync pattern and RCNT 4 to 47 for the RKIND 3 receiver, so its receptions end at a bit; odd seeds its
+  random unit image with slot values biased to THALF, fractions, RKIND 3, short RPER and REOP. Every input has its own level at the falling edge: the old
+  one, the new one, or another (a pulse between two rising edges). A looped-back uio pad gives the falling-edge
+  sample its first-half level and the rising-edge sample its second-half level (3.1, the chip's own edges).
+The other generators give one level per cycle (3.1): the falling-edge sample is the cycle's level, and a uio pad
+loops back its first-half level, as before; both halves of the pads are still compared.
 
 Corners (--corners, instead of images): scripted sequences, each on every thread, with host commands landing in the
 cycle the script picks through the real command block, compared after every cycle as above: a stop
@@ -82,7 +92,7 @@ Where sim.py serves in cycle h what the RTL serves later (section 10, item 6), t
   the reply register 2 cycles later (9.4). A memory command that finds every thread running sets BUSY in h + 1 on
   both, and does nothing more.
 
-Usage: lockstep.py [--corners | --gen chips|prog|rows|wide|directed] [--images N] [--cycles C] [--first SEED]
+Usage: lockstep.py [--corners | --gen chips|prog|rows|wide|directed|half] [--images N] [--cycles C] [--first SEED]
                    [--depths 128,512] [--host quick|full|mixed|pins] [--no-extra] [--jobs J] [--build DIR]
                    [--stop-first] [--out FILE] [--fcov FILE] [--cov FILE]
 --no-extra leaves out the extra traffic, so quick images then get exactly the host commands of the first version of
@@ -108,10 +118,11 @@ import asm                      # noqa: E402
 import rtl_chip                 # noqa: E402
 import sim                      # noqa: E402
 
-# 5.9.2's names, as sim.py and rtl_chip.py spell them. CMT lasts one cycle; PWQ and PWH are the RTL's own.
+# 5.9.2's names, as sim.py and rtl_chip.py spell them. CMT lasts one cycle; PWQ, PWH and the pad flops are the RTL's
+# own.
 UNIT_NAMES = [n for n in sim.UNIT_STATE if n != 'CMT']
 RTL_UNIT = dict(rtl_chip.UNIT)
-assert set(RTL_UNIT) == set(UNIT_NAMES) | {'PWQ', 'PWH'}, set(RTL_UNIT) ^ set(UNIT_NAMES)
+assert set(RTL_UNIT) == set(UNIT_NAMES) | set(rtl_chip.RTL_OWN), set(RTL_UNIT) ^ set(UNIT_NAMES)
 M25 = (1 << 25) - 1             # RXPH is 25 bits in the RTL, a signed integer in sim.py
 UNIT_MN = ('txw', 'scfg', 'smap', 'rxw', 'sstat', 'srd', 'sgo', 'sstop')
 C = rtl_chip                    # command codes of pe_host.sv: C.C_POST and so on
@@ -473,6 +484,46 @@ def image_directed(rng, seed):
     return words, DIRECTED_START.get(name, len(DIRECTED[name])), host() if host else None
 
 
+_compare = None
+
+
+def image_half(rng, seed):
+    """--gen half: sim/compare.py's images for half cycles, 128 words. Returns (words, pcs)."""
+    global _compare
+    if _compare is None:
+        import compare as _c            # sim/compare.py; it brings the other two simulators, unused here
+        _compare = _c
+    if seed % 2 == 0:
+        words, starts = _compare.half_image(rng)
+        pcs = [0] * 4
+        for tid, pc in starts:
+            pcs[tid] = pc
+        if seed % 4 == 0:               # thread 1's RKIND 3 receiver with no sync pattern and RCNT 4 to 47, so that
+            scfg8 = enc('scfg', s=1, k=8)       # receptions end at a bit, in either half (5.9.6)
+            end = min([pc for tid, pc in starts if tid > 1] + [len(words)])
+            for a in range(pcs[1] + 2, end):
+                if words.get(a) == scfg8:
+                    v = rng.randrange(4, 48)
+                    words[a - 2], words[a - 1] = enc('ldi', n=1, i=v), enc('lui', n=1, i=0)
+                    break
+        return words, pcs
+    return _compare.unit_image(rng, half=True), [rng.randrange(128) for _ in range(4)]
+
+
+def half_levels(rng, e):
+    """The inputs of a half-cycle image (compare.py's half_inputs): ui and io change as for chips, and each gets its
+    own level at the falling edge, the old one (the edge comes in the second half), the new one (in the first half)
+    or another (a pulse between two rising edges)."""
+    ui, io = e.ui, e.io
+    if rng.random() < 0.3:
+        e.ui = rng.getrandbits(8)
+    if rng.random() < 0.3:
+        e.io = rng.getrandbits(8)
+    x, y = rng.random(), rng.random()
+    e.ui_f = ui if x < 0.4 else e.ui if x < 0.85 else rng.getrandbits(8)
+    e.io_f = io if y < 0.4 else e.io if y < 0.85 else rng.getrandbits(8)
+
+
 def random_word(rng):
     """A random legal word: a row, then each field, until the values are legal (6.2)."""
     while True:
@@ -512,7 +563,8 @@ def sim_state(m):
         u = t.u
         units.append(tuple(getattr(u, n) & M25 if n == 'RXPH' else getattr(u, n) for n in UNIT_NAMES) + tuple(u.CFG))
     return dict(threads=tuple(th), events=tuple(ev), mem=tuple(mem), units=tuple(units), SEL=tuple(m.SEL),
-                SHSEL=tuple(m.SHSEL), TB=m.c & 0xFFFF, SYNC1=m.SYNC1, SYNC2=m.SYNC2, SYNC3=m.SYNC3, OUT=bits(m.OUT),
+                SHSEL=tuple(m.SHSEL), TB=m.c & 0xFFFF, SYNC1=m.SYNC1, SYNC2=m.SYNC2, SYNC3=m.SYNC3, SYNC1F=m.SYNC1F,
+                SYNC2F=m.SYNC2F, OUT=bits(m.OUT),
                 SHD=bits(m.SHD), OE=bits(m.OE), SHOE=bits(m.SHOE), OD=bits(m.OD), BYP=bits(m.BYP),
                 SHBYP=bits(m.SHBYP), OWN=tuple(m.OWN), FULL=tuple(m.FULL), M=tuple(m.M), BUSY=m.BUSY)
 
@@ -542,16 +594,30 @@ class RtlView:
             cfg = tuple(v[k + i] for k in self.slots)
             units.append(tuple(v[k + i] for k in self.unit) + cfg)
             pw.append((v[f['u_pwq_q'] + i], v[f['u_pwh_q'] + i], window_points(cfg[5], cfg[10])))
+            for p, n, l in (('pa_q', 'na_q', 'la_q'), ('pb_q', 'nb_q', 'lb_q')):    # 5.2, implementation note
+                if v[f['u_' + p] + i] != v[f['u_' + l] + i] ^ v[f['u_' + n] + i]:
+                    pw.append(('pad flop %s of unit %d is not %s xor %s' % (p, i, l, n),))
 
         def pairs(x):
             return tuple((v[f[x]] >> (2 * p)) & 3 for p in range(16))
         st = dict(threads=tuple(th), events=tuple(ev), mem=tuple(mem), units=tuple(units), SEL=pairs('sel_q'),
                   SHSEL=pairs('shsel_q'), TB=v[f['tb_q']], SYNC1=v[f['sync1_q']], SYNC2=v[f['sync2_q']],
-                  SYNC3=v[f['sync3_q']], OUT=v[f['out_q']], SHD=v[f['shd_q']], OE=v[f['oe_q']],
+                  SYNC3=v[f['sync3_q']], SYNC1F=v[f['sync1f_q']], SYNC2F=v[f['sync2f_q']], OUT=v[f['out_q']],
+                  SHD=v[f['shd_q']], OE=v[f['oe_q']],
                   SHOE=v[f['shoe_q']], OD=v[f['od_q']], BYP=v[f['byp_q']], SHBYP=v[f['shbyp_q']],
                   OWN=pairs('own_q'), FULL=tuple((v[f['full_q']] >> k) & 1 for k in range(8)),
                   M=tuple(v[f['m0']:f['m0'] + 8]), BUSY=v[f['busy_q']])
         return st, pw, v
+
+
+def own_checks(c, pw):
+    """The RTL's own flops, from RtlView.state: the window points against the slots, and P = L xor N."""
+    for i, x in enumerate(x for x in pw if len(x) == 3):
+        if x[:2] != x[2]:
+            raise Mismatch('cycle %d: unit %d window points PWQ, PWH %s, want %s' % (c, i, x[:2], x[2]))
+    for x in pw:
+        if len(x) == 1:
+            raise Mismatch('cycle %d: %s' % (c, x[0]))
 
 
 THREAD_NAMES = ('PC', 'R', 'T', 'D', 'S', 'LATE', 'STALE', 'ILL', 'RUN', 'P', 'WAITING', 'STOPREQ', 'STEPPING')
@@ -1366,12 +1432,13 @@ STATS = ('post', 'take', 'stop', 'start', 'abort', 'abort_aimed', 'step', 'step_
          'shift_differs', 'images_light', 'tx_starts', 'rx_words', 'crc_pass', 'stuff_bits', 'ur', 'ovr',
          'rdreg_running', 'rdreg_any', 'wrmem', 'rdmem', 'mem_busy', 'caps', 'unknown', 'cut', 'aimed_late_run',
          'aimed_mail', 'aimed_abort_pin', 'aimed_stop', 'aimed_step', 'stale_poke', 'cycles', 'retired', 'ill',
-         'wrmem_busy', 'rdmem_busy', 'resets', 'stop_start')
+         'wrmem_busy', 'rdmem_busy', 'resets', 'stop_start', 'halves_differ', 'rk3', 'byte_end')
 
 
 class Env:
-    """ui as drawn; a uio pin the chip drives reads its own drive, the others are drawn (5.2)."""
-    ui = io = 0
+    """ui as drawn; a uio pin the chip drives reads its own drive, the others are drawn (5.2). ui_f and io_f are the
+    levels at the falling edge, for --gen half."""
+    ui = io = ui_f = io_f = 0
 
 
 def reset(rc, m, h, depth, seed, pcs):
@@ -1411,6 +1478,8 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
         words = image_rows(rng, depth)
         pcs = [rng.randrange(depth) for _ in range(4)]
         hold = rng.choice((1, 3, 20, 200))
+    elif gen == 'half':
+        (words, pcs), depth = image_half(rng, seed), 128
     else:
         words, pcs = image_chips(rng), None
     rc = rtl_chip.Chip(depth, seed, 'pins' if mode == 'pins' else 'stub')
@@ -1437,10 +1506,14 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
         last = [(0, 0, 0, 0, 0, 0)] * 4
         f = view.f
         pins = mode == 'pins'
-        for c in range(cycles):
+        half = gen == 'half'
+        quiet = half and seed % 2 == 0          # the directed half images: a host command in 1 gap of 33, so that
+        for c in range(cycles):                 # stops and ABORTs leave the senders and receivers time to run
             if gen == 'rows':
                 if hold == 1 or rng.randrange(hold) == 0:
                     e.ui, e.io = rng.getrandbits(8), rng.getrandbits(8)
+            elif half:
+                half_levels(rng, e)
             else:
                 if rng.random() < 0.3:
                     e.ui = rng.getrandbits(8)
@@ -1450,7 +1523,8 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
             ui = e.ui
             if pins:                            # ui0 to ui2 are the link: CS, SCK, MOSI
                 ui = (ui & 0xF8) | h.link_bits()
-            pr, pm = rc.pads(ui), m.pads(ui)
+            ui_f = (e.ui_f & 0xF8) | (ui & 7) if half else ui     # the link stays out of the half images' pulses
+            pr, pm = rc.pads(ui_f), m.pads(ui_f)
             if pins:                            # uo3 is MISO, which sim.py doesn't model: replies are read from it
                 h.uo = pr[0]
                 miso = (pr[0] >> 3) & 1
@@ -1464,14 +1538,33 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
             if pr != pm:
                 raise Mismatch('cycle %d: pads (uo, uio_out, uio_oe): sim.py %s, RTL %s'
                                % (c, tuple('%#04x' % x for x in pm), tuple('%#04x' % x for x in pr)))
-            lvl = (pm[1] & pm[2]) | (e.io & ~pm[2] & 0xFF)
-            rc.cycle(ui, lvl)
-            m.cycle(ui, lvl)
+            # The falling edge: a looped-back pad gives it its first-half level (3.1). One level per cycle: the
+            # cycle's level, so lvl_f is lvl and the rising-edge sample sees the first half too, as before.
+            lvl_f = (pm[1] & pm[2]) | ((e.io_f if half else e.io) & ~pm[2] & 0xFF)
+            rc.fall(ui_f, lvl_f)
+            pr2, pm2 = rc.pads2(ui), m.pads2(ui)
+            if pins:
+                pr2, pm2 = (pr2[0] & 0xF7,) + pr2[1:], (pm2[0] & 0xF7,) + pm2[1:]
+            if pr2 != pm2:
+                raise Mismatch('cycle %d: pads in the second half (uo, uio_out, uio_oe): sim.py %s, RTL %s'
+                               % (c, tuple('%#04x' % x for x in pm2), tuple('%#04x' % x for x in pr2)))
+            lvl = (pm2[1] & pm2[2]) | (e.io & ~pm2[2] & 0xFF) if half else lvl_f
+            st['halves_differ'] += pm != pm2
+            ends = [t.u.RXRUN and t.u.REOP and t.u.RXKIND == 0 and t.u.RXONES and not t.u.RXVIO and
+                    0 < (t.u.RXTOT & 7) < 7 for t in m.th]
+            rc.cycle(ui, lvl, ui_f, lvl_f)
+            if half:
+                m.cycle(ui, lvl, ui_f, lvl_f)
+            else:
+                m.cycle(ui, lvl)
+            for t, end in zip(m.th, ends):      # what the half-cycle features reached
+                st['rk3'] += t.u.RXRUN and t.u.RXKIND == 3
+                st['byte_end'] += end and not t.u.RXRUN and t.u.RXSR == t.u.RXSR8 and t.u.RXN == t.u.RXN8
             h.c = c
             h.service()
             if h.busy():                        # a host command lands in cycle c of both: h = c
                 h.step()
-            elif h.idle() and gen != 'directed':
+            elif h.idle() and gen != 'directed' and not (quiet and rng.random() < 0.97):
                 traffic(rng, m, h, c, st)
             elif h.idle() and hook:
                 hook(m, h, c)
@@ -1480,9 +1573,7 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
             if sm != sr:
                 raise Mismatch(first_diff(c, sm, sr))
             pipeline(m.c - 1, m, v, f)      # sim.py's count: a reset in mid-run starts it again
-            for i, (q, hh, want) in enumerate(pw):
-                if (q, hh) != want:
-                    raise Mismatch('cycle %d: unit %d window points PWQ, PWH %s, want %s' % (c, i, (q, hh), want))
+            own_checks(c, pw)
             if c % 64 == 63 and list(rc.mem) != m.mem:
                 raise Mismatch('cycle %d: memory differs at %s' % (c, [a for a, (x, y) in enumerate(
                     zip(rc.mem, m.mem)) if x != y][:8]))
@@ -1561,11 +1652,16 @@ class Pair:
         if sm != sr:
             raise Mismatch(first_diff(self.m.c - 1, sm, sr))
         pipeline(self.m.c - 1, self.m, v, self.view.f)
+        own_checks(self.m.c - 1, pw)
 
     def step(self):
         pr, pm = self.rc.pads(self.ui), self.m.pads(self.ui)
         if pr != pm:
             raise Mismatch('cycle %d: pads: sim.py %s, RTL %s' % (self.m.c, pm, pr))
+        self.rc.fall(self.ui, self.io)
+        pr, pm = self.rc.pads2(self.ui), self.m.pads2(self.ui)
+        if pr != pm:
+            raise Mismatch('cycle %d: pads in the second half: sim.py %s, RTL %s' % (self.m.c, pm, pr))
         self.rc.cycle(self.ui, self.io)
         self.m.cycle(self.ui, self.io)
 
@@ -1906,7 +2002,7 @@ def job(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('--gen', default='chips', choices=('chips', 'prog', 'rows', 'wide', 'directed'))
+    ap.add_argument('--gen', default='chips', choices=('chips', 'prog', 'rows', 'wide', 'directed', 'half'))
     ap.add_argument('--images', type=int, default=200)
     ap.add_argument('--cycles', type=int, default=6000)
     ap.add_argument('--first', type=int, default=0, help='first seed')
@@ -1926,7 +2022,8 @@ def main(argv=None):
         rtl_chip.BUILD = os.environ['PE_BUILD']
     if a.corners:
         return corners_main(a)
-    depths = [512] if a.gen in ('prog', 'wide', 'directed') else [int(x) for x in a.depths.split(',')]
+    depths = [512] if a.gen in ('prog', 'wide', 'directed') else [128] if a.gen == 'half' else \
+        [int(x) for x in a.depths.split(',')]
     for d in depths:
         rtl_chip._load('pins' if a.host == 'pins' else 'stub', d)     # fail early if a model is missing
     pool()
@@ -1976,6 +2073,9 @@ def main(argv=None):
            'units: cycles with a send busy %d, a receive busy %d (summed over units); cycles with a pin on a shift '
            'output %d, of them showing a level other than OUT %d' % (total['tx_busy'], total['rx_busy'],
                                                                     total['sel_cycles'], total['shift_differs']),
+           'half cycles: cycles whose two halves differ on a pad %d; unit cycles with an RKIND 3 reception %d; '
+           'receptions the byte end ended at a byte boundary %d' % (total['halves_differ'], total['rk3'],
+                                                                     total['byte_end']),
            'events: sends started %d, words received %d, CRC passes (end flag 0) %d, stuff bits sent %d, underruns %d, '
            'overruns %d; images with light or sparse host traffic %d'
            % (total['tx_starts'], total['rx_words'], total['crc_pass'], total['stuff_bits'], total['ur'], total['ovr'],

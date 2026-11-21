@@ -1,4 +1,5 @@
-# Section 5.2's pad equations in every state: open drain can't drive high, bypass is immediate.
+# Section 5.2's pad equations in both halves of every cycle, in every state: open drain can't drive high,
+# bypass is immediate.
 [tasks]
 prove
 cover
@@ -23,6 +24,7 @@ proc
 flatten
 cd pads
 script probes_pins.ys
+script probes_half.ys
 cover: script cut_host.ys
 bmc: script cut_host.ys
 cd ..
@@ -41,9 +43,10 @@ cd ..
 ../src/pe_mem.sv
 ../src/pe_host.sv
 ../src/pe_spi.sv
-../verif/cells_rtl.v
+cells_formal.v
 sram_free.v
 read_chip.ys
 probes_pins.ys
+probes_half.ys
 cut_host.ys
 pads.sv

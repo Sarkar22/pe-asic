@@ -1,18 +1,25 @@
 /*
- * The pad equations of section 5.2, in every state of the chip and for every input:
+ * The pad equations of section 5.2, in both halves of every cycle, in every state of the chip and for every
+ * input:
  *
- *   V(p)       = LA[OWN[p]] if SEL[p] == 1 else LB[OWN[p]] if SEL[p] == 2 else OUT[p]
+ *   V(p)       = LA[OWN[p]] if SEL[p] == 1 else LB[OWN[p]] if SEL[p] == 2 else OUT[p]   (second half)
+ *   V0(p)      = the same with A0 = OLA if TXH else LA, B0 = OLB if TXH else LB            (first half)
  *   uo_out[3]  = host data out (section 9)
  *   uo_out[i]  = BYP[i] ? ui_in[SRC(i)] : V(i)       for i != 3
  *   uio_out[i] = OD[i] ? 0        : V(8 + i)
  *   uio_oe[i]  = OD[i] ? !V(8 + i) : OE[i]
  *
- * with bypass lanes only on uo0 (SRC 3) and uo4 to uo7 (SRC i). From them, two properties stand alone:
+ * with bypass lanes only on uo0 (SRC 3) and uo4 to uo7 (SRC i), and V0 in place of V in the first half.
+ * From them, two properties stand alone:
  *   od_*   An open-drain pin can never drive high: with OD[i], uio_out[i] is 0, and the pin drives only
- *          while V(8 + i) is 0 (sections 5.2 and 5.3, "Open-drain safety is structural").
+ *          while V(8 + i) is 0 (sections 5.2 and 5.3, "Open-drain safety is structural"), in either half.
  *   byp_*  A lane in bypass shows its source input in the same cycle (sections 5.2 and 5.8). ui_in is a
  *          free input in every cycle, so the equality in the same cycle leaves no room for a flop.
- * V(p) is formed here from the flops, by the equation above, not taken from the design.
+ * V(p) is formed here from the flops, by the equation above, not taken from the design. The half is the free
+ * input `half1` (1 the first half, 0 the second): every output latch of the units shows that half
+ * (cells_formal.v), so each assertion holds in both halves. TXH, OLA and OLB are the unit's flops of those names
+ * (section 5.9.2); the pads themselves come from the units' pad flops and latches (5.2, implementation note), so
+ * the equations prove that path against the names.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -23,7 +30,8 @@ module pads (
     input wire       rst_n,
     input wire       ena,
     input wire [7:0] ui_in,
-    input wire [7:0] uio_in
+    input wire [7:0] uio_in,
+    input wire       half1
 );
 
   wire [7:0] uo_out, uio_out, uio_oe;
@@ -49,6 +57,17 @@ module pads (
   wire [3:0]  la, lb;  // LA[t], LB[t] of each thread's unit
   wire        miso;    // the host link's data out
   wire [3:0]  run;     // RUN of each thread, for the covers
+  wire [3:0]  txh, ola, olb;  // TXH[t], OLA[t], OLB[t] (probes_half.ys)
+  wire [3:0]  fa, fb;  // the half that each unit's output latches show (probes_half.ys)
+
+  // Every output latch shows the half under check.
+  always @* begin
+    assume (fa == {4{half1}});
+    assume (fb == {4{half1}});
+  end
+
+  wire [3:0] a = half1 ? (txh & ola | ~txh & la) : la;   // A0 in the first half, LA in the second
+  wire [3:0] b = half1 ? (txh & olb | ~txh & lb) : lb;
 
   wire [15:0] v;
 
@@ -57,7 +76,7 @@ module pads (
     for (p = 0; p < 16; p = p + 1) begin : g_v
       wire [1:0] s = sel_q[2*p+1:2*p];
       wire [1:0] o = own_q[2*p+1:2*p];
-      assign v[p] = (s == 2'd1) ? la[o] : (s == 2'd2) ? lb[o] : out_q[p];
+      assign v[p] = (s == 2'd1) ? a[o] : (s == 2'd2) ? b[o] : out_q[p];
     end
   endgenerate
 
@@ -93,6 +112,10 @@ module pads (
   always @(posedge clk) begin
     if (past_ok) cov_byp0_follows: cover (byp_q[0] && run[own_q[1:0]] && uo_out[0] != $past(uo_out[0]));
   end
+
+  // A pin whose first half shows the level from before a move THALF put at the falling edge needs a program that
+  // configures and starts a unit, deeper than this model's covers reach; shift_timing.sv covers each such move on
+  // one unit, and the pads' halves are run at the pins by test/test.py's test_eth_arp.
 
   // uio pins.
   generate

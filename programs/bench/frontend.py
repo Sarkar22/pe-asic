@@ -35,7 +35,8 @@ Ethernet transmit (Rs485Eth.tx_line)
        one (receiver 25 ns) and 0 ns where it gives none (tDD, tZH, tZL, tHZ, tLZ, both skews). 'min' is a bound,
        not a part the data sheet promises.
   E-h  A pad driven by the chip changes t_out ns after the clock edge (default 0; the CMOS5L pads have no
-       characterized delay). A pad that is not driven (a uio pin with OE 0) reads as the level the board's
+       characterized delay). From a record at half cycles (rig.Trace(half=True), ISA section 3.1) a change in a
+       cycle's second half comes at its falling edge, half a cycle and duty_ns after its rising edge. A pad that is not driven (a uio pin with OE 0) reads as the level the board's
        resistor gives it: de_z for DE (default 0, a pull-down, so the driver is off through reset) and di_z for DI.
 
 Ethernet receive (Rs485Eth.ro)
@@ -79,17 +80,23 @@ CYCLE_NS = 20.0                 # 50 MHz
 # ---------------------------------------------------------------------------------------------------------------
 # pins and sampling
 
-def pin_changes(t, v, bit, oe_bit=None, z=None, cycle_ns=CYCLE_NS, t_out=0.0):
+def pin_changes(t, v, bit, oe_bit=None, z=None, cycle_ns=CYCLE_NS, t_out=0.0, half=False, duty_ns=0.0):
     """One pad's changes from a run-length record (lists t of cycles and v of words, as rig.Trace keeps them):
     bit is the bit of the pad's level in the word, oe_bit the bit of its output enable (for a uio pin), and z
-    the level to use while OE is 0. Returns [(time_ns, level)], level 0 or 1, from the first record."""
+    the level to use while OE is 0. Returns [(time_ns, level)], level 0 or 1, from the first record. With half, t
+    counts half cycles: 2c is the first half of cycle c, from its rising edge at c * cycle_ns, and 2c + 1 the
+    second, from its falling edge at c * cycle_ns + cycle_ns / 2 + duty_ns (ISA 3.1; duty_ns is how late the
+    falling edge is, a clock duty error)."""
     out = []
     for c, w in zip(t, v):
         lv = (w >> bit) & 1
         if oe_bit is not None and not (w >> oe_bit) & 1:
             lv = z
         if not out or out[-1][1] != lv:
-            out.append((c * cycle_ns + t_out, lv))
+            if half:
+                out.append(((c >> 1) * cycle_ns + ((cycle_ns / 2 + duty_ns) if c & 1 else 0.0) + t_out, lv))
+            else:
+                out.append((c * cycle_ns + t_out, lv))
     return out
 
 
@@ -98,19 +105,20 @@ def pin_changes(t, v, bit, oe_bit=None, z=None, cycle_ns=CYCLE_NS, t_out=0.0):
 REC_SHIFT = dict(uo=0, ioout=8, iooe=16, ui=24, io=32)
 
 
-def pad(t, v, name, z=None, cycle_ns=CYCLE_NS, t_out=0.0):
+def pad(t, v, name, z=None, cycle_ns=CYCLE_NS, t_out=0.0, half=False, duty_ns=0.0):
     """One pad's changes from a run-length record in that layout. 'uo4' is an output pad; 'io2' is what the chip
     drives on uio pin 2 (z while its OE is 0); 'ui3' and 'line2' are the levels the board gave the chip on ui pin 3
-    and on uio line 2."""
+    and on uio line 2. half and duty_ns: a record at half cycles, as pin_changes reads it."""
     n = int(name.lstrip('abcdefghijklmnopqrstuvwxyz'))
+    hd = dict(half=half, duty_ns=duty_ns)
     if name.startswith('uo'):
-        return pin_changes(t, v, REC_SHIFT['uo'] + n, cycle_ns=cycle_ns, t_out=t_out)
+        return pin_changes(t, v, REC_SHIFT['uo'] + n, cycle_ns=cycle_ns, t_out=t_out, **hd)
     if name.startswith('io'):
-        return pin_changes(t, v, REC_SHIFT['ioout'] + n, REC_SHIFT['iooe'] + n, z, cycle_ns, t_out)
+        return pin_changes(t, v, REC_SHIFT['ioout'] + n, REC_SHIFT['iooe'] + n, z, cycle_ns, t_out, **hd)
     if name.startswith('ui'):
-        return pin_changes(t, v, REC_SHIFT['ui'] + n, cycle_ns=cycle_ns)
+        return pin_changes(t, v, REC_SHIFT['ui'] + n, cycle_ns=cycle_ns, **hd)
     if name.startswith('line'):
-        return pin_changes(t, v, REC_SHIFT['io'] + n, cycle_ns=cycle_ns)
+        return pin_changes(t, v, REC_SHIFT['io'] + n, cycle_ns=cycle_ns, **hd)
     raise ValueError('pad name %r' % name)
 
 
@@ -122,13 +130,27 @@ def level_at(changes, initial, t):
 
 class Sampler:
     """The level of a change list at each clock edge, for driving a chip input cycle by cycle:
-    s(c) is the level at c * cycle_ns + phase_ns. Calls should come in rising c for speed."""
+    s(c) is the level at c * cycle_ns + phase_ns, the rising edge that ends cycle c, and s.fall(c) the level at the
+    falling edge half a cycle before it, c * cycle_ns + phase_ns - cycle_ns / 2 + duty_ns (ISA 3.1: the
+    falling-edge sample; duty_ns is how late the falling edge is). Calls should come in rising c for speed."""
 
-    def __init__(self, changes, initial, cycle_ns=CYCLE_NS, phase_ns=0.0):
+    def __init__(self, changes, initial, cycle_ns=CYCLE_NS, phase_ns=0.0, duty_ns=0.0):
         self.t = [c[0] for c in changes]
         self.v = [c[1] for c in changes]
         self.initial, self.cycle, self.phase = initial, cycle_ns, phase_ns
+        self.duty = duty_ns
         self.i = -1
+        self.j = -1
+
+    def fall(self, c):
+        t = c * self.cycle + self.phase - self.cycle / 2 + self.duty
+        j = self.j
+        if j >= 0 and self.t[j] > t:
+            j = bisect.bisect_right(self.t, t) - 1
+        while j + 1 < len(self.t) and self.t[j + 1] <= t:
+            j += 1
+        self.j = j
+        return self.v[j] if j >= 0 else self.initial
 
     def __call__(self, c):
         t = c * self.cycle + self.phase

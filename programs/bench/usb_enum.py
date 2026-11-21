@@ -33,7 +33,7 @@ from report import Chip, assemble, src
 
 PROGRAMS = ('advanced/usb_enum.s',)
 PROG = 'advanced/usb_enum.s'
-WORDS = 503                     # section 11.2's count for the program
+WORDS = 504                     # section 11.2's count for the program
 BIT = 1e9 / 1.5e6               # ns, USB 2.0 7.1.11
 CYCLE = 20.0                    # ns at 50 MHz
 DP, DM = 0, 1                   # io0, io1
@@ -46,6 +46,12 @@ LEVELS = {J: (0, 1), K: (1, 0), SE0: (0, 0), SE1: (1, 1)}       # (D+, D-) at lo
 PIDS = {0b0011: 'DATA0', 0b1011: 'DATA1', 0b0010: 'ACK', 0b1010: 'NAK', 0b1110: 'STALL'}
 GET_DEV = lambda n: [0x80, 6, 0, 1, 0, 0, n & 255, n >> 8]                  # GET_DESCRIPTOR(DEVICE), 9.4.3
 SET_ADDR = lambda a: [0, 5, a, 0, 0, 0, 0, 0]                                 # SET_ADDRESS, 9.4.6
+GET_CONF = lambda n: [0x80, 6, 0, 2, 0, 0, n & 255, n >> 8]                 # GET_DESCRIPTOR(CONFIGURATION), 9.4.3
+SET_CONF = lambda v: [0, 9, v, 0, 0, 0, 0, 0]                                 # SET_CONFIGURATION, 9.4.7
+# the configuration descriptor (9.6.3, Table 9-10: wTotalLength 18, one interface, value 1, bus powered, 100 mA) and its
+# interface descriptor (9.6.5, Table 9-12: interface 0, no endpoints but endpoint 0, vendor-specific class), field by
+# field from the tables
+CONF = bytes([9, 2, 18, 0, 1, 1, 0, 0x80, 50]) + bytes([9, 4, 0, 0, 0, 0xFF, 0, 0, 0])
 
 
 def desc_words(d):
@@ -194,7 +200,8 @@ class Host:
     token's data packet, before its handshake to the device's data, and between transactions."""
 
     def __init__(self, bus, period=BIT, jitter=0.0, eop=2.0, gap_data=3.0, gap_hs=3.0, gap_tr=4.0, seed=1,
-                 frame=1e6, timeout=17.0, dribble=0, skew=0.0):
+                 frame=1e6, timeout=17.0, dribble=0, skew=0.0, dribble_fit=False):
+        self.dribble_fit = dribble_fit  # dribble at most 6 bit times with no transition with the packet's own 1s
         self.bus, self.period, self.jitter, self.eop = bus, period, jitter, eop
         self.gap_data, self.gap_hs, self.gap_tr = gap_data, gap_hs, gap_tr
         self.rng = random.Random(seed)
@@ -220,6 +227,11 @@ class Host:
         raw = G.stuff(bits)
         if nostuff is not None:
             del raw[stuff_bits(raw)[nostuff]]
+        if self.dribble_fit and drib:   # 7.1.9.1: up to six bit times with no transition before the EOP, counting
+            run1 = 0                    # the 1s the packet ends with (no transition in NRZI)
+            while run1 < len(raw) and raw[-1 - run1] == 1:
+                run1 += 1
+            drib = max(0, min(drib, 6 - run1))
         st = J
         b = self.bus
         p = self.period
@@ -596,9 +608,9 @@ def faults(h):
     r['late_in'] = (yield from h.in_(0))[0]                         # the data stage is over: NAK
     r['bad_out_tok'] = yield from h.out(0, [], 'DATA1', bad_token=True)  # corrupted token: no handshake
     r['status'] = yield from h.out(0, [], 'DATA1')
-    r['config'] = yield from h.setup(0, [0x80, 6, 0, 2, 0, 0, 9, 0])  # GET_DESCRIPTOR(CONFIGURATION): unsupported
-    r['config_in'] = (yield from h.in_(0))[0]
-    r['config_out'] = yield from h.out(0, [], 'DATA1')
+    r['string'] = yield from h.setup(0, [0x80, 6, 0, 3, 0, 0, 9, 0])  # GET_DESCRIPTOR(STRING 0): unsupported, no strings
+    r['string_in'] = (yield from h.in_(0))[0]
+    r['string_out'] = yield from h.out(0, [], 'DATA1')
     r['setconf'] = yield from h.setup(0, [0, 9, 1, 0, 0, 0, 0, 0])   # SET_CONFIGURATION: unsupported
     r['setconf_in'] = (yield from h.in_(0))[0]
     r['after'] = yield from h.control_read(0, GET_DEV(18))
@@ -608,8 +620,8 @@ def faults(h):
 
 FAULTS_WANT = dict(idle='NAK', other_setup=False, other_in='none', ep1_setup=False, ep2_in='none', bad_setup=False,
                    bad_setup_tok=False, setup=True, bad_in='none', data=DESC, late_in='NAK', bad_out_tok=None,
-                   status='ACK', config=True, config_in='STALL',
-                   config_out='STALL', setconf=True, setconf_in='STALL', after=DESC)
+                   status='ACK', string=True, string_in='STALL',
+                   string_out='STALL', setconf=True, setconf_in='STALL', after=DESC)
 
 
 def lost(h):
@@ -706,7 +718,15 @@ def crc_reach(state, width, poly, target, n, fixed=()):
 # but are not a dribble bit: 6 bits after a token, the first a 1 as a dribble bit would be, and 19 after a data
 # packet's CRC16.
 EXTRA_TOK = crc_reach(0b01100, 5, 0b00101, 0b11101, 5, fixed=(1,))
+# 5 bits after a token that take its CRC5 register back to the residue itself, with 0s among them, so the byte end
+# keeps them (section 5.9.7): a 29-bit token whose check passes, which only its length refuses (8.4.1: 3 bytes)
+LEN_TOK = crc_reach(0b01100, 5, 0b00101, 0b01100, 5)
 EXTRA_DATA = crc_reach(0x800D, 16, 0x8005, 0x001A, 16, fixed=(0, 1, 0))
+# 7 0s, then 16 bits that take the CRC16 register from its residue back to the residue: 23 bits after a data packet's
+# CRC16, so its check passes, but its data field is no longer whole bytes (8.3.4), and with 7 bits past the last byte
+# boundary the byte end keeps them (section 5.9.7). Only the length refuses it. No suffix of 1 to 7 bits returns a
+# 16-bit register to its residue, so a shorter one would fail the check itself.
+LEN_DATA = crc_reach(0x800D, 16, 0x8005, 0x800D, 16, fixed=(0,) * 7)
 
 
 def wrong_crc5_then_0(tok):
@@ -747,6 +767,7 @@ def near_misses(h):
     r['in0'] = (yield from h.in_(0, token=G.token('IN', 0, 0) + [0]))[0]
     r['in_crc'] = (yield from h.in_(0, token=G.token('IN', 0, 0) + EXTRA_TOK))[0]
     r['in_bad0'] = (yield from h.in_(0, token=BAD_TOK0))[0]
+    r['in_len'] = (yield from h.in_(0, token=G.token('IN', 0, 0) + LEN_TOK))[0]
     kind, pk = yield from h.in_(0)
     r['in1'] = (kind, pk.name if pk else None, pk.payload if pk else None)
     r['setup0'] = yield from h.setup(0, GET_DEV(18), extra=[0], tries=1)
@@ -756,8 +777,53 @@ def near_misses(h):
     return r
 
 
-NEAR_WANT = dict(setup=True, in0='none', in_crc='none', in_bad0='none', in1=('data', 'DATA1', DESC[:8]), setup0=False,
+NEAR_WANT = dict(setup=True, in0='none', in_crc='none', in_bad0='none', in_len='none', in1=('data', 'DATA1', DESC[:8]), setup0=False,
                  setup_crc=False, after=DESC)
+
+
+def len_data(h):
+    """A data packet whose CRC16 passes but whose data field is not whole bytes (8.3.4): the status stage of a
+    control read, a zero-length DATA1 with the 23 bits of LEN_DATA after its CRC16. It must get no handshake (8.4.6.3,
+    corrupted); the host sends the status again, clean, which is ACKed; then a whole transfer."""
+    yield from start(h)
+    r = {}
+    r['setup'] = yield from h.setup(0, GET_DEV(8))
+    kind, pk = yield from h.in_(0)
+    r['in'] = (kind, pk.name if pk else None, pk.payload if pk else None)
+    yield from h.frame_check()
+    yield from h.send(G.token('OUT', 0, 0), h.gap_tr)
+    t = yield from h.send(G.data('DATA1', []) + LEN_DATA, h.gap_data)
+    pk = yield from h.answer(t)
+    r['status_len'] = pk.name if pk is not None and pk.ok else None
+    h.log.append(('out', 0, r['status_len']))
+    r['status'] = yield from h.out(0, [], 'DATA1')
+    r['after'] = yield from h.control_read(0, GET_DEV(18))
+    yield from h.wait(0.1e6)
+    return r
+
+
+LEN_DATA_WANT = dict(setup=True, **{'in': ('data', 'DATA1', DESC[:8])}, status_len=None, status='ACK', after=DESC)
+
+
+def conf(h):
+    """GET_DESCRIPTOR(CONFIGURATION) in the Default state with wLength 9, what a host asks first, then 255, which
+    gives all of wTotalLength (9.4.3); SET_ADDRESS; the same request at the new address with wLength 18; a
+    SET_CONFIGURATION(1), which this device STALLs as it does every request it doesn't implement (9.2.7); and the
+    device descriptor after it."""
+    yield from start(h)
+    r = {}
+    r['c9'] = yield from h.control_read(0, GET_CONF(9))
+    r['c255'] = yield from h.control_read(0, GET_CONF(255))
+    r['set'] = yield from h.control_nodata(0, SET_ADDR(3))
+    yield from h.wait(2.2e6)
+    r['c18'] = yield from h.control_read(3, GET_CONF(18))
+    r['setconf'] = yield from h.control_nodata(3, SET_CONF(1))
+    r['dev'] = yield from h.control_read(3, GET_DEV(18))
+    yield from h.wait(0.1e6)
+    return r
+
+
+CONF_WANT = dict(c9=CONF[:9], c255=CONF, set=True, c18=CONF, setconf=False, dev=DESC)
 
 
 def endpoints(h):
@@ -934,10 +1000,10 @@ TEETH = [
     ('the toggle not flipped on the host\'s ACK', 'li    R4, WDATA0 ^ WDATA1', 'li    R4, 0'),
     ('the new address taken at the SETUP, before the status stage',
      'ldi   R7, PADDR\n        st    R1, R7         ; taken when the host ACKs the status packet',
-     'ldi   R7, ADDRV\n        st    R1, R7\n        cp    R6, R1\n        swap  R6\n        ori   R6, 0x69'),
+     'ldi   R7, ADDRV\n        st    R1, R7\n        cp    R6, R1\n        swap  R6'),     # 2 words free: no ori
     ('the answer 7 bit times after the EOP (NRSP 260)', '.equ NRSP 176', '.equ NRSP 260'),
-    ('the host\'s data ACKed without its CRC-16 check', 'srd   R4, end\n        add   R2, R4',
-     'ldi   R4, 1\n        add   R2, R4'),
+    ('the host\'s data ACKed without its CRC-16 check', 'srd   R4, end\n        cmpi  R4, 1',
+     'ldi   R4, 1\n        cmpi  R4, 1'),
     ('the CRC-5 verdict ignored on IN', 'xor   R2, R3\n        cmpi  R2, 1          ; A\'s verdict',
      'ldi   R2, 1\n        cmpi  R2, 1          ; A\'s verdict'),
     ('a fraction on the bit time (TFRAC 85): edges off the cycle grid', 'ldi   R0, 67\n        scfg  R0, TXTAIL',
@@ -951,23 +1017,13 @@ TEETH = [
     ('IN: endpoint bit 3 unchecked', 'tsti  R0, 7          ; endpoint bits 3:1 clear',
      'tsti  R0, 3          ; endpoint bits 3:1 clear'),
     ('SETUP and OUT: endpoint bit 3 unchecked', 'tsti  R0, 7\n        jt    tvno', 'tsti  R0, 3\n        jt    tvno'),
-    ('dribble, A: the CRC-5 value after a dribble bit taken as the residue itself', 'lui   R2, 0xE8',
-     'lui   R2, 0x60'),
-    ('dribble, A: the bit count ignored, any length but 24 bits taken at the dribble value',
-     'lui   R2, 0xE8       ; 0xE800 | the bit count', 'li    R2, 0xE809'),
-    ('dribble, S: the CRC-16 value after a dribble bit wrong', 'cmpi  R4, 0x1A', 'cmpi  R4, 0x1B'),
-    ('dribble, S: data with extra bits taken whenever the register reaches the dribble value',
-     'jf    tnone          ; with no flag;', 'idle                 ; with no flag;'),
-    ('dribble, S: a dribbled ACK not taken', 'andi  R2, 30\n        cmpi  R2, 8          ; 8 bits, or 9',
-     'andi  R2, 31\n        cmpi  R2, 8          ; 8 bits, or 9'),
-    ('dribble, S: VERD read before the answer\'s words, the order a clean token allows',
-     'ldi   R7, INW\n        ldp   R0, R7         ; SYNC and PID\n        ldp   R5, R7\n        ld    R4, R7         '
-     '; bytes\n        ldi   R2, VERD       ; read after the answer\'s words: A stores a dribbled token\'s verdict 7 '
-     'slots later\nvin:    ld    R2, R2         ; than a clean one\'s, and this keeps its store at least 15 cycles '
-     'before the load\n        xor   R2, R3\n        cmpi  R2, 1          ; A\'s verdict for this reception: a good '
-     'token\n        jf    tbad\n',
-     'ldi   R2, VERD\nvin:    ld    R2, R2\n        xor   R2, R3\n        cmpi  R2, 1\n        jf    tbad\n'
-     '        ldi   R7, INW\n        ldp   R0, R7\n        ldp   R5, R7\n        ld    R4, R7\n'),
+    ('A: a token of any length taken (the bit count unchecked)', 'cmpi  R2, 8          ; 24 bits',
+     'sett                 ; 24 bits'),
+    ('GET_DESCRIPTOR(CONFIGURATION) answered with the device descriptor', 'ldi   R1, CONF', 'ldi   R1, DESC'),
+    ('GET_DESCRIPTOR(CONFIGURATION) STALLed', 'cmpi  R2, 2          ; or CONFIGURATION',
+     'cmpi  R2, 7          ; or CONFIGURATION'),
+    ('S: a data packet taken whatever its length (the whole-byte test never fires)',
+     'tsti  R2, 7          ; whole bytes', 'tsti  R2, 0          ; whole bytes'),
 ]
 
 
@@ -1089,9 +1145,17 @@ def main(log):
               'the device to address 0 and the old address goes unanswered', not v and not diff and
               r.count['ADDRV'] == 0, v or diff or summary(r.rep))
 
-    # a dribble bit before the host's EOP (7.1.9.1). The units' end test covers every bit up to the SE0, so the bit
-    # goes into the CRC and the last word (section 5.9.7, 11.5); the firmware takes a packet whose last word has
-    # 8k + 1 bits when the CRC register is one 1 bit past its residue, and a 9-bit handshake ending in a 1
+    # the configuration descriptor (9.4.3, 9.6.3, 9.6.5)
+    r = run(conf, 20e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in CONF_WANT if (r.value or {}).get(k) != CONF_WANT[k]}
+    log.check('GET_DESCRIPTOR(CONFIGURATION): wLength 9 gives the 9-byte configuration descriptor, 255 and 18 give it '
+              'with its interface descriptor, 18 bytes, at address 0 and after SET_ADDRESS; SET_CONFIGURATION is '
+              'STALLed (not implemented); every usb_check check passes', not v and not diff, v or diff or 'as wanted')
+
+    # a dribble bit before the host's EOP (7.1.9.1). With REOP the units' end test drops 1 to 6 ones after the last
+    # whole byte (section 5.9.7, the byte end), so a dribbled packet reaches the firmware as a clean one
     r = run(dribble, 20e6)
     note(r)
     v = verdict(r)
@@ -1123,6 +1187,15 @@ def main(log):
         v = verdict(r)
         log.check('every host packet with one dribble bit (tokens, data, handshakes): %s, the same results as clean, '
                   'every usb_check check passes' % what, not v and want(r), v or summary(r.rep))
+    # 2 to 6 dribble bit times on every host packet: each packet is stretched by that many, or by fewer where its own
+    # final 1s would make more than the six bit times with no transition that 7.1.9.1 asks a receiver to take
+    for n in range(2, 7):
+        r = run(quick, 12e6, host_kw=dict(dribble=n, dribble_fit=True), phase=2.5 * n, align=n % 4)
+        note(r)
+        v = verdict(r)
+        log.check('power-up enumeration with %d dribble bit times on every host packet (fewer where its final 1s '
+                  'leave less room, 7.1.9.1): the same results as clean, every usb_check check passes' % n,
+                  not v and good_quick(r), v or summary(r.rep))
     cp, ld = critical_path(host_kw=dict(dribble=1))
     log.info('margins, every host packet dribbled: from the time reference to the start, worst %s cycles of %d: %s; '
              'A\'s store of its verdict to S\'s load of it, at least %s cycles for an IN and %s for a SETUP or OUT' % (
@@ -1140,6 +1213,13 @@ def main(log):
     log.check('bits that are not a dribble bit: a 0 after an IN token and after a SETUP\'s data packet, too many '
               'bits that reach the dribble value of the CRC5 and CRC16 registers, and a 0 that takes an IN token with a '
               'wrong CRC5 there: no answer (8.7.1); every usb_check check passes', not v and not diff, v or diff or summary(r.rep))
+    r = run(len_data, 16e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in LEN_DATA_WANT if (r.value or {}).get(k) != LEN_DATA_WANT[k]}
+    log.check('a data packet whose CRC16 passes but whose data field is not whole bytes (8.3.4), 23 bits past its '
+              'CRC16: no handshake (8.4.6.3); the clean status after it is ACKed; every usb_check check passes',
+              not v and not diff, v or diff or summary(r.rep))
     r = run(endpoints, 24e6)
     note(r)
     v = verdict(r)
@@ -1198,10 +1278,12 @@ def main(log):
                                                         good_quick),
                ('dribble', dribble, 20e6, {}, same(DRIBBLE_WANT)), ('near_misses', near_misses, 16e6, {},
                                                                    same(NEAR_WANT)),
+               ('len_data', len_data, 16e6, {}, same(LEN_DATA_WANT)),
                ('endpoints', endpoints, 24e6, {}, same(ENDPOINTS_WANT)), ('faults', faults, 30e6, {},
                                                                          same(FAULTS_WANT)),
                ('lost', lost, 20e6, {}, lambda x: (x.value or {}).get('d2') == DESC),
                ('interrupted', interrupted, 30e6, {}, same(INTERRUPTED_WANT)),
+               ('conf', conf, 20e6, {}, same(CONF_WANT)),
                ('enumerate_', enumerate_, 40e6, {}, good_enum))
     for what, old, new in TEETH:
         text = broken(old, new)

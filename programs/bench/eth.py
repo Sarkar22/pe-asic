@@ -15,7 +15,9 @@ What the firmware must do with each partner frame comes from the frame alone (di
 counters must match, so every frame is accounted for, and eth_check decides which frames need a reply.
 
 The chip sees RO as frontend's level at each clock edge plus a phase of 0 to 20 ns, so the asynchronous sampling of
-section 10, item 2 is swept. The host posts the MAC and IP, five words on mailbox word 4. Thread placements and
+section 10, item 2 is swept. With half (the default) the chip also gets RO's level at each falling edge, half a cycle
+earlier, and DI and DE are recorded in both halves of every cycle (section 3.1); duty moves every falling edge that
+many ns late, a clock duty error (section 7.3). The host posts the MAC and IP, five words on mailbox word 4. Thread placements and
 start alignments vary across runs.
 """
 import bisect
@@ -42,6 +44,7 @@ DI, DE, RO = 4, 5, 4            # uo4, uo5, ui4
 MEM = dict(HANDED=5, RELEASED=6, NKEEP=7, NBAD=8, NOTHER=9, NBUSY=10)
 CODE_FROM = 12                  # words from here on are code and constants that must never change
 PPM = 1e-4                      # 7.3.2: 10 Mb/s +/- 0.01%
+HALF = True                     # run()'s default: drive and record both halves of every cycle (section 3.1)
 
 
 def wire_words(octets):
@@ -246,12 +249,15 @@ def ro_schedule(ro, phase):
 
 
 def run(line, t_end, corner='typ', phase=0.0, align=0, threads=(0, 1), seed=1, text=None, chip_cls=None,
-        fe_over=None, check=True):
+        fe_over=None, check=True, half=HALF, duty=0.0):
     """Runs the program against the line to t_end ns. Returns a Result with the checker's report."""
     img = assemble(text if text is not None else src(PROG), depth=512)
     fe = frontend.Rs485Eth(corner, **(fe_over or {}))
     rx = line.line()
-    sched = ro_schedule(fe.ro(rx), phase)
+    ro = fe.ro(rx)
+    sched = ro_schedule(ro, phase)
+    sched_f = ro_schedule(ro, phase - CYCLE / 2 + duty) if half else []
+    j, nf, lvf = 0, len(sched_f), 1
     cycles = int(t_end / CYCLE)
     chip = (chip_cls or Chip)(512, seed)
     for a, w in img.words.items():
@@ -275,14 +281,29 @@ def run(line, t_end, corner='typ', phase=0.0, align=0, threads=(0, 1), seed=1, t
             i += 1
         ui = 0x01 | (lv << RO)
         uo = chip.pads(ui)[0]
+        if half:
+            while j < nf and sched_f[j][0] <= c:
+                lvf = sched_f[j][1]
+                j += 1
+            uo2 = chip.pads2(ui)[0]
+            if uo != last:
+                rec_t.append(2 * c)
+                rec_v.append(uo)
+                last = uo
+            if uo2 != last:
+                rec_t.append(2 * c + 1)
+                rec_v.append(uo2)
+                last = uo2
+            chip.cycle(ui, 0, 0x01 | (lvf << RO))
+            continue
         if uo != last:
             rec_t.append(c)
             rec_v.append(uo)
             last = uo
         chip.cycle(ui, 0)
     res = Result()
-    res.di = frontend.pad(rec_t, rec_v, 'uo%d' % DI)
-    res.de = frontend.pad(rec_t, rec_v, 'uo%d' % DE)
+    res.di = frontend.pad(rec_t, rec_v, 'uo%d' % DI, half=half, duty_ns=duty)
+    res.de = frontend.pad(rec_t, rec_v, 'uo%d' % DE, half=half, duty_ns=duty)
     res.fe, res.rx, res.line, res.chip, res.img, res.t_end = fe, rx, line, chip, img, cycles * CYCLE
     res.tx = tx_pair(fe, res.di, res.de)
     res.rep = eth_check.check(res.tx, rx, mac=MAC, ip=IP, t_start=0.0, t_end=res.t_end) if check else None
@@ -434,7 +455,7 @@ TEETH = [
      'call  cmpn           ; tpa'),
     ('a reply 20 bit times into the gap (deference of 100 cycles)', 'li    R2, 480', 'li    R2, 100'),
     ('TP_IDL of 11 cycles', 'li    R0, 0x800F', 'li    R0, 0x800B'),
-    ('DI resting low (IDLEA 0), so a pulse starts with the old DI', 'li    R0, 0x01A1', 'li    R0, 0x0181'),
+    ('DI resting low (IDLEA 0), so a pulse starts with the old DI', 'li    R0, 0x81A1', 'li    R0, 0x8181'),
     ('frames with an FCS error kept', 'srd   R4, end', 'ldi   R4, 1'),
     ('runts kept', 'ldi   R4, BUFW - 30', 'ldi   R4, BUFW'),
     ('frames for another station kept', 'jf    rother', 'jf    rkeep'),
@@ -442,7 +463,9 @@ TEETH = [
     ('tpa left as received (4 words moved, not 5)', 'ldi   R5, 5\n        call  xmv', 'ldi   R5, 4\n        call  xmv'),
     ('no deference: sending while the partner\'s frame is on the line',
      'until RO, 0, R2      ; T 1: the line was active within 96 bit times\n        jt    tloop', 'until RO, 0, R2'),
-    ('the receiver\'s polarity wrong (RINV 0)', 'li    R0, 0x0029 | (RON << 8)', 'li    R0, 0x0021 | (RON << 8)'),
+    ('the receiver\'s polarity wrong (RINV 0)', 'li    R0, 0x002B | (RON << 8)', 'li    R0, 0x0023 | (RON << 8)'),
+    ('edges timed to the cycle: RKIND 1, not 3', 'li    R0, 0x002B | (RON << 8)', 'li    R0, 0x0029 | (RON << 8)'),
+    ('half bits of 2 and 3 cycles: THALF off', 'li    R0, 0x81A1', 'li    R0, 0x01A1'),
 ]
 
 
@@ -515,6 +538,26 @@ def main(log):
                      'disable time): %s' % (corner, detail))
         else:
             log.check('transmit through the %s corner of FN6307: every check passes' % corner, r2.ok, detail)
+            half = fe.p['skew_dd'] / 2
+            log.check('transmit through the %s corner, THALF: every edge within the transceiver\'s tSKEW/2 = %.2f ns '
+                      'of the grid of exact 50 ns half bits, so the chip adds nothing at a 50%% clock (7.5.2.1 allows '
+                      'an encoder 0.5 ns; section 7.3)' % (corner, half),
+                      bool(mm['jitter']) and max(mm['jitter']) <= half + 0.05,
+                      'peak deviation %s ns over %d frames' % (span(mm['jitter'], '%.2f'), len(mm['jitter'])))
+
+    # the clock's duty error moves every falling-edge move (section 7.3): ARP replies with the falling edge d ns late
+    Ld = Line(seed=13)
+    td = 0.4e6
+    for k in range(4):
+        td = Ld.frame(arp_req(spa=bytes([192, 168, 0, 30 + k])), td) + 200e3
+    out = []
+    for d in (1.0, 2.0, 3.3):
+        rd = run(Ld, td, duty=d)
+        md = tx_margins(rd.rep)
+        out.append('d %.1f ns: %s ns%s' % (d, span(md['jitter'], '%.2f'), '' if rd.rep.ok else ' (fails %s)' % sorted(
+            {c for _, c, _ in rd.rep.failed()})))
+    log.info('margins: transmit edge deviation with the falling edge d ns late, typical corner (tSKEW/2 = 0.5 ns; the '
+             'arithmetic adds d/2), limit 8.5 (7.5.2.1 + 14.3.1.2.3): %s' % '; '.join(out))
 
     # receive corners, phases, alignments and threads on the exchange
     configs = [('typ', 5.0, 1, (1, 0)), ('typ', 10.0, 2, (2, 3)), ('typ', 15.0, 3, (3, 2)), ('max', 0.0, 1, (0, 1)),
@@ -551,15 +594,34 @@ def main(log):
         lost.append(40 - r.count['NKEEP'])
     log.check('jitter: 40 frames with +/-8 ns random jitter on every transition at each of 8 sampling phases, none '
               'lost', not any(lost), 'lost per phase %s' % lost)
-    # past what the decoder holds at 50 MHz, sampling every 20 ns: 802.3's own figures, at the sampling phase that
-    # suffers most
+    # RKIND 3 times every edge to the half cycle (section 5.9.6): every phase and FN6307 corner
+    for what, jit in (('+/-12 ns random on every transition', ('uniform', 12.0, 12.0)),
+                      ('bit-boundary transitions 10 ns late and mid-bit ones 10 ns early', ('alt', -10.0))):
+        lost = {}
+        for i, corner in enumerate(('typ', 'max', 'min')):
+            lost[corner] = []
+            for k in range(8):
+                L, t = frames_only(20, seed=600 + 10 * k + i, jitter=jit)
+                r = run(L, t, corner=corner, phase=2.5 * k, check=False)
+                lost[corner].append(20 - r.count['NKEEP'])
+        log.check('jitter: %s, 20 frames at each of 8 sampling phases and 3 FN6307 corners, none lost' % what,
+                  not any(sum(v) for v in lost.values()), 'lost per phase: %s' % lost)
+    # 802.3's own figures (14.3.1.3.1, 7.5.2.2) and the worst fixed pattern, past what the decoder holds today: the
+    # decoder's window takes a bit-boundary edge 23 ns before a clock edge for a candidate (section 7.3)
     for what, jit in (('+/-13.5 ns random on every transition (802.3 14.3.1.3.1)', ('uniform', 13.5, 13.5)),
+                      ('bit-boundary transitions 13.5 ns late and mid-bit ones 13.5 ns early', ('alt', -13.5)),
+                      ('bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late', ('alt', 13.5)),
                       ('7.5.2.2\'s test signal, +/-12 ns on the preamble and +/-18 ns on the frame, random',
                        ('uniform', 12.0, 18.0))):
-        L, t = frames_only(150, seed=15, jitter=jit)
-        r = run(L, t, phase=10.0, check=False)
-        log.info('receive limit at 50 MHz: %s, sampling phase 10 ns: %d of 150 frames kept' % (
-            what, r.count['NKEEP']))
+        lost = {}
+        for i, corner in enumerate(('typ', 'max', 'min')):
+            lost[corner] = []
+            for k in range(8):
+                L, t = frames_only(10, seed=650 + 10 * k + i, jitter=jit)
+                r = run(L, t, corner=corner, phase=2.5 * k, check=False)
+                lost[corner].append(10 - r.count['NKEEP'])
+        log.info('receive limit at 50 MHz: %s, 10 frames at each of 8 phases and 3 corners: %d of 240 lost; per '
+                 'phase %s' % (what, sum(sum(v) for v in lost.values()), lost))
 
     # a frame that arrives while the reply goes out: the program has no collision detection (802.3 4.2.3.2.4), so
     # the reply completes and the collision is reported; the frame that arrived is received and answered after it
@@ -637,8 +699,21 @@ def main(log):
     # broken copies
     L, t = exchange(seed=8)
     Li = Line(seed=9)
+    Lj, tj = frames_only(20, seed=761, jitter=('uniform', 13.5, 13.5))
     for what, old, new in TEETH:
         text = broken(old, new)
+        if 'RKIND 1' in what:           # edges timed to 20 ns lose frames at 802.3's jitter where RKIND 3 keeps them
+            r = run(Lj, tj, corner='max', phase=15.0, check=False, text=text)
+            lost = 20 - r.count['NKEEP']
+            log.check('a broken copy is caught: %s' % what, lost > 4,
+                      '%d of 20 frames lost with +/-13.5 ns random jitter, max corner, phase 15 ns' % lost)
+            continue
+        if 'THALF' in what:             # the transmit check above: half bits of 40 and 60 ns
+            r = run(L, t, text=text)
+            m = tx_margins(r.rep)
+            log.check('a broken copy is caught: %s' % what, bool(m['jitter']) and max(m['jitter']) > 0.55,
+                      'peak deviation %s ns, typical corner' % span(m['jitter'], '%.2f'))
+            continue
         r = run(Li, 40e6, text=text) if 'link pulse' in what else run(L, t, text=text)
         v = verdict(r)
         log.check('a broken copy is caught: %s' % what, bool(v), v[:200] if v else 'every check passed')

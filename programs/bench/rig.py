@@ -4,7 +4,10 @@ Nothing here knows any program's constants or labels. Device models react to pad
 levels only. Decoders take a recorded pin trace plus the protocol's parameters
 (baud rate, SPI mode, the spec's timing table) and work from the protocol's rules.
 
-Pin values are recorded for every cycle; the record is run-length stored.
+Pin values are recorded for every cycle; the record is run-length stored. With half=True (ISA section 3.1) the
+record is at half cycles, 2c for the first half of cycle c and 2c + 1 for its second, and the chip's own uio drive
+reaches its falling-edge sample with the first half's level and its rising-edge sample with the second's; device
+models still step once a cycle, after it, and see the second half.
 """
 import bisect
 
@@ -25,9 +28,10 @@ def ns(x):
 class Trace:
     SHIFT = dict(uo=0, ioout=8, iooe=16, ui=24, io=32)
 
-    def __init__(self):
+    def __init__(self, half=False):
         self.t, self.v = [], []
         self.end = 0
+        self.half = half                # times count half cycles
 
     def add(self, c, val):
         if not self.v or self.v[-1] != val:
@@ -84,15 +88,16 @@ class Wave:
 # board
 
 class Board:
-    def __init__(self, chip, devices=(), pullups=0, rise=0, ui_idle=0x01):
+    def __init__(self, chip, devices=(), pullups=0, rise=0, ui_idle=0x01, half=False):
         self.chip = chip
+        self.half = half
         self.devices = list(devices)
         self.pullups = pullups
         self.pu_bits = [b for b in range(8) if (pullups >> b) & 1]
         self.rise = rise                # cycles from release to the line reading high
         self.count = [10 ** 9] * 8
         self.ui_idle = ui_idle          # ui0 is CS of the host link: idle high
-        self.trace = Trace()
+        self.trace = Trace(half)
         self.conflicts = []             # chip drives high while a device pulls low
         self.agents = []
 
@@ -100,6 +105,8 @@ class Board:
         self.agents.append([gen, 0])
 
     def run(self, cycles, stop=None):
+        if self.half:
+            return self._run_half(cycles, stop)
         chip = self.chip
         end = chip.c + cycles
         devs = self.devices
@@ -149,6 +156,59 @@ class Board:
                 break
         if ran:
             trace.end = chip.c
+
+    def _lines(self, uo, ioo, oe, ui, low, update):
+        """The uio lines the board sees for pads (uo, ioo, oe), and the record word. update: count the pull-ups'
+        rise time in this call, once a cycle; the other call of the cycle reads the count as that one left it."""
+        dlow = oe & ~ioo & 0xFF
+        dhigh = oe & ioo
+        pulled = dlow | low
+        io = dhigh & ~pulled
+        for b in self.pu_bits:
+            if (pulled >> b) & 1:
+                if update:
+                    self.count[b] = 0
+            else:
+                if update:
+                    self.count[b] += 1
+                if self.count[b] > self.rise or (dhigh >> b) & 1:
+                    io |= 1 << b
+        return io, dhigh & low, uo | (ioo << 8) | (oe << 16) | (ui << 24) | (io << 32)
+
+    def _run_half(self, cycles, stop=None):
+        """run() at half cycles: the pads of each half, the chip's own drive at each edge (ISA 3.1)."""
+        chip = self.chip
+        end = chip.c + cycles
+        trace = self.trace
+        ran = False
+        n_agents, due = len(self.agents), self._due()
+        while chip.c < end:
+            ran = True
+            c = chip.c
+            ui = self.ui_idle
+            low = 0
+            for d in self.devices:
+                ui = (ui & ~d.ui_mask) | d.ui_val
+                low |= d.io_low
+            p1, p2 = chip.pads(ui), chip.pads2(ui)
+            io, cr, v2 = self._lines(*p2, ui, low, True)        # the pull-ups' rise: once a cycle, as run() does
+            io_f, cf, v1 = self._lines(*p1, ui, low, False)     # the same rise, the first half's own drive
+            if cr:
+                self.conflicts.append((c, cr))
+            if cf and cf != cr:
+                self.conflicts.append((c, cf))
+            trace.add(2 * c, v1)
+            trace.add(2 * c + 1, v2)
+            chip.cycle(ui, io, ui, io_f)
+            for d in self.devices:
+                d.step(c, p2[0], io)
+            if self.agents and (c >= due or len(self.agents) != n_agents):
+                self._agents(c)
+                n_agents, due = len(self.agents), self._due()
+            if stop is not None and stop():
+                break
+        if ran:
+            trace.end = 2 * chip.c
 
     def _due(self):
         """The first cycle at which an agent wants to run again."""

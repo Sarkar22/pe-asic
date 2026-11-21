@@ -62,7 +62,7 @@ run_job() {
       # Regenerates reset_flops.sv and probes_reset.ys from the RTL and checks they match the ones here.
       dir=$WORK/reset_gen
       rm -rf "$dir"; mkdir -p "$dir"
-      cp "$ROOT"/src/*.sv "$ROOT/verif/cells_rtl.v" "$HERE/sram_free.v" "$HERE/read_chip.ys" "$HERE/reset_flops.ys" "$dir"
+      cp "$ROOT"/src/*.sv "$HERE/cells_formal.v" "$HERE/sram_free.v" "$HERE/read_chip.ys" "$HERE/reset_flops.ys" "$dir"
       (cd "$dir" && WORKDIR=$dir tool bash -c 'cd "$WORKDIR" && yosys -q reset_flops.ys && python3 -I '"$HERE"'/gen_reset.py chip.json .') \
         > "$dir.log" 2>&1
       rc=$?

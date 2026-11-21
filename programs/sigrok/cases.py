@@ -2220,7 +2220,7 @@ def g_usb_enum(runner, log):
             ['IN ADDR 0 EP 2'] + ue_setup(0, req) * 2 + ue_read(0, req, D)[:3] + ['IN ADDR 0 EP 0'] +
             ue_read(0, req, D)[3:-3] + ['IN ADDR 0 EP 0', 'NAK', 'OUT ADDR 0 EP 0', 'DATA1 [ ]', 'OUT ADDR 0 EP 0',
                                         'DATA1 [ ]', 'ACK'] +
-            ue_setup(0, [0x80, 6, 0, 2, 0, 0, 9, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL', 'OUT ADDR 0 EP 0', 'DATA1 [ ]',
+            ue_setup(0, [0x80, 6, 0, 3, 0, 0, 9, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL', 'OUT ADDR 0 EP 0', 'DATA1 [ ]',
                                                          'STALL'] +
             ue_setup(0, [0, 9, 1, 0, 0, 0, 0, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL'] + ue_read(0, req, D))
     ctx = b.run('usb_enum_faults', usb_enum_run, U.faults, 30e6)
@@ -2232,6 +2232,15 @@ def g_usb_enum(runner, log):
     want = (ue_read(0, U.GET_DEV(64), D, cut=1) + ue_read(0, req, D) + ue_nodata(0, U.SET_ADDR(7)) +
             ue_read(7, req, D, cut=1) + ue_read(0, req, D) + ue_setup(7, U.GET_DEV(8)))
     ctx = b.run('usb_enum_interrupted', usb_enum_run, U.interrupted, 30e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    b.close()
+    # the configuration descriptor (USB 2.0 9.4.3, 9.6.3, 9.6.5), the bytes the bench takes from the tables
+    b = Batch(runner, 'GET_DESCRIPTOR(CONFIGURATION) with wLength 9, 255 and 18, around a SET_ADDRESS; '
+              'SET_CONFIGURATION STALLed', 'packets')
+    want = (ue_read(0, U.GET_CONF(9), U.CONF[:9]) + ue_read(0, U.GET_CONF(255), U.CONF) + ue_nodata(0, U.SET_ADDR(3)) +
+            ue_read(3, U.GET_CONF(18), U.CONF) + ue_setup(3, U.SET_CONF(1)) + ['ACK', 'IN ADDR 3 EP 0', 'STALL'] +
+            ue_read(3, req, D))
+    ctx = b.run('usb_enum_conf', usb_enum_run, U.conf, 20e6)
     b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
     b.close()
     # bit-stuff errors from the host (USB 2.0 7.1.9): usb_signalling reports each one and drops the packet, and the
@@ -3083,6 +3092,91 @@ def g_ws2812_unit(runner, log):
         b.close()
 
 
+def i2s_stack(sck, ws, sd):
+    return [('i2s', {'sck': sck, 'ws': ws, 'sd': sd}, {})]
+
+
+def i2s_words(d):
+    """sigrok i2s: [(channel 0 left or 1 right, value)] in order, and its warnings (a word of another length)."""
+    got = []
+    for a in d.of('i2s', 'left', 'right'):
+        got.append((0 if a.cls == 'left' else 1, int(a.text.split(':')[1], 16)))
+    return got, [a.text for a in d.of('i2s', 'warnings')]
+
+
+def tdm_stack(clk, fs, sd, bps, channels):
+    return [('tdm_audio', {'clock': clk, 'frame': fs, 'data': sd}, {'bps': bps, 'channels': channels,
+                                                                     'edge': 'rising'})]
+
+
+def tdm_slots(d):
+    """sigrok tdm_audio: [(slot number from 1, value)] in order. The decoder has no error annotations."""
+    got = []
+    for a in d.anns:
+        if a.pd == 'tdm_audio' and a.text.startswith('Channel '):
+            k, v = a.text[8:].split(':')
+            got.append((int(k), int(v, 16)))
+    return got, []
+
+
+def audio_want(fmt, frames):
+    if fmt == 0:
+        return [(k % 2, w) for fr in frames for k, w in enumerate(fr)]
+    return [(k + 1, w) for fr in frames for k, w in enumerate(fr)]
+
+
+def g_i2s(runner, log):
+    import random
+    import i2s as A
+    log.group('advanced/i2s_ctl.s', title='I2S and TDM controller on two shift units: SCK io0, WS or FS uo5, SD out '
+              'uo6, SD in ui4 from a slave transmitter model; bench/i2s.py')
+    for title, fmt, ns, nb, nf, rate in A.CTL_RATES:
+        h, tper, tfrac = A.half_of(rate, ns * nb)
+        b = Batch(runner, title + ', SD out and SD in, 4 thread pairs', 'words')
+        for k, th in enumerate(A.PAIRS[:4]):
+            rng = random.Random(900 + 10 * ns + nb + k)
+            frames = [[rng.getrandbits(nb) for _ in range(ns)] for _ in range(nf)]
+            rxw = [[rng.getrandbits(nb) for _ in range(ns)] for _ in range(nf)]
+            ctx = b.run('i2s_ctl_f%d_%dx%d_%d_t%d%d' % (fmt, ns, nb, rate // 1000, th[0], th[1]), A.ctl_run, fmt, ns,
+                        nb, frames, tper, tfrac, threads=th, align=k, rx_words=rxw, delay=1 + k % 2)
+            if fmt == 0:
+                bench = [(c, int(''.join(map(str, bits)), 2)) for c, bits in A.read_i2s(ctx.value.lines)[0]]
+                b.sigrok(ctx, i2s_stack('uio0', 'uo5', 'uo6'), i2s_words, audio_want(0, frames), bench=bench,
+                         tag='sdout')
+                b.sigrok(ctx, i2s_stack('uio0', 'uo5', 'ui4'), i2s_words, audio_want(0, rxw), tag='sdin')
+            else:
+                b.sigrok(ctx, tdm_stack('uio0', 'uo5', 'uo6', nb, ns), tdm_slots, audio_want(1, frames), tag='sdout')
+                b.sigrok(ctx, tdm_stack('uio0', 'uo5', 'ui4', nb, ns), tdm_slots, audio_want(1, rxw), tag='sdin')
+            e = A.ctl_judge(ctx.value)
+            if e:
+                b.fail(ctx.name, e[0])
+        b.close()
+    log.group('advanced/i2s_tgt.s', title='I2S and TDM target on one shift unit: SCK ui4, WS or FS ui5, SD in ui6 from '
+              'a controller model, SD out uo2; bench/i2s.py')
+    for title, fmt, ns, nb, nf, rate in A.TGT_RATES:
+        h = A.half_of(rate, ns * nb)[0]
+        b = Batch(runner, title + ', SD out and SD in, 4 threads', 'words')
+        for tid in range(4):
+            rng = random.Random(950 + 10 * ns + nb + tid)
+            frames = [[rng.getrandbits(nb) for _ in range(ns)] for _ in range(nf)]
+            txf = [[rng.getrandbits(nb) for _ in range(ns)] for _ in range(nf)]
+            ctx = b.run('i2s_tgt_f%d_%dx%d_%d_t%d' % (fmt, ns, nb, rate // 1000, tid), A.tgt_run, fmt, ns, nb, frames,
+                        h, tx_frames=txf, tid=tid, align=(tid + 1) % 4, phase=0.25 * tid, delay=tid % 3)
+            zero = [[0] * ns]
+            if fmt == 0:
+                b.sigrok(ctx, i2s_stack('ui4', 'ui5', 'uo2'), i2s_words, audio_want(0, zero + txf), tag='sdout')
+                b.sigrok(ctx, i2s_stack('ui4', 'ui5', 'ui6'), i2s_words, audio_want(0, zero + frames), tag='sdin')
+            else:
+                b.sigrok(ctx, tdm_stack('ui4', 'ui5', 'uo2', nb, ns), tdm_slots, audio_want(1, zero + txf),
+                         tag='sdout')
+                b.sigrok(ctx, tdm_stack('ui4', 'ui5', 'ui6', nb, ns), tdm_slots, audio_want(1, zero + frames),
+                         tag='sdin')
+            e = A.tgt_judge(ctx.value)
+            if e:
+                b.fail(ctx.name, e[0])
+        b.close()
+
+
 def rig_uart_decode(w, baud):
     import rig
     return rig.uart_decode(w, baud)
@@ -3115,6 +3209,7 @@ GROUPS = [
     ('ow_unit', g_ow_unit),
     ('uart_par_unit', g_uart_par_unit),
     ('ws2812_unit', g_ws2812_unit),
+    ('i2s', g_i2s),
     ('basic_images', g_basic_images),
     ('teeth', g_teeth),
 ]

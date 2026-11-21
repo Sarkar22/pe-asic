@@ -8,6 +8,10 @@ Edits (instances by name, as in the netlist; nets by name):
   rewire_d:<flop>:<other>  the flop's D becomes the other flop's D net
   buf_to_inv:<cell>        a buffer (pins A, X) becomes an inverter (A, Y)
   drop_flop:<flop>         the flop is removed and its Q net tied to 0 (a tielo cell)
+  rewire_pin:<cell>:<pin>:<other>:<other pin>
+                           the cell's pin is connected to the net on the other cell's pin instead
+  invert_pin:<cell>:<pin>  an inverter in front of the cell's input pin (for a box's input: the new net has a new
+                           name, so the box's pins still pair up with the same nets as before)
   flop_of:<Q net>          (lookup only) print the flop whose Q is this net
 Every edit is printed; the input file is only read.
 SPDX-License-Identifier: Apache-2.0
@@ -79,6 +83,15 @@ def main():
             typ, pm = "sg13cmos5l_inv_1", {"A": pm["A"], "Y": pm["X"]}
         elif kind == "drop_flop":
             typ, pm = "sg13cmos5l_tielo", {"L_LO": pm["Q"]}
+        elif kind == "invert_pin":
+            assert args[1] in pm, (name, args[1], pm)
+            w = f"tooth_d_{len(new_wires)}"
+            new_wires.append(w)
+            new_cells.append(emit(f"tooth_inv_{len(new_cells)}", "sg13cmos5l_inv_1", {"A": pm[args[1]], "Y": w}))
+            pm[args[1]] = w
+        elif kind == "rewire_pin":
+            assert args[1] in pm, (name, args[1], pm)
+            pm[args[1]] = pins(args[2])[args[3]]
         else:
             sys.exit(f"unknown edit {kind}")
         repl[m.start()] = (m.end(), emit(name, typ, pm, m.group(1)))

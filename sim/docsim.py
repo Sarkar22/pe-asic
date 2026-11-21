@@ -32,7 +32,7 @@ THREAD = dict(STALE='stale', LATE='late', D='D', S='S', T='T', P='P', KIND='kind
               IR='ir', IV='iv', PC='pc', TID='id', D_WRITTEN='dw', HIT='hit', R='r')
 GLOBAL = dict(OWN='owner', OUT='OUT', SHD='SHD', OE='OE', SHOE='SHOE', OD='OD', BYP='BYP', SHBYP='SHBYP',
               FULL='full', SYNC2='sync2', DEPTH='size', LANES='lanes', mem='mem', BUSY='busy',
-              SYNC3='sync3', SEL='sel', SHSEL='shsel', KEEP='KEEP')
+              SYNC3='sync3', SEL='sel', SHSEL='shsel', KEEP='KEEP', SYNC2F='sync2f')
 
 
 def field_table(text):
@@ -235,27 +235,30 @@ class Chip(sim2.Chip):
     def set_d(self, t, v):
         t.D, t.dw = v & 0xFFFF, 1
 
-    def V(self, p):
-        """5.2: what output pin p shows before bypass and open drain."""
+    def V(self, p, half=1):
+        """5.2: what output pin p shows before bypass and open drain, in the second half of the cycle (V), or with
+        half 0 in the first (V0, with A0 and B0: OLA and OLB while TXH is set)."""
         s = self.sel[p]
-        if s == 1:
-            return self.t[self.owner[p]].u.LA
-        if s == 2:
-            return self.t[self.owner[p]].u.LB
+        if s == 1 or s == 2:
+            u = self.t[self.owner[p]].u
+            if not half and u.TXH:
+                return u.OLA if s == 1 else u.OLB
+            return u.LA if s == 1 else u.LB
         return self.OUT[p]
 
-    def pads(self):
+    def pads(self, half=0):
+        """The pads in the first half of the cycle, or with half 1 in the second (3.1, 5.2)."""
         ui = self.ui_last
         uo = 0
         for i in range(8):
             if i == 3:
                 continue
             src = {0: 3}.get(i, i)
-            v = (ui >> src) & 1 if self.BYP[i] else self.V(i)
+            v = (ui >> src) & 1 if self.BYP[i] else self.V(i, half)
             uo |= v << i
         en = val = 0
         for i in range(8):
-            out = self.V(8 + i)
+            out = self.V(8 + i, half)
             if self.OD[i]:
                 en |= (1 - out) << i
             else:
@@ -266,7 +269,11 @@ class Chip(sim2.Chip):
     def cycle(self, env):
         a = self.c
         uo, en, val = self.pads()                                   # step 1
-        ui, lvl = env.step(self, a, uo, en, val)
+        if hasattr(env, 'step2'):                                   # both halves: their pads, the levels at each edge
+            ui, lvl, ui_f, lvl_f = env.step2(self, a, (uo, en, val), self.pads(1))
+        else:                                                       # one level per cycle (3.1)
+            ui, lvl = env.step(self, a, uo, en, val)
+            ui_f, lvl_f = ui, lvl
         self.ui_last = ui
         owner = self.t[a % K]
         P_start = owner.P
@@ -286,6 +293,7 @@ class Chip(sim2.Chip):
                 t.late_events += 1
         self.sync3 = self.sync2
         self.sync2, self.sync1, self.c = self.sync1, (ui & 255) | (lvl & 255) << 8, a + 1
+        self.sync2f, self.sync1f = self.sync1f, (ui_f & 255) | (lvl_f & 255) << 8
 
     def steps_2b_3(self, owner, a, P_start):
         """Step 2b, then step 3 for the thread owning cycle a (section 3.2)."""

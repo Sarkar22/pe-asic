@@ -3,7 +3,7 @@
 
 /*
  * Testbench for test.py: the top module and wires cocotb drives and reads. At gate level the RTL
- * core also runs beside the netlist, and every cycle where an output pin differs is counted.
+ * core also runs beside the netlist, and every half cycle where an output pin differs is counted.
  * SPDX-License-Identifier: Apache-2.0
  */
 module tb ();
@@ -27,6 +27,13 @@ module tb ();
   wire [7:0] uo_out;
   wire [7:0] uio_out;
   wire [7:0] uio_oe;
+
+  // The tests' time reference: clk delayed by 15 ns, three quarters of test.py's 20 ns period, so it falls 5 ns
+  // after each rising clock edge and rises 5 ns after each falling one. The tests drive and read the pads at its
+  // edges, inside a half cycle and never at a clock edge: both clock edges sample the input pads (section 3.1),
+  // and a THALF output moves at the falling one (section 5.9.5).
+  reg tick = 1'b0;
+  always @(clk) tick <= #15 clk;
 
   // Top module:
   tt_um_sarkar22_pe user_project (
@@ -61,8 +68,10 @@ module tb ();
   reg     compare = 1'b0;
   integer mismatches = 0;
 
-  // On the falling edge outputs have settled, and cocotb has not yet changed the inputs.
-  always @(negedge clk) begin
+  // Compared in both halves of every cycle, 2 ns after each edge of tick: away from both clock edges, where a
+  // half-cycle output move lands, and after the tests' input changes have settled. Counts half cycles.
+  always @(tick) begin
+    #2;
     if (compare && {uo_out, uio_out, uio_oe} !== {rtl_uo_out, rtl_uio_out, rtl_uio_oe})
       mismatches = mismatches + 1;
   end

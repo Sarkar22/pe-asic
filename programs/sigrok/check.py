@@ -68,13 +68,13 @@ def recording(base):
             self._rec_pads = p
             return p
 
-        def cycle(self, ui_in, uio_in):
+        def cycle(self, ui_in, uio_in, *fall):
             uo, o, oe = self._rec_pads
             v = uo | o << 8 | oe << 16 | (ui_in & 255) << 24 | (uio_in & 255) << 32
             if not self.rec_v or self.rec_v[-1] != v:
                 self.rec_t.append(self.c)
                 self.rec_v.append(v)
-            base.cycle(self, ui_in, uio_in)
+            base.cycle(self, ui_in, uio_in, *fall)      # a falling-edge level, if the bench gives one (ISA 3.1)
 
     Recording.__name__ = 'Recording' + base.__name__
     return Recording

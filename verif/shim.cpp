@@ -3,6 +3,13 @@
 // The clock edge that ends a cycle is held back until something needs it. A host call made after
 // cycle(c) therefore still lands inside cycle c, as it does in a byte-level simulator.
 //
+// Half cycles (ISA section 3.1). After the rising edge that starts a cycle the clock stays high: pads()
+// reads the first half there. The falling edge comes at pads2(), which reads the second half, or at fall()
+// with the levels the input pads have at that edge, or at cycle() if neither ran. The input latches take
+// the pads' levels at the falling edge; when the levels for that edge arrive only with cycle(), after
+// pads2() has passed the edge, the latches are given them then, before anything reads them: only SYNC1F
+// reads them, at the next rising edge.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Vpe_core.h"
@@ -17,6 +24,8 @@
 #define R(x) pe_core__DOT__##x
 #define TH(i, x) pe_core__DOT__gen_thread__BRA__##i##__KET____DOT__thread__DOT__##x
 #define SH(i, x) pe_core__DOT__gen_shift__BRA__##i##__KET____DOT__shift__DOT__##x
+#define FL(i) pe_core__DOT__g_fall__BRA__##i##__KET____DOT__lat__DOT__Q
+#define FH(i) pe_core__DOT__g_fall__BRA__##i##__KET____DOT__hold__DOT__Q
 
 namespace {
 
@@ -46,7 +55,9 @@ struct Chip {
   Vpe_core top;
   Vpe_core___024root *r;
   bool pending = false;  // the edge ending the current cycle has not been applied
-  bool settled = false;  // comb logic is up to date, with clk low
+  bool settled = false;  // comb logic is up to date
+  bool hi = false;       // the clock is high: the first half of the cycle, before its falling edge
+  bool fell = false;     // fall() gave the input latches their levels at this cycle's falling edge
   bool used = false;     // a host command already took this edge
   bool log_on = false;
   uint64_t c = 0;
@@ -148,6 +159,8 @@ void build_fields(Chip *c) {
   }
   // Section 5.9: SYNC3, the output switches, and every flop of each thread's shift unit.
   add(c, "sync3_q", &r->R(sync3_q));
+  add(c, "sync1f_q", &r->R(sync1f_q));
+  add(c, "sync2f_q", &r->R(sync2f_q));
   add(c, "sel_q", &r->R(pins__DOT__sel_q));
   add(c, "shsel_q", &r->R(pins__DOT__shsel_q));
   ADDU(tx_arm_q);
@@ -222,6 +235,18 @@ void build_fields(Chip *c) {
   ADDU(coding_q);
   ADDU(pwq_q);
   ADDU(pwh_q);
+  // Half cycles and the byte end (sections 5.2, 5.9.5 and 5.9.7), and the pads' P and N flops.
+  ADDU(tx_h_q);
+  ADDU(ola_q);
+  ADDU(olb_q);
+  ADDU(rx_sr8_q);
+  ADDU(rx_n8_q);
+  ADDU(rx_c8_q);
+  ADDU(rx_ones_q);
+  ADDU(pa_q);
+  ADDU(na_q);
+  ADDU(pb_q);
+  ADDU(nb_q);
 }
 
 inline uint32_t read_field(const Field &f) {
@@ -242,10 +267,32 @@ inline void write_field(const Field &f, uint32_t v) {
 
 inline void settle(Chip *c) {
   if (!c->settled) {
-    c->top.clk = 0;
     c->top.eval();
     c->settled = true;
   }
+}
+
+// The falling-edge latch pairs, written as if they had taken v = {uio, ui} at the falling edge: the first latch
+// holds it, and the second, open while the clock is low, shows it.
+void set_fall_latches(Chip *c, uint32_t v) {
+  auto r = c->r;
+  uint8_t *q[32] = {&r->FL(0), &r->FL(1), &r->FL(2), &r->FL(3), &r->FL(4), &r->FL(5), &r->FL(6), &r->FL(7),
+                    &r->FL(8), &r->FL(9), &r->FL(10), &r->FL(11), &r->FL(12), &r->FL(13), &r->FL(14), &r->FL(15),
+                    &r->FH(0), &r->FH(1), &r->FH(2), &r->FH(3), &r->FH(4), &r->FH(5), &r->FH(6), &r->FH(7),
+                    &r->FH(8), &r->FH(9), &r->FH(10), &r->FH(11), &r->FH(12), &r->FH(13), &r->FH(14), &r->FH(15)};
+  for (int i = 0; i < 32; i++) *q[i] = (v >> (i & 15)) & 1;
+  c->settled = false;
+}
+
+// The falling edge, with the input pads at ui and uio.
+void falling_edge(Chip *c, unsigned ui, unsigned uio) {
+  c->top.ui_in = (uint8_t)ui;
+  c->top.uio_in = (uint8_t)uio;
+  c->top.eval();
+  c->top.clk = 0;
+  c->top.eval();
+  c->hi = false;
+  c->settled = true;
 }
 
 inline uint32_t th_late_mask(Chip *c) {
@@ -277,11 +324,13 @@ void flush(Chip *c) {
   }
   c->top.clk = 1;
   c->top.eval();
-  c->top.clk = 0;
-  c->settled = false;
+  c->hi = true;
+  c->fell = false;
+  c->settled = true;
   c->pending = false;
 #ifndef PE_PINS
   r->R(host__DOT__spi__DOT__stub_valid) = 0;
+  c->settled = false;
 #endif
   uint32_t late = th_late_mask(c);
   if (late) {
@@ -319,12 +368,15 @@ Chip *pe_new(void) {
   t.rst_n = 1;
   t.eval();
   for (int i = 0; i < 2; i++) {
+    if (i) {
+      t.clk = 0;
+      t.eval();
+    }
     t.clk = 1;
-    t.eval();
-    t.clk = 0;
     t.eval();
   }
   build_fields(c);
+  c->hi = true;
   c->settled = true;
   return c;
 }
@@ -336,20 +388,54 @@ int pe_field(Chip *, const char *name) {
   return it == g_names.end() ? -1 : it->second;
 }
 
-void pe_cycle(Chip *c, unsigned ui, unsigned uio) {
+// The rest of the cycle: the falling edge if it hasn't come, with the input pads at ui_f and uio_f (or the
+// latches given them, if pads2() passed the edge first), then the pads at ui and uio for the rising edge that
+// ends the cycle, which is held back.
+void pe_cycle2(Chip *c, unsigned ui, unsigned uio, unsigned ui_f, unsigned uio_f) {
   flush(c);
+  if (c->hi) {
+    falling_edge(c, ui_f, uio_f);
+  } else if (!c->fell) {
+    set_fall_latches(c, ((uio_f & 255u) << 8) | (ui_f & 255u));
+  }
   c->top.ui_in = (uint8_t)ui;
   c->top.uio_in = (uint8_t)uio;
+  c->settled = false;
   c->pending = true;
   c->used = false;
   c->c++;
 }
 
-// Pads for the cycle about to run. Bypass lanes see ui, so outputs settle with it.
+// One level for the whole cycle (ISA 3.1): the falling-edge sample is the cycle's level.
+void pe_cycle(Chip *c, unsigned ui, unsigned uio) { pe_cycle2(c, ui, uio, ui, uio); }
+
+// Pads in the first half of the cycle about to run. Bypass lanes see ui, so outputs settle with it. After the
+// falling edge the first half is gone: bit 24 of the result says so.
 unsigned pe_pads(Chip *c, unsigned ui) {
   flush(c);
+  if (!c->hi) return 1u << 24;
   c->top.ui_in = (uint8_t)ui;
-  c->top.clk = 0;
+  c->top.eval();
+  c->settled = true;
+  return (unsigned)c->top.uo_out | ((unsigned)c->top.uio_out << 8) | ((unsigned)c->top.uio_oe << 16);
+}
+
+// The falling edge of the cycle about to run, with the input pads at ui_f and uio_f.
+void pe_fall(Chip *c, unsigned ui_f, unsigned uio_f) {
+  flush(c);
+  if (c->hi) {
+    falling_edge(c, ui_f, uio_f);
+  } else {
+    set_fall_latches(c, ((uio_f & 255u) << 8) | (ui_f & 255u));
+  }
+  c->fell = true;
+}
+
+// Pads in the second half, from the falling edge, which comes here if it hasn't.
+unsigned pe_pads2(Chip *c, unsigned ui) {
+  flush(c);
+  if (c->hi) falling_edge(c, c->top.ui_in, c->top.uio_in);
+  c->top.ui_in = (uint8_t)ui;
   c->top.eval();
   c->settled = true;
   return (unsigned)c->top.uo_out | ((unsigned)c->top.uio_out << 8) | ((unsigned)c->top.uio_oe << 16);
@@ -428,7 +514,6 @@ int pe_host(Chip *c, unsigned cmd, unsigned idx, unsigned arg, unsigned n, unsig
   r->R(host__DOT__thread_q) = (uint8_t)thread;
   r->R(host__DOT__spi__DOT__stub_valid) = 1;
   r->R(host__DOT__spi__DOT__stub_byte) = (uint8_t)byte;
-  c->top.clk = 0;
   c->top.eval();
   c->settled = true;
   return r->R(host__DOT__tx_byte);
@@ -439,18 +524,22 @@ int pe_host(Chip *c, unsigned cmd, unsigned idx, unsigned arg, unsigned n, unsig
 void pe_rst(Chip *c, unsigned v) {
   flush(c);
   c->top.rst_n = (uint8_t)v;
-  c->top.clk = 0;
   c->top.eval();
   c->settled = true;
 }
 
-// One raw clock edge with no cycle count, for the edges while rst_n is low.
+// One raw clock edge with no cycle count, for the edges while rst_n is low. It ends with the clock high, as a
+// cycle starts.
 void pe_raw_edge(Chip *c) {
   flush(c);
+  if (c->hi) {
+    c->top.clk = 0;
+    c->top.eval();
+  }
   c->top.clk = 1;
   c->top.eval();
-  c->top.clk = 0;
-  c->top.eval();
+  c->hi = true;
+  c->fell = false;
   c->settled = true;
 }
 

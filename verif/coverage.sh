@@ -10,7 +10,8 @@
 # 2. Runs the stimulus. Every run records the RTL's line, branch and toggle counts (vlcov.py) and, where sim/sim.py
 #    runs beside the RTL, its functional coverage (fcov.py):
 #    - verif/lockstep.py, the RTL against sim/sim.py every cycle, with each generator and host mode, long images
-#      that pass TB's wrap, and the scripted corner cases;
+#      that pass TB's wrap, the half-cycle images (both halves of every pad, inputs with their own falling-edge
+#      levels: THALF, RKIND 3, REOP's byte end), and the scripted corner cases;
 #    - every bench of programs/check.py, with the RTL in place of sim/sim.py (every check must pass).
 #    Each run must pass: the script stops at the first that fails.
 # 3. Writes the reports: OUT/code.md (per module), OUT/code_uncovered.txt (every point never hit), OUT/func.md
@@ -76,10 +77,12 @@ lockstep long_chips --gen chips --images "$(n 16)" --cycles 70000 --first 400000
 lockstep long_rows  --gen rows  --images "$(n 16)" --cycles 70000 --first 410000
 lockstep long_wide  --gen wide  --images "$(n 16)" --cycles 70000 --first 420000
 lockstep directed   --gen directed --images 3 --cycles 70000 --first 430000
+lockstep half       --gen half --images "$(n 600)" --first 600000
 lockstep corners    --corners
 
 echo "== every program bench on the RTL"
-BENCHES="words basic standard trimmed extra manchester dmx ps2 mdio jtag_chain swd_host i2c_target usb_tx usb_rx usb_dev can"
+BENCHES="words basic standard trimmed extra manchester dmx ps2 mdio jtag_chain swd_host i2c_target usb_tx usb_rx usb_dev can
+         bypass eth usb_enum spi_unit can_unit sd_unit unit_small i2s"
 t0=$(date +%s)
 running=0
 for b in $BENCHES; do

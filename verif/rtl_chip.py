@@ -3,7 +3,9 @@
 """The RTL behind the class interface of a Python ISA simulator.
 
 Chip has the interface of the cycle simulator in sim/sim.py: cycle(ui, uio), pads(ui) and byte-level
-host_* calls between cycles. ChipV2 has a second interface, which takes an env object and speaks
+host_* calls between cycles, with the two halves of a cycle (ISA 3.1): pads(ui) is the first half and
+pads2(ui) the second, and cycle(ui, uio, ui_f, uio_f) takes the levels at the falling edge as well. fall(ui_f,
+uio_f) applies that edge itself, before pads2(), so the falling-edge latches take the levels as on silicon. ChipV2 has a second interface, which takes an env object and speaks
 xfer(). ChipV2.xfer is Python over the flops, so it never runs pe_spi or the byte logic of pe_host;
 ChipV2Pads runs the same xfer() through the real SPI block at the pads, and is the one that tests the
 link. All run the Verilator model in build/ through verif/shim.cpp.
@@ -48,10 +50,16 @@ UNIT = (('TXARM', 'tx_arm_q'), ('TXRUN', 'tx_run_q'), ('TXTL', 'tx_tl_q'), ('TXS
         ('RXBUF', 'rx_buf_q'), ('RXBN', 'rx_bn_q'), ('RXBL', 'rx_bl_q'), ('RXFULL', 'rx_full_q'), ('RXPN', 'rx_pn_q'),
         ('RXOVR', 'rx_ovr_q'), ('RXSEEN', 'rx_seen_q'), ('RXRL', 'rx_rl_q'), ('RXRV', 'rx_rv_q'), ('RXVIO', 'rx_vio_q'),
         ('RXCOV', 'rx_cov_q'), ('RXEF', 'rx_ef_q'), ('RXBE', 'rx_be_q'), ('RXPE', 'rx_pe_q'), ('CRC', 'crc_q'),
-        ('PWQ', 'pwq_q'), ('PWH', 'pwh_q'))
+        ('PWQ', 'pwq_q'), ('PWH', 'pwh_q'), ('TXH', 'tx_h_q'), ('OLA', 'ola_q'), ('OLB', 'olb_q'),
+        ('RXSR8', 'rx_sr8_q'), ('RXN8', 'rx_n8_q'), ('RXC8', 'rx_c8_q'), ('RXONES', 'rx_ones_q'),
+        ('PA', 'pa_q'), ('NA', 'na_q'), ('PB', 'pb_q'), ('NB', 'nb_q'))
+# PA, NA, PB and NB are the RTL's own: the flops P and N behind each shift output's pads (5.2, implementation note),
+# with P = L xor N in every cycle.
+RTL_OWN = ('PWQ', 'PWH', 'PA', 'NA', 'PB', 'NB')
 SLOTS = ('txmode_q', 'txmap_q', 'txper_q', 'txtail_q', 'rxmode_q', 'rxper_q', 'rxfirst_q', 'rxend_q', 'rxcnt_q',
          'rxsync_q', 'rxopt_q', 'polyhi_q', 'polylo_q', 'chkhi_q', 'chklo_q', 'coding_q')
-FIELDS += ('sync3_q', 'sel_q', 'shsel_q') + tuple('u_' + f for _, f in UNIT) + tuple('u_' + f for f in SLOTS)
+FIELDS += ('sync3_q', 'sync1f_q', 'sync2f_q', 'sel_q', 'shsel_q') + tuple('u_' + f for _, f in UNIT) + \
+    tuple('u_' + f for f in SLOTS)
 
 _libs = {}
 
@@ -65,6 +73,7 @@ def _load(kind, depth):
         for name, res, args in (
                 ('pe_new', vp, []), ('pe_free', None, [vp]), ('pe_field', i, [vp, ctypes.c_char_p]),
                 ('pe_cycle', None, [vp, u, u]), ('pe_pads', u, [vp, u]), ('pe_flush', None, [vp]),
+                ('pe_cycle2', None, [vp, u, u, u, u]), ('pe_pads2', u, [vp, u]), ('pe_fall', None, [vp, u, u]),
                 ('pe_get', u, [vp, i]), ('pe_set', None, [vp, i, u]), ('pe_peek', u, [vp, i]),
                 ('pe_poke', None, [vp, i, u]),
                 ('pe_snapshot', None, [vp, vp]), ('pe_field_count', i, [vp]),
@@ -233,12 +242,15 @@ class Unit:
                 self.RXOVR << 10 | self.RXSYN << 11 | self.RXSEEN << 12 | self.LA << 13 | self.LB << 14 | rw << 15)
 
     def stop(self):
-        """tx_stop() and rx_stop() of sections 5.9.5 and 5.9.6, on the flops."""
-        for name in ('TXARM', 'TXRUN', 'TXTL', 'TXN', 'TXFULL', 'TXSYM', 'TXSTF', 'TXAN',
+        """tx_stop() and rx_stop() of sections 5.9.5 and 5.9.6, on the flops. With TXH 0 both halves show LA and
+        LB, so P takes L xor N."""
+        for name in ('TXARM', 'TXRUN', 'TXTL', 'TXN', 'TXFULL', 'TXSYM', 'TXSTF', 'TXAN', 'TXH',
                      'RXARM', 'RXHUNT', 'RXRUN', 'RXEP', 'RXFULL', 'RXVIO'):
             setattr(self, name, 0)
         self.LA = (self.CFG[0] >> 5) & 1
         self.LB = (self.CFG[0] >> 6) & 1
+        self.PA = self.LA ^ self.NA
+        self.PB = self.LB ^ self.NB
 
 
 def _uflop(field):
@@ -391,6 +403,14 @@ class Chip:
         return self._get(self._h, self._f['sync3_q'])
 
     @property
+    def SYNC1F(self):
+        return self._get(self._h, self._f['sync1f_q'])
+
+    @property
+    def SYNC2F(self):
+        return self._get(self._h, self._f['sync2f_q'])
+
+    @property
     def BUSY(self):
         return self._get(self._h, self._f['busy_q'])
 
@@ -420,11 +440,29 @@ class Chip:
         return (t.PC + 1) % self.DEPTH
 
     def pads(self, ui_in):
+        """uo_out, uio_out, uio_oe in the first half of the cycle about to run (5.2, with V0)."""
         v = self._pads(self._h, ui_in)
+        if v >> 24:
+            raise RuntimeError('pads() after the falling edge: the first half of cycle %d is gone' % self.c)
         return v & 255, (v >> 8) & 255, (v >> 16) & 255
 
-    def cycle(self, ui_in, uio_in):
-        self._cycle(self._h, ui_in, uio_in)
+    def pads2(self, ui_in):
+        """The same in the second half, from the falling edge (5.2, with V)."""
+        v = self._lib.pe_pads2(self._h, ui_in)
+        return v & 255, (v >> 8) & 255, (v >> 16) & 255
+
+    def fall(self, ui_f, uio_f):
+        """The falling edge of the cycle about to run, with the input pads at ui_f and uio_f."""
+        self._lib.pe_fall(self._h, ui_f & 255, uio_f & 255)
+
+    def cycle(self, ui_in, uio_in, ui_f=None, uio_f=None):
+        """ui_in and uio_in at the rising edge that ends the cycle, ui_f and uio_f at its falling edge; either left
+        out is the same as the rising-edge level, one level for the whole cycle (3.1)."""
+        if ui_f is None and uio_f is None:
+            self._cycle(self._h, ui_in, uio_in)
+        else:
+            self._lib.pe_cycle2(self._h, ui_in, uio_in, ui_in if ui_f is None else ui_f,
+                                uio_in if uio_f is None else uio_f)
         self.c += 1
 
     def snapshot(self):
@@ -654,6 +692,12 @@ class ChipV2:
 
     def cycle(self, env):
         uo, en, val = self.pads()
+        if hasattr(env, 'step2'):       # both halves, and the levels at the falling edge (3.1)
+            uo2, val2, en2 = self.chip.pads2(self.ui_last)
+            ui, lvl, ui_f, lvl_f = env.step2(self, self.chip.c, (uo, en, val), (uo2, en2, val2))
+            self.ui_last = ui
+            self.chip.cycle(ui & 255, lvl & 255, ui_f & 255, lvl_f & 255)
+            return
         ui, lvl = env.step(self, self.chip.c, uo, en, val)
         self.ui_last = ui
         self.chip.cycle(ui & 255, lvl & 255)

@@ -1648,7 +1648,7 @@ def random_chip(rng, depth):
 # 5.9.2: widths of the unit's sequencing state that is wider than a bit; RXPH is signed
 UNIT_WIDTH = dict(TXSR=16, TXN=5, TXBUF=16, TXBN=5, TXSYM=2, TXCD=17, TXACC=8, TXK=2, TXBK=2, TXAN=6, TXRL=3,
                   RXSR=16, RXN=5, RXTOT=11, RXKIND=2, RXG=5, RXIC=16, RXBUF=16, RXBN=5, RXPN=5, RXRL=3, RXEF=3,
-                  RXBE=3, CRC=32, RXPE=3)
+                  RXBE=3, CRC=32, RXPE=3, RXSR8=16, RXN8=5, RXC8=16)
 
 
 def random_unit(rng, chip):
@@ -1718,7 +1718,36 @@ def chk_world(log):
               pin == {'shl8', 'shl16', 'shr8', 'shr16'}, str((prose ^ table, pin)))
 
 
-ALL = [chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
+def chk_halfcycle_text(log):
+    # 5.9.2 to 5.9.4 as batch A left them: every per-thread name of 5.9.2 is a name of sim.py's unit, THALF is
+    # TXMODE bit 15, and with it every bit of every slot is a field, so scfg stores all 16 bits of each (KEEP).
+    import asm as _asm
+    with open(_asm.DOC) as fh:
+        doc = fh.read()
+    sect = doc.split('#### 5.9.2 State')[1].split('**Global state:**')[0]
+    names = set()
+    for line in sect.splitlines():
+        cells = [c.strip() for c in line.split('|')[1:-1]]
+        if len(cells) == 3 and cells[0] not in ('State', '---') and not cells[0].startswith('-'):
+            names |= {n.strip().split('[')[0] for n in cells[0].split(',')}
+    names -= {'CFG'}
+    mine = set(UNIT_STATE)
+    log.check('5.9.2 the per-thread state names of the tables are the names of the unit in sim.py', names == mine,
+              'only in 5.9.2: %s; only in sim.py: %s' % (sorted(names - mine), sorted(mine - names)))
+    chip = Chip(128, seed=1)
+    t = chip.th[0]
+    kept = []
+    for k in range(16):
+        chip.set_cfg(t, k, 0xFFFF)
+        kept.append(t.u.CFG[k])
+    log.check('5.9.4 KEEP[k] is 0xFFFF: scfg stores all 16 bits of every slot', kept == [0xFFFF] * 16,
+              ' '.join('%04x' % v for v in kept))
+    chip.set_cfg(t, 0, 0x8000)
+    log.check('5.9.3 THALF is TXMODE bit 15', getattr(t.u, 'THALF', None) == 1 and getattr(t.u, 'TCLK', None) == 0,
+              'THALF %s' % getattr(t.u, 'THALF', None))
+
+
+ALL = [chk_halfcycle_text, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
        chk_pins, chk_spacing, chk_host, chk_stop_rules, chk_flags, chk_stop_timing, chk_slots, chk_asm]
 
 

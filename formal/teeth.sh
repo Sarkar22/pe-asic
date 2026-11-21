@@ -21,36 +21,46 @@ WORK=$(cd "$WORK" && pwd)
 
 # name # file # line # text on that line # its replacement # job that must fail # what the bug breaks
 BUGS=$(cat <<'TABLE'
-od_drives_high#src/pe_pins.sv#187#uio_out = v[15:8] & ~od_q;#uio_out = v[15:8];#pads:bmc#5.2: an open-drain pin drives its value high
-bypass_flop#src/pe_core.sv#444#.ui_in   (ui_in),#.ui_in   (sync1_q[7:0]),#pads:bmc#5.8: the bypass path goes through a flop
-put_not_owner#src/pe_pins.sv#65#mine[p]  = own_q[2*p+:2] == tid;#mine[p]  = 1'b1;#isolation:bmc#5.4: a thread writes the shadow of a pin it doesn't own
-commit_any#src/pe_pins.sv#64#moves[p] = commit[own_q[2*p+:2]];#moves[p] = |commit;#isolation:bmc#5.4: any thread's commit moves every pin
-abort_keeps_sel#src/pe_pins.sv#140#sel_d       = sel_d & 32'h0000_FFFF;#sel_d       = sel_d;#isolation:bmc#9.3: ABORT leaves uio pins on their shift outputs
-unit_stop_shared#src/pe_core.sv#395#.sstop_tx(u_sstop_tx & ex_one[i]),#.sstop_tx(u_sstop_tx),#isolation:bmc#5.9.1: one thread's sstop stops every unit
-symbol_too_long#src/pe_shift.sv#263#(tx_cd_q <= 17'd1)#(tx_cd_q == 17'd0)#shift_timing:bmc#5.9.5: every symbol lasts TPER + 1 cycles
-start_without_commit#src/pe_shift.sv#380#if (tx_arm_q && cmt) begin#if (tx_arm_q) begin#shift_timing:bmc#5.9.5: an armed send starts without a commit
-fraction_lost#src/pe_shift.sv#419#({1'b0, tper} + {16'd0, sym_carry})#({1'b0, tper})#shift_timing:bmc#5.9.5: the TFRAC carry never lengthens a symbol
-sstop_no_idle#src/pe_shift.sv#491#la_d      = idlea;#la_d      = la_a;#shift_timing:bmc#5.9.4: sstop tx leaves output A where it was
-own_reset#src/pe_pins.sv#162#own_q   <= 32'h0000_0000;#own_q   <= 32'h0000_0001;#reset:flops_prove#8: pin 0 is owned by thread 1 after reset
+od_drives_high#src/pe_pins.sv#189#uio_out = v[15:8] & ~od_q;#uio_out = v[15:8];#pads:bmc#5.2: an open-drain pin drives its value high
+bypass_flop#src/pe_core.sv#465#.ui_in   (ui_in),#.ui_in   (sync1_q[7:0]),#pads:bmc#5.8: the bypass path goes through a flop
+put_not_owner#src/pe_pins.sv#67#mine[p]  = own_q[2*p+:2] == tid;#mine[p]  = 1'b1;#isolation:bmc#5.4: a thread writes the shadow of a pin it doesn't own
+commit_any#src/pe_pins.sv#66#moves[p] = commit[own_q[2*p+:2]];#moves[p] = |commit;#isolation:bmc#5.4: any thread's commit moves every pin
+abort_keeps_sel#src/pe_pins.sv#142#sel_d       = sel_d & 32'h0000_FFFF;#sel_d       = sel_d;#isolation:bmc#9.3: ABORT leaves uio pins on their shift outputs
+unit_stop_shared#src/pe_core.sv#414#.sstop_tx(u_sstop_tx & ex_one[i]),#.sstop_tx(u_sstop_tx),#isolation:bmc#5.9.1: one thread's sstop stops every unit
+symbol_too_long#src/pe_shift.sv#272#(tx_cd_q <= 17'd1)#(tx_cd_q == 17'd0)#shift_timing:bmc#5.9.5: every symbol lasts TPER + 1 cycles
+start_without_commit#src/pe_shift.sv#391#if (tx_arm_q && cmt) begin#if (tx_arm_q) begin#shift_timing:bmc#5.9.5: an armed send starts without a commit
+fraction_lost#src/pe_shift.sv#430#({1'b0, tper} + {16'd0, sym_carry})#({1'b0, tper})#shift_timing:bmc#5.9.5: the TFRAC carry never lengthens a symbol
+sstop_no_idle#src/pe_shift.sv#510#la_d      = idlea;#la_d      = la_a;#shift_timing:bmc#5.9.4: sstop tx leaves output A where it was
+half_on_bit6#src/pe_shift.sv#437#tx_acc_a[7];#tx_acc_a[6];#shift_timing:bmc#5.9.5: THALF puts a move at the falling edge from bit 6 of TXACC
+half_not_stopped#src/pe_shift.sv#509#tx_h_d    = 1'b0;#tx_h_d    = tx_h_d;#shift_timing:bmc#5.9.5: after sstop tx the outputs move at a falling edge
+n_never_moves#src/pe_shift.sv#1114#na_q <= na_q ^ dha;#na_q <= na_q;#shift_timing:bmc#5.2: the second half of a THALF move shows the first half's level
+p_without_move#src/pe_shift.sv#1113#pa_q <= la_d ^ dha ^ na_q;#pa_q <= la_d ^ na_q;#shift_timing:bmc#5.2: the first half of a THALF move shows the new level
+latch_no_reset#src/pe_shift.sv#1121#.RESET_B(rst_n),#.RESET_B(1'b1),#shift_timing:bmc#8: output A's latch is not cleared by reset
+latch_gate_inverted#src/pe_shift.sv#1121#.GATE_N(clk),#.GATE_N(~clk),#reset:gen#5.2: output A's latch is open while the clock is high, so the halves swap
+pair_no_reset#src/pe_core.sv#52#.RESET_B(rst_n_sync),#.RESET_B(1'b1),#reset:gen#8: the falling-edge sample's second latch is not cleared by reset
+sync1f_first_latch#src/pe_core.sv#70#sync1f_q <= fall_l;#sync1f_q <= fall_m;#reset:gen#3.1: SYNC1F reads the latch that opens at the rising edge it samples on
+own_reset#src/pe_pins.sv#164#own_q   <= 32'h0000_0000;#own_q   <= 32'h0000_0001;#reset:flops_prove#8: pin 0 is owned by thread 1 after reset
 no_reset_s#src/pe_thread.sv#212#s_q        <= 16'h0000;##reset:flops_prove#8: S has no reset
-pcfg_in_drives#src/pe_pins.sv#112#shoe_d[pin[2:0]] = 1'b0;#shoe_d[pin[2:0]] = 1'b1;#reset:pads_bmc#5.3: pcfg IN enables the driver at the next commit
-netlist_differs#src/pe_pins.sv#187#uio_out = v[15:8] & ~od_q;#uio_out = v[15:8] & od_q;#chip.eqy#the netlist no longer matches the RTL
+pcfg_in_drives#src/pe_pins.sv#114#shoe_d[pin[2:0]] = 1'b0;#shoe_d[pin[2:0]] = 1'b1;#reset:pads_bmc#5.3: pcfg IN enables the driver at the next commit
+netlist_differs#src/pe_pins.sv#189#uio_out = v[15:8] & ~od_q;#uio_out = v[15:8] & od_q;#chip.eqy#the netlist no longer matches the RTL
 TABLE
 )
 
 # Netlist bugs: name # edits for plant_netlist.py # the piece that must fail # what the bug breaks (and the rule of
 # chip.eqy that closes that piece)
 NETLIST_BUGS=$(cat <<'TABLE'
-nl_unit1_reset#swap_reset:_49784_#unit1#unit 1's pwq_q[7] resets to the wrong value (inverted flops)
-nl_unit0_reset#swap_reset:_49294_#unit0#unit 0's pwh_q[7] resets to the wrong value (inverted flops, merges kept apart)
-nl_byp0_inverted#invert_d:_49109_#pins#byp_q[0] loads the inverse (constant flops)
-nl_byp4_dropped#drop_flop:_49108_#pins#the real flop byp_q[4] removed and tied to 0 (a wrong constant)
-nl_arg_stuck#hold_d:_51293_#core.hm_wdata.9#hm_wdata[9] never loads (the merged SCK flop)
-nl_miso_inverted#buf_to_inv:_52053_#host#uo_out[3] through an inverter (core.host.miso unmatched)
-nl_fsm_run#rewire_d:_51385_:_51391_#thread1#the FSM's one-hot RUN bit takes SETPC's next state (PDR)
-nl_fsm_binary#invert_d:_51983_#host#bit 0 of the FSM's binary copy loads the inverse (PDR)
-nl_fanout_buffer#buf_to_inv:fanout3296#unit2#a layout fanout buffer inverts (final netlist only)
-nl_hold_cell#buf_to_inv:hold5195#host#a layout hold cell inverts (final netlist only)
+nl_unit1_reset#swap_reset:_63737_#unit1#unit 1's pwq_q[7] resets to the wrong value (inverted flops)
+nl_unit0_reset#swap_reset:_63218_#unit0#unit 0's pwh_q[7] resets to the wrong value (inverted flops, merges kept apart)
+nl_byp0_inverted#invert_d:_62993_#pins#byp_q[0] loads the inverse (constant flops)
+nl_byp4_dropped#drop_flop:_62992_#pins#the real flop byp_q[4] removed and tied to 0 (a wrong constant)
+nl_arg_stuck#hold_d:_65333_#core.hm_wdata.9#hm_wdata[9] never loads (the merged SCK flop)
+nl_miso_inverted#buf_to_inv:_66147_#host#uo_out[3] through an inverter (core.host.miso unmatched)
+nl_fsm_run#rewire_d:_65425_:_65431_#thread1#the FSM's one-hot RUN bit takes SETPC's next state (PDR)
+nl_fsm_binary#invert_d:_66077_#host#a bit of the FSM's binary copy loads the inverse (PDR)
+nl_fanout_buffer#buf_to_inv:fanout4002#unit2#a layout fanout buffer on unit 2's tx_stf_q inverts (final netlist only)
+nl_hold_cell#buf_to_inv:hold6315#host#a layout hold cell on the host's addr_q[7] inverts (final netlist only)
+nl_latch_read_inverted#invert_pin:_33893_:B#uo_out.0#unit 0's output A reads its latch inverted, so after a THALF move the pad's second half is wrong (latch boxes: a box output)
+nl_latch_input_buffer#buf_to_inv:wire6213#core.ui_in.3#the layout's repeater in front of ui_in[3]'s falling-edge latch inverts (latch boxes, final netlist only)
 TABLE
 )
 

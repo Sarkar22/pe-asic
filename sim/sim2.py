@@ -128,6 +128,7 @@ class Unit:
 
     SYNC2 = property(lambda s: s._c.sync2)
     SYNC3 = property(lambda s: s._c.sync3)
+    SYNC2F = property(lambda s: s._c.sync2f)    # 3.1: the falling-edge sample, half a cycle before SYNC2's
     OWN = property(lambda s: s._c.owner)
     SHSEL = property(lambda s: s._c.shsel)
     TID = property(lambda s: s._t.id)
@@ -174,6 +175,7 @@ class Chip:
         self.ui_last = 0
         self.retired = [0] * K
         self.sync3 = 0                          # 5.9: SYNC2 one cycle older
+        self.sync1f = self.sync2f = 0           # 3.1: the falling-edge samples, through two flops
         self.sel, self.shsel = [0] * 16, [0] * 16   # output switch per pin and its shadow: 0 OUT, 1 shift output A, 2 B
         for t in self.t:
             t.u = Unit(self, t)
@@ -305,7 +307,9 @@ class Chip:
         t.mem = ['s', v, addr % self.size, 0, False]
 
     # ---- pins --------------------------------------------------------------------------------
-    def pads(self):
+    def pads(self, half=0):
+        """The pads in the first half of the cycle, from its rising edge (5.2's V0: OLA and OLB while TXH is set), or
+        with half 1 in the second half, from its falling edge (5.2's V)."""
         byp = self.byp
         ui = self.ui_last
         follow = (byp & 1 and (ui >> 3) & 1) | (byp & ui & 0xF0)
@@ -314,7 +318,11 @@ class Chip:
             for p, s in enumerate(self.sel):
                 if s:
                     u = self.t[self.owner[p]].u
-                    v = (v & ~(1 << p)) | (u.LA if s == 1 else u.LB) << p
+                    if u.TXH and not half:
+                        lv = u.OLA if s == 1 else u.OLB
+                    else:
+                        lv = u.LA if s == 1 else u.LB
+                    v = (v & ~(1 << p)) | lv << p
         uo = (v & 0xF7 & ~byp) | follow
         io = v >> 8
         en = (~io & self.od | self.oe & ~self.od) & 0xFF
@@ -430,7 +438,11 @@ class Chip:
     def cycle(self, env):
         c = self.c
         uo, en, val = self.pads()
-        ui, lvl = env.step(self, c, uo, en, val)
+        if hasattr(env, 'step2'):               # a board with both halves: the pads of each, the levels at each edge
+            ui, lvl, ui_f, lvl_f = env.step2(self, c, (uo, en, val), self.pads(1))
+        else:                                   # one level per cycle (3.1)
+            ui, lvl = env.step(self, c, uo, en, val)
+            ui_f, lvl_f = ui, lvl
         self.ui_last = ui
         tb = c & 0xFFFF
         owner = self.t[c % K]
@@ -447,6 +459,7 @@ class Chip:
             t.u.CMT = 0
         self.sync3 = self.sync2
         self.sync2, self.sync1, self.c = self.sync1, (ui & 255) | (lvl & 255) << 8, c + 1
+        self.sync2f, self.sync1f = self.sync1f, (ui_f & 255) | (lvl_f & 255) << 8
 
     def slot_and_units(self, c, owner, was_pending):
         """Steps 3 and 2b of cycle c. Step 3 runs first, so it reads the unit as it was before step 2b (3.2), and its

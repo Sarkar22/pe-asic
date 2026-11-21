@@ -27,6 +27,15 @@
  *                receiving or holding a word, and its buffer is empty (rx_stop()).
  *   rx_start     A reception starts only at a commit (without HUNT) or at the hunt's edge, and a commit that
  *                starts one does it in its own cycle (section 5.9.6, Start).
+ *   half_pads    The pads in both halves of every cycle (sections 3.1, 5.2 and 5.9.5, Half cycles): in the
+ *                second half the unit's pads show LA and LB; in the first half they show them too, except in
+ *                the cycle after a move of the outputs (a symbol, the end of a send, the end of a tail) that
+ *                THALF puts at the falling edge: one with THALF, TPER 1 or more, TEXT 0 and bit 7 of TXACC as
+ *                tx_half() reads it (0 at a start), in a cycle with no sstop tx or ABORT. Then the first half
+ *                shows the levels from before the move. Formed here from LA, LB, TXACC and the slots, not from
+ *                TXH. With sym_frac (each symbol lasts TPER cycles plus the carry of TXACC + TFRAC) and inv_acc
+ *                (TXACC before symbol k of a send is k x TFRAC mod 256), it gives the half-cycle grid: symbol k
+ *                reaches the pad at E + 1 + k x (TPER + TFRAC / 256), rounded down to a half cycle.
  *
  * A symbol is "written" in a cycle where tx_symbol() runs; the probe do_sym is the unit's own name for it.
  * The checks of a symbol's length leave out symbols during which TEXT was 1, since those end at an
@@ -42,6 +51,7 @@ module shift_timing (
     input wire        rst_n,
     input wire [15:0] sync2,
     input wire [15:0] sync3,
+    input wire [15:0] sync2f,
     input wire        cmt,
     input wire        cfg_we,
     input wire [3:0]  cfg_slot,
@@ -59,19 +69,20 @@ module shift_timing (
     input wire        sstat_rd,
     input wire        h_abort,
     input wire [1:0]  srd_sel,
-    input wire [4:0]  rd_reg
+    input wire [4:0]  rd_reg,
+    input wire        half1          // the half of the cycle the pads show: 1 the first, 0 the second
 );
 
-  wire        la, lb, txfull, rxfull, rxbl;
+  wire        la, lb, pad_a, pad_b, txfull, rxfull, rxbl;
   wire [15:0] rxbuf, status, srd_data, rd_data;
 
   pe_shift u (
-      .clk(clk), .rst_n(rst_n), .sync2(sync2), .sync3(sync3), .cmt(cmt),
+      .clk(clk), .rst_n(rst_n), .sync2(sync2), .sync3(sync3), .sync2f(sync2f), .cmt(cmt),
       .cfg_we(cfg_we), .cfg_slot(cfg_slot), .cfg_data(cfg_data),
       .push(push), .push_v(push_v), .push_n(push_n), .push_l(push_l), .push_k(push_k),
       .sgo_tx(sgo_tx), .sstop_tx(sstop_tx), .sgo_rx(sgo_rx), .sstop_rx(sstop_rx),
       .pop(pop), .sstat_rd(sstat_rd), .h_abort(h_abort), .srd_sel(srd_sel), .rd_reg(rd_reg),
-      .la(la), .lb(lb), .txfull(txfull), .rxfull(rxfull), .rxbuf(rxbuf), .rxbl(rxbl),
+      .la(la), .lb(lb), .pad_a(pad_a), .pad_b(pad_b), .txfull(txfull), .rxfull(rxfull), .rxbuf(rxbuf), .rxbl(rxbl),
       .status(status), .srd_data(srd_data), .rd_data(rd_data)
   );
 
@@ -84,6 +95,12 @@ module shift_timing (
   wire [1:0]  k, bk, sym;
   wire [15:0] txmode, txmap, txper, txtail, coding, rxmode;
   wire        rxarm, rxhunt, rxrun, rxep, rxfullq, rxvio, rxseen;
+  wire        fa, fb;    // the half the two output latches show (cells_formal.v)
+
+  always @* begin
+    assume (fa == half1);
+    assume (fb == half1);
+  end
 
   // Configuration fields (section 5.9.3).
   wire       tmsb  = txmode[2];
@@ -94,6 +111,7 @@ module shift_timing (
   wire       enda  = txmode[7];
   wire       endb  = txmode[8];
   wire       text  = txmode[9];
+  wire       thalf = txmode[15];
   wire [7:0] mapa  = txmap[7:0];
   wire [7:0] mapb  = txmap[15:8];
   wire [15:0] tper = txper;
@@ -260,6 +278,31 @@ module shift_timing (
 
   always @* begin
     if (check && p_tail_end && !p_stop_tx && !p_dosym) tail_idle: assert (la == p_idlea && lb == p_idleb && !tl);
+  end
+
+  // --- Both halves of the pads. tx_half() reads TXACC before tx_symbol()'s add; a start sets it to 0 first.
+  wire acc7 = go ? 1'b0 : acc[7];
+  wire move = dosym || doend || tail_end;
+  wire half = move && thalf && !text && tper != 16'd0 && acc7 && !stop_tx;
+  reg  p_half;
+  always @(posedge clk) p_half <= half;
+
+  always @* begin
+    if (check) begin
+      if (!half1) half_pads_second: assert (pad_a == la && pad_b == lb);
+      if (half1) half_pads_first: assert (pad_a == (p_half ? p_la : la) && pad_b == (p_half ? p_lb : lb));
+    end
+    // In reset the pads show 0, and so in the first cycle after it (section 8; 5.2, implementation note).
+    if (!rst_n || past_ok && rst_n && !p_rst_n) half_pads_reset: assert (!pad_a && !pad_b);
+  end
+
+  always @* begin
+    if (check) begin
+      cover (half1 && p_half && p_dosym && pad_a != la);
+      cover (half1 && p_half && p_doend);
+      cover (half1 && p_half && p_tail_end);
+      cover (!half1 && p_half && pad_a != p_la);
+    end
   end
 
   // --- Covers: each check's trigger happens.
