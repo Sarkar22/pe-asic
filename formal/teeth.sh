@@ -33,11 +33,14 @@ fraction_lost#src/pe_shift.sv#430#({1'b0, tper} + {16'd0, sym_carry})#({1'b0, tp
 sstop_no_idle#src/pe_shift.sv#510#la_d      = idlea;#la_d      = la_a;#shift_timing:bmc#5.9.4: sstop tx leaves output A where it was
 half_on_bit6#src/pe_shift.sv#437#tx_acc_a[7];#tx_acc_a[6];#shift_timing:bmc#5.9.5: THALF puts a move at the falling edge from bit 6 of TXACC
 half_not_stopped#src/pe_shift.sv#509#tx_h_d    = 1'b0;#tx_h_d    = tx_h_d;#shift_timing:bmc#5.9.5: after sstop tx the outputs move at a falling edge
-n_never_moves#src/pe_shift.sv#1114#na_q <= na_q ^ dha;#na_q <= na_q;#shift_timing:bmc#5.2: the second half of a THALF move shows the first half's level
-p_without_move#src/pe_shift.sv#1113#pa_q <= la_d ^ dha ^ na_q;#pa_q <= la_d ^ na_q;#shift_timing:bmc#5.2: the first half of a THALF move shows the new level
-latch_no_reset#src/pe_shift.sv#1121#.RESET_B(rst_n),#.RESET_B(1'b1),#shift_timing:bmc#8: output A's latch is not cleared by reset
-latch_gate_inverted#src/pe_shift.sv#1121#.GATE_N(clk),#.GATE_N(~clk),#reset:gen#5.2: output A's latch is open while the clock is high, so the halves swap
+n_never_moves#src/pe_shift.sv#1019#na_q <= na_q ^ dha;#na_q <= na_q;#shift_timing:bmc#5.2: the second half of a THALF move shows the first half's level
+p_without_move#src/pe_shift.sv#1018#pa_q <= la_d ^ dha ^ na_q;#pa_q <= la_d ^ na_q;#shift_timing:bmc#5.2: the first half of a THALF move shows the new level
+latch_no_reset#src/pe_shift.sv#1026#.RESET_B(rst_n),#.RESET_B(1'b1),#shift_timing:bmc#8: output A's latch is not cleared by reset
+latch_gate_inverted#src/pe_shift.sv#1026#.GATE_N(clk),#.GATE_N(~clk),#reset:gen#5.2: output A's latch is open while the clock is high, so the halves swap
 pair_no_reset#src/pe_core.sv#52#.RESET_B(rst_n_sync),#.RESET_B(1'b1),#reset:gen#8: the falling-edge sample's second latch is not cleared by reset
+p3_reset_0#src/pe_shift.sv#900#p3_q      <= 12'd512;#p3_q      <= 12'd0;#reset:gen#8, 5.9.6 implementation note: RKIND 3's p resets to 0, not to 512, its value for the reset configuration
+rxce_reset_1#src/pe_shift.sv#1069#rx_ce_q   <= 13'sd0;#rx_ce_q   <= -13'sd1;#reset:gen#8: RXCE resets to -1, not 0
+rxc8_low_reset#src/pe_shift.sv#1067#rx_c8_q   <= 32'h0000_0000;#rx_c8_q   <= 32'h0000_8000;#reset:gen#8: bit 15 of RXC8, in the half the Manchester byte end added, resets to 1
 sync1f_first_latch#src/pe_core.sv#70#sync1f_q <= fall_l;#sync1f_q <= fall_m;#reset:gen#3.1: SYNC1F reads the latch that opens at the rising edge it samples on
 own_reset#src/pe_pins.sv#164#own_q   <= 32'h0000_0000;#own_q   <= 32'h0000_0001;#reset:flops_prove#8: pin 0 is owned by thread 1 after reset
 no_reset_s#src/pe_thread.sv#212#s_q        <= 16'h0000;##reset:flops_prove#8: S has no reset
@@ -49,18 +52,20 @@ TABLE
 # Netlist bugs: name # edits for plant_netlist.py # the piece that must fail # what the bug breaks (and the rule of
 # chip.eqy that closes that piece)
 NETLIST_BUGS=$(cat <<'TABLE'
-nl_unit1_reset#swap_reset:_63737_#unit1#unit 1's pwq_q[7] resets to the wrong value (inverted flops)
-nl_unit0_reset#swap_reset:_63218_#unit0#unit 0's pwh_q[7] resets to the wrong value (inverted flops, merges kept apart)
-nl_byp0_inverted#invert_d:_62993_#pins#byp_q[0] loads the inverse (constant flops)
-nl_byp4_dropped#drop_flop:_62992_#pins#the real flop byp_q[4] removed and tied to 0 (a wrong constant)
-nl_arg_stuck#hold_d:_65333_#core.hm_wdata.9#hm_wdata[9] never loads (the merged SCK flop)
-nl_miso_inverted#buf_to_inv:_66147_#host#uo_out[3] through an inverter (core.host.miso unmatched)
-nl_fsm_run#rewire_d:_65425_:_65431_#thread1#the FSM's one-hot RUN bit takes SETPC's next state (PDR)
-nl_fsm_binary#invert_d:_66077_#host#a bit of the FSM's binary copy loads the inverse (PDR)
-nl_fanout_buffer#buf_to_inv:fanout4002#unit2#a layout fanout buffer on unit 2's tx_stf_q inverts (final netlist only)
-nl_hold_cell#buf_to_inv:hold6315#host#a layout hold cell on the host's addr_q[7] inverts (final netlist only)
-nl_latch_read_inverted#invert_pin:_33893_:B#uo_out.0#unit 0's output A reads its latch inverted, so after a THALF move the pad's second half is wrong (latch boxes: a box output)
-nl_latch_input_buffer#buf_to_inv:wire6213#core.ui_in.3#the layout's repeater in front of ui_in[3]'s falling-edge latch inverts (latch boxes, final netlist only)
+nl_unit1_reset#swap_reset:_61146_#unit1#unit 1's pwq_q[7] resets to the wrong value (inverted flops)
+nl_unit0_reset#swap_reset:_60562_#unit0#unit 0's pwh_q[7] resets to the wrong value (inverted flops, merges kept apart)
+nl_unit2_p3_reset#swap_reset:_61656_#unit2#unit 2's RKIND 3 p (p3_q[9], 512 at reset) resets to the wrong value (inverted flops)
+nl_unit3_wq3_reset#swap_reset:_62699_#unit3#unit 3's RKIND 3 window point wq3_q[8] (384 at reset) resets to the wrong value (inverted flops)
+nl_byp0_inverted#invert_d:_60425_#pins#byp_q[0] loads the inverse (constant flops)
+nl_byp4_dropped#drop_flop:_60424_#pins#the real flop byp_q[4] removed and tied to 0 (a wrong constant)
+nl_arg_stuck#hold_d:_62925_#core.hm_wdata.9#hm_wdata[9] never loads (the merged SCK flop)
+nl_miso_inverted#buf_to_inv:_63839_#host#uo_out[3] through an inverter (core.host.miso unmatched)
+nl_fsm_run#rewire_d:_63017_:_63023_#thread1#the FSM's one-hot RUN bit takes SETPC's next state (PDR)
+nl_fsm_binary#invert_d:_63769_#host#a bit of the FSM's binary copy loads the inverse (PDR)
+nl_fanout_buffer#buf_to_inv:fanout3959#unit2#a layout fanout buffer on unit 2's tx_stf_q inverts (final netlist only)
+nl_hold_cell#buf_to_inv:hold6185#host#a layout hold cell on the host's addr_q[7] inverts (final netlist only)
+nl_latch_read_inverted#invert_pin:_41138_:B#uo_out.0#unit 0's output A reads its latch inverted, so after a THALF move the pad's second half is wrong (latch boxes: a box output)
+nl_latch_input_buffer#buf_to_inv:wire6096#core.ui_in.3#the layout's repeater in front of ui_in[3]'s falling-edge latch inverts (latch boxes, final netlist only)
 TABLE
 )
 

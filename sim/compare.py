@@ -22,7 +22,12 @@ What runs:
 - random images of the same kind with half cycles (section 3.1): slot values biased to THALF, RKIND 3 and
   REOP's byte end (5.9.5 to 5.9.7), inputs with their own level at each falling edge, and the uio pads looped
   back with each half's level, so a pad moved at a falling edge reaches the falling-edge sample with its old
-  level and the rising-edge sample with its new one. The other runs give one level per cycle.
+  level and the rising-edge sample with its new one. The other runs give one level per cycle;
+- directed images for RKIND 3 (5.9.6): each thread's receive half hunts on its own ui pin, which carries 802.3
+  Manchester frames at the decoder's bit time or near it, timed to the half cycle, with random edge jitter, the
+  fixed patterns of section 7.3 (bit-boundary edges late and mid-bit edges early, and the reverse), phase steps,
+  pulses of half a cycle and frames of 1 to 7 bits more than whole octets, so that edges come in both halves of a
+  cycle, candidates give their bits at the deadline and REOP's byte end of a Manchester frame runs (5.9.7).
 
 The host commands are POST, TAKE, RUN with stop and start masks, STEP, SETPC, RDREG of registers 0 to 39,
 STATUS, WRMEM, RDMEM and ABORT. sim2.py and docsim.py take them as bytes, through their framing, and sim.py
@@ -38,6 +43,7 @@ Usage, from the repository root. Python 3, standard library only:
     python3 sim/compare.py --quick          every program with shorter runs, 40 images and 20 with half cycles
     python3 sim/compare.py --images N --seed S      N images from seed S
     python3 sim/compare.py --half-images N  N images with half cycles
+    python3 sim/compare.py --rk3-images N   N directed RKIND 3 images (100, or 20 with --quick)
     python3 sim/compare.py --no-programs    random images only
     python3 sim/compare.py --jobs 4         in 4 processes
     python3 sim/compare.py --stop           stop at the first run that differs
@@ -489,6 +495,133 @@ def half_image(rng):
     return {a: w for a, w in enumerate(words)}, starts
 
 
+def rk3_image(rng, cycles):
+    """Directed, for RKIND 3: thread k's receive half hunts on ui pin k with its own period, gain, window, sync,
+    CRC and REOP, and takes words in a loop with random unit rows. Returns (words, starts, levels): levels[k][n] is
+    ui pin k's level at half cycle n, n = 2c at the falling edge of cycle c and 2c + 1 at the rising edge that ends
+    it (3.1). The line is 802.3 Manchester (a 1 is low then high), high when idle, so a hunt for a rising edge
+    starts at the first preamble bit's clock edge."""
+    words, starts, levels = [], [], []
+
+    def li(v):
+        words.extend((enc('ldi', n=1, i=v & 255), enc('lui', n=1, i=(v >> 8) & 255)))
+
+    def cfg(k, v):
+        li(v)
+        words.append(enc('scfg', s=1, k=k))
+
+    for tid in range(4):
+        starts.append((tid, len(words)))
+        rper = rng.choice((2, 2, 3, 4, 5, 5, 5, 6, 8, 11, 15, 0, 1, 16, 23))
+        rfrac = rng.choice((0, 0, 128, 64, rng.getrandbits(8)))
+        p = 512 if rper < 2 else (0xF00 | rfrac) if rper > 15 else (rper << 8) | rfrac
+        rinv, rdiff, rmsb = rng.getrandbits(1), int(rng.random() < 0.12), rng.getrandbits(1)
+        hlvl = 1 if rng.random() < 0.85 else 0
+        cfg(4, 3 | rmsb << 2 | rinv << 3 | rdiff << 4 | 1 << 5 | hlvl << 6 | tid << 8 | rng.getrandbits(4) << 12)
+        cfg(5, rper)
+        cfg(10, rfrac | rng.choice((0, 1, 2, 3, 3)) << 9 | rng.getrandbits(1) << 11 | rng.choice((0, 0, 0, 3)) << 12)
+        synclen = rng.choice((0, 8, 16, 16))
+        sync = [rng.getrandbits(1) for _ in range(synclen)]
+        rcnt = 0 if rng.random() < 0.9 else rng.randrange(1, 200)
+        cfg(8, synclen << 11 | rcnt)
+        dec = [b ^ rinv for b in sync]                      # the bits the decoder gives for them, without RDIFF
+        if rmsb:
+            pat = sum(b << (synclen - 1 - i) for i, b in enumerate(dec))
+        else:
+            pat = sum(b << (16 - synclen + i) for i, b in enumerate(dec))
+        cfg(9, pat if rng.random() < 0.9 else rng.getrandbits(16))
+        if rng.random() < 0.15:
+            cfg(7, rng.randrange(1, 4 * max(2, rper)))      # REND, an end that keeps every bit
+        cmode = rng.choice((1, 1, 1, 1, 2, 0))
+        smode = 0 if rng.random() < 0.85 else rng.choice((1, 2))
+        cw = rng.choice((31, 31, 15, 7, rng.randrange(32)))
+        cfg(15, cw | rng.getrandbits(1) << 5 | rng.getrandbits(1) << 6 | cmode << 7 | int(rng.random() < 0.1) << 9 |
+            smode << 10 | rng.randrange(8) << 12 | int(rng.random() < 0.7) << 15)
+        if tid < 2:
+            cfg(11, rng.choice((0x04C1, 0x8005, rng.getrandbits(16))))
+            cfg(12, rng.choice((0x1DB7, 0, rng.getrandbits(16))))
+        words.append(enc('sgo', m=2))
+        words.append(enc('now'))
+        top = len(words)
+        words.append(enc('rxw', d=rng.randrange(2, 8)))
+        for _ in range(rng.randrange(0, 3)):
+            words.append(rng.choice((enc('srd', d=rng.randrange(2, 8), s=rng.randrange(3)),
+                                     enc('sstat', d=rng.randrange(2, 8)))))
+        words.append(enc('goto', a=top))
+        levels.append(manch_line(rng, p, sync, 2 * cycles + 2))
+    assert len(words) <= 128, len(words)
+    return {a: w for a, w in enumerate(words)}, starts, levels
+
+
+def manch_line(rng, p, sync, n):
+    """n half-cycle levels of one pin: idle high for about 260 cycles, then frames of a preamble, the sync bits and
+    random data with gaps between them. The bit time is p / 256 cycles, sometimes a little off, and each frame
+    gets its own jitter: none, random, bit-boundary edges late and mid-bit ones early or the reverse, a phase step
+    from a random bit on, or pulses of half a cycle."""
+    bt = p / 256.0 * rng.choice((1.0, 1.0, 1.0, 1.002, 0.998, 1.02, 0.98))
+    hb = bt / 2
+    events, pulses = [], []
+    t = 260.0 + rng.random() * 8
+    while True:
+        nbits = rng.randrange(6, 20) + len(sync) + 8 * rng.randrange(1, 6) + rng.choice((0, 0, 0, 1, 2, 3, 4, 5, 6, 7))
+        if 2 * (t + nbits * bt) + 4 >= n:
+            break
+        pre = []
+        while len(pre) < nbits - len(sync) - 8:
+            pre.append(1 - len(pre) % 2)                    # 1, 0, 1, 0, ...: 802.3's preamble from its first bit
+        bits = pre + sync + [rng.getrandbits(1) for _ in range(nbits - len(pre) - len(sync))]
+        half = []
+        for b in bits:
+            half += [1 - b, b]
+        mode = rng.choice(('none', 'rand', 'rand', 'late', 'early', 'step', 'pulse'))
+        a = rng.uniform(0.05, 0.32) * hb
+        jstep, s = rng.randrange(len(bits)), rng.uniform(-0.45, 0.45) * hb
+        prev, edges = 1, []
+        for i, v in enumerate(half + [1]):                 # half-bit cell i starts at t + i * hb; idle high after
+            if v == prev:
+                continue
+            prev = v
+            if mode == 'rand':
+                j = rng.uniform(-a, a)
+            elif mode in ('late', 'early'):
+                j = (a if i % 2 == 0 else -a) * (1 if mode == 'late' else -1)
+            elif mode == 'step':
+                j = s if i >= 2 * jstep else 0.0
+            else:
+                j = 0.0
+            edges.append((t + i * hb + j, v))
+        for x, v in edges:                                  # from the first half-cycle sample at or after the edge
+            events.append((int(-(-2 * x // 1)), len(events), v))
+        if mode == 'pulse':
+            pulses += [int(2 * (t + rng.uniform(0, len(bits) * bt))) for _ in range(rng.randrange(1, 4))]
+        t += len(bits) * bt + rng.uniform(3, 40) * bt
+    lv, q, v = [], 0, 1
+    for k, _, w in sorted(events):
+        lv += [v] * (min(k, n) - len(lv))
+        v = w
+    lv += [v] * (n - len(lv))
+    for q in pulses:
+        if 0 < q < n - 1 and lv[q - 1] == lv[q] == lv[q + 1]:
+            lv[q] ^= 1                                      # half a cycle: one edge in each half of a cycle
+    return lv
+
+
+def rk3_inputs(levels):
+    """The inputs of an rk3_image: ui pin k from levels[k] at both edges, ui 4 to 7 and the uio pads busy."""
+    c = [0]
+
+    def inputs(rng, pins):
+        busy_inputs(rng, pins)
+        n = 2 * c[0]
+        lo_f = sum(levels[k][n] << k for k in range(4))
+        lo = sum(levels[k][n + 1] << k for k in range(4))
+        pins.ui = (pins.ui & 0xF0) | lo
+        pins.ui_f = (pins.ui & 0xF0) | lo_f
+        pins.io_f = pins.io
+        c[0] += 1
+    return inputs
+
+
 def mail_value(rng):
     return rng.choice((rng.randrange(1, 64), rng.randrange(256), rng.getrandbits(16)))
 
@@ -543,7 +676,7 @@ def run(words, depth, seed, cycles, starts, inputs, loop, host, half=False):
     a, b, d = sims
     rng = random.Random(seed * 7919 + 1)
     stats = dict(cycles=0, host={}, rdreg_unit=0, rdreg_unit_nonzero=0, sel_cycles=0, rows={}, halves=0, rk3=0,
-                 byte_end=0)
+                 byte_end=0, rk3_both=0, rk3_deadline=0, rk3_mend=0)
 
     def done(why):
         for _, _, _, w in a.m.log:
@@ -565,6 +698,10 @@ def run(words, depth, seed, cycles, starts, inputs, loop, host, half=False):
         inputs(rng, pins)
         ends = [t.u.RXRUN and t.u.REOP and t.u.RXKIND == 0 and t.u.RXONES and 0 < (t.u.RXTOT & 7) < 7
                 for t in a.m.th] if half else ()
+        pre3 = [(t.u.RXRUN and t.u.RXKIND == 3, t.u.RXOPEN and t.u.RXCAND,
+                 t.u.REOP and not t.u.RXVIO and (t.u.RXTOT & 7) != 0,
+                 ((a.m.SYNC3 ^ a.m.SYNC2F) >> t.u.RPIN) & 1, ((a.m.SYNC2F ^ a.m.SYNC2) >> t.u.RPIN) & 1)
+                for t in a.m.th] if half else ()
         sa, sb, sd = (a.cycle(pins),) + a.state(), (b.cycle(pins),) + b.state(), (d.cycle(pins),) + d.state()
         stats['cycles'] = c + 1
         if not sa == sb == sd:
@@ -576,6 +713,11 @@ def run(words, depth, seed, cycles, starts, inputs, loop, host, half=False):
             stats['rk3'] += any(t.u.RXRUN and t.u.RXKIND == 3 for t in a.m.th)
             stats['byte_end'] += sum(1 for t, e in zip(a.m.th, ends) if e and not t.u.RXRUN and
                                      t.u.RXN == t.u.RXN8 and t.u.RXSR == t.u.RXSR8)
+            for t, (run3, cand, mend, e1, e2) in zip(a.m.th, pre3):
+                if run3:
+                    stats['rk3_both'] += e1 and e2
+                    stats['rk3_deadline'] += cand and not (e1 or e2) and not t.u.RXOPEN
+                    stats['rk3_mend'] += mend and not t.u.RXRUN and t.u.RXN == t.u.RXN8 and t.u.RXSR == t.u.RXSR8
         if c % 64 == 63 and not a.mem == b.mem == d.mem:
             return done((c,) + memory_diff(a.mem, b.mem, d.mem))
         cmd = host_command(rng, host, depth) if c >= lead else None
@@ -635,6 +777,9 @@ def job(spec):
     elif kind == 'half' and seed % 2 == 0:
         words, starts = half_image(rng)
         why, st = run(words, 128, seed, cycles, starts, half_inputs, True, 'mail', half=True)
+    elif kind == 'rk3':
+        words, starts, levels = rk3_image(rng, cycles)
+        why, st = run(words, 128, seed, cycles, starts, rk3_inputs(levels), True, 'mail', half=True)
     elif kind == 'half':
         words = unit_image(rng, half=True)
         why, st = run(words, 128, seed, cycles, [(i, rng.randrange(128)) for i in range(4)], half_inputs, True,
@@ -655,6 +800,7 @@ def main(argv):
     quick = '--quick' in argv
     n_images = int(_arg('--images', 40 if quick else 300))
     n_half = int(_arg('--half-images', 20 if quick else 100))
+    n_rk3 = int(_arg('--rk3-images', 20 if quick else 100))
     seed0 = int(_arg('--seed', 0))
     jobs = int(_arg('--jobs', 1))
     stop = '--stop' in argv
@@ -674,8 +820,10 @@ def main(argv):
                 specs.append(('program', f, 1000 + 3 * i + k, p_cycles, mode))
     specs += [('image', 'image %d' % s, s, i_cycles) for s in range(seed0, seed0 + n_images)]
     specs += [('half', 'half image %d' % s, s, i_cycles) for s in range(50000 + seed0, 50000 + seed0 + n_half)]
+    specs += [('rk3', 'RKIND 3 image %d' % s, s, i_cycles) for s in range(70000 + seed0, 70000 + seed0 + n_rk3)]
     t0 = time.time()
-    tot = dict(cycles=0, host={}, rdreg_unit=0, rdreg_unit_nonzero=0, sel_cycles=0, halves=0, rk3=0, byte_end=0)
+    tot = dict(cycles=0, host={}, rdreg_unit=0, rdreg_unit_nonzero=0, sel_cycles=0, halves=0, rk3=0, byte_end=0,
+               rk3_both=0, rk3_deadline=0, rk3_mend=0)
     groups = {}
     bad = []
     rows = {}
@@ -683,10 +831,12 @@ def main(argv):
     it = pool.imap(job, specs) if pool else map(job, specs)
     for n, (spec, why, st) in enumerate(it, 1):
         g = groups.setdefault(spec[0] if spec[0] == 'program' else 'image, half cycles' if spec[0] == 'half' else
+                              'image, RKIND 3' if spec[0] == 'rk3' else
                               ('image, uniform' if spec[2] % 2 == 0 else 'image, shift units'), [0, 0, 0])
         g[0] += 1
         g[1] += st['cycles']
-        for k in ('cycles', 'rdreg_unit', 'rdreg_unit_nonzero', 'sel_cycles', 'halves', 'rk3', 'byte_end'):
+        for k in ('cycles', 'rdreg_unit', 'rdreg_unit_nonzero', 'sel_cycles', 'halves', 'rk3', 'byte_end',
+                  'rk3_both', 'rk3_deadline', 'rk3_mend'):
             tot[k] += st[k]
         for k, v in st['host'].items():
             tot['host'][k] = tot['host'].get(k, 0) + v
@@ -716,6 +866,10 @@ def main(argv):
     if n_half:
         print('half-cycle images: %d cycles whose two halves differ on a pad, %d with an RKIND 3 reception, %d '
               'receptions ended at a byte boundary by REOP' % (tot['halves'], tot['rk3'], tot['byte_end']))
+    if n_half or n_rk3:
+        print('RKIND 3 receptions: %d cycles with an edge in both halves of the cycle, %d bits given by a candidate at '
+              'its deadline, %d receptions ended at a byte boundary by the byte end of a Manchester frame'
+              % (tot['rk3_both'], tot['rk3_deadline'], tot['rk3_mend']))
     print('rows sim.py ran: %d of %d; shift-unit rows, times run (a row that blocks counts at every slot it tries): %s'
           % (len(rows), len(ROWS), ', '.join('%s %d' % (r.mn, rows.get(r.syntax, 0)) for r in ROWS if r.mn in UNIT_MN)))
     kinds = {}

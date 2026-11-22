@@ -59,7 +59,7 @@ UNIT_STATE = ('TXARM', 'TXRUN', 'TXTL', 'TXSR', 'TXN', 'TXLW', 'TXBUF', 'TXBN', 
               'RXARM', 'RXHUNT', 'RXRUN', 'RXEP', 'RXSR', 'RXN', 'RXTOT', 'RXSYN', 'RXKIND', 'RXPH', 'RXG',
               'RXOPEN', 'RXCAND', 'RXIC', 'RXLAST', 'RXWIN', 'RXBUF', 'RXBN', 'RXBL', 'RXFULL', 'RXPN', 'RXOVR',
               'RXSEEN', 'RXRL', 'RXRV', 'RXVIO', 'RXCOV', 'RXEF', 'RXBE', 'CMT', 'CRC', 'RXPE',
-              'TXH', 'OLA', 'OLB', 'RXSR8', 'RXN8', 'RXC8', 'RXONES')
+              'TXH', 'OLA', 'OLB', 'RXSR8', 'RXN8', 'RXC8', 'RXONES', 'RXCE')
 
 
 class Unit:
@@ -670,17 +670,12 @@ class Chip:
             if u.RPER > 255:
                 p = 0xFF00 | u.RFRAC
             self.rx_manch(u, e, (self.SYNC2 >> u.RPIN) & 1, p, 256)
-        elif u.RXKIND == 3:                         # two half steps: the falling-edge sample, then SYNC2
-            if u.RPER > 255:
-                p = 0xFF00 | u.RFRAC
+        elif u.RXKIND == 3:                         # two half steps a cycle (5.9.6, rx_manch3)
+            if u.RPER > 15:
+                p = 0xF00 | u.RFRAC
             elif u.RPER < 2:
                 p = 512
-            f = (self.SYNC2F >> u.RPIN) & 1
-            v = (self.SYNC2 >> u.RPIN) & 1
-            e1 = e and f == v
-            self.rx_manch(u, e1, f, p, 128)
-            if u.RXRUN:
-                self.rx_manch(u, e and not e1, v, p, 128)
+            self.rx_manch3(u, p)
         elif u.RXKIND == 2:
             now = (self.SYNC2 >> u.RCLK) & 1
             if now != ((self.SYNC3 >> u.RCLK) & 1) and now != u.RFALL:
@@ -733,6 +728,57 @@ class Chip:
             u.RXWIN = 1
             self.rx_pull(u, p >> 1)
         u.RXPH += s
+
+    def rx_manch3(self, u, p):
+        """RKIND 3 (5.9.6): a half step on the edge between SYNC3 and SYNC2F, then one between SYNC2F and SYNC2. The
+        decisions read RXPH as it was at the start of the cycle, moved only by the half steps' own + 128 and window
+        openings; the cycle's one pull, the first half step's, is applied at the end, with the gain and the window
+        width that RXG gives at the start of the cycle."""
+        w = (p >> 1) if u.RACQ and u.RGAIN != 0 and u.RXG < 16 else (p >> 2)
+        if u.RGAIN == 0:
+            k = 0
+        elif u.RXG <= 3:
+            k = 1
+        else:
+            k = (2, 4, 5)[u.RGAIN - 1]
+        pulled = False
+        q = 0
+        levels = ((self.SYNC3 >> u.RPIN) & 1, (self.SYNC2F >> u.RPIN) & 1, (self.SYNC2 >> u.RPIN) & 1)
+        for h in (0, 1):
+            if not u.RXRUN:
+                break
+            before, after = levels[h], levels[h + 1]
+            e = before != after
+            if u.RXPH >= p - w:
+                if u.RXOPEN:
+                    self.rx_mend(u)
+                u.RXOPEN = 1
+                u.RXCAND = 0
+                u.RXPH -= p
+            if u.RXRUN and u.RXOPEN:
+                if e and u.RXPH < 0:                # a candidate: its phase is kept, and it doesn't pull yet
+                    if u.RXCAND:
+                        u.RXWIN = 1
+                    u.RXCAND = 1
+                    u.RXCE = u.RXPH
+                elif e or (u.RXCAND and u.RXPH >= (p >> 3)):
+                    b = (1 if (u.RXWIN or (u.RXCAND and e)) else 0) if u.RDIFF else after
+                    if not pulled:
+                        pulled = True
+                        q = (u.RXPH if e else u.RXCE) >> k
+                    u.RXOPEN = 0
+                    u.RXCAND = 0
+                    u.RXWIN = 0
+                    u.RXIC = 0
+                    self.rx_gear(u)
+                    self.rx_bit(u, b)
+            elif u.RXRUN and e:
+                u.RXWIN = 1
+                if not pulled:
+                    pulled = True
+                    q = (u.RXPH - (p >> 1)) >> k
+            u.RXPH += 128
+        u.RXPH -= q
 
     @staticmethod
     def rx_pull(u, r):
@@ -916,7 +962,7 @@ class Chip:
             u.RXSR8 = u.RXSR
             u.RXN8 = u.RXN
             if not u.CTX and (u.CMODE == 1 or u.CMODE == 2):
-                u.RXC8 = u.CRC >> 16
+                u.RXC8 = u.CRC
             u.RXONES = 1
         elif not b:
             u.RXONES = 0
@@ -928,7 +974,16 @@ class Chip:
             u.RXSR = u.RXSR8
             u.RXN = u.RXN8
             if not u.CTX and (u.CMODE == 1 or u.CMODE == 2):
-                u.CRC = (u.RXC8 << 16) | (u.CRC & 0xFFFF)
+                u.CRC = (u.RXC8 & 0xFFFF0000) | (u.CRC & 0xFFFF)
+        self.rx_end(u)
+
+    def rx_mend(self, u):
+        """RKIND 3's empty window with REOP: the byte end of a Manchester frame (5.9.7, IEEE 802.3 4.2.9)."""
+        if u.REOP and not u.RXVIO and (u.RXTOT & 7) != 0:
+            u.RXSR = u.RXSR8
+            u.RXN = u.RXN8
+            if not u.CTX and (u.CMODE == 1 or u.CMODE == 2):
+                u.CRC = u.RXC8
         self.rx_end(u)
 
     @staticmethod

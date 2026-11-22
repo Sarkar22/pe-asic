@@ -704,8 +704,11 @@ def _wants_reply(rf, mac, ip, o):
     and None if nothing may answer it."""
     f = rf.fields
     octs = rf.octets
-    if octs is None or rf.extra_bits:
-        return None, 'not whole octets'
+    if octs is None:
+        return None, 'no SFD'
+    # bits after the last whole octet are dropped before the FCS check: 4.2.9's ReceiveLinkMgmt truncates the frame
+    # (excessBits := frameSize mod 8), and only a bad FCS then makes it an alignmentError (4.2.4.2.1 b), so rf.octets,
+    # the whole octets, are the frame
     if len(octs) < o['min_frame']:
         return None, 'a runt of %d octets (802.3 4.2.4.2.2)' % len(octs)
     if not f.get('fcs_ok'):

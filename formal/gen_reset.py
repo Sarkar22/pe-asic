@@ -7,8 +7,10 @@ Usage: gen_reset.py <chip.json> <out folder>
 The script first checks the structure, and stops with an error if any of these fails:
   - every flop is an asynchronous-load flop ($aldff) with a constant load value, active low;
   - its load comes from rst_n itself (the reset synchroniser) or from the synchronised reset core.rst_n_sync;
-  - its value under reset is the value section 8 gives: 0, except the two window points of each shift
-    unit, p - p/4 = 192 and p - p/2 = 128 for p = 256 (section 5.9.6, implementation note);
+  - its value under reset is the value section 8 gives: 0, except the flops that hold values of the reset
+    configuration (section 5.9.6, implementation note): each shift unit's two window points, p - p/4 = 192 and
+    p - p/2 = 128 for p = 256, and RKIND 3's own p and window points, 512, 384 and 256, since RKIND 3 takes RPER
+    0 as 2;
   - every latch cell (the library's sg13cmos5l_dllrq_1 and sg13cmos5l_dlhq_1, section 5.2's implementation
     note) is gated by clk itself; every sg13cmos5l_dllrq_1 is cleared by the synchronised reset; and every
     sg13cmos5l_dlhq_1, which has no reset, drives nothing but the D input of one sg13cmos5l_dllrq_1, so its
@@ -24,7 +26,9 @@ import re
 import sys
 
 # Section 8: every flop resets to 0, with these exceptions (section 5.9.6, implementation note).
-SPEC_NONZERO = {r"core\.gen_shift\[\d\]\.shift\.pwq_q": 192, r"core\.gen_shift\[\d\]\.shift\.pwh_q": 128}
+SPEC_NONZERO = {r"core\.gen_shift\[\d\]\.shift\.pwq_q": 192, r"core\.gen_shift\[\d\]\.shift\.pwh_q": 128,
+                r"core\.gen_shift\[\d\]\.shift\.p3_q": 512, r"core\.gen_shift\[\d\]\.shift\.wq3_q": 384,
+                r"core\.gen_shift\[\d\]\.shift\.wh3_q": 256}
 
 
 def spec_value(name):

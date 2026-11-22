@@ -18,9 +18,12 @@ Points, by group:
   change of a half's state (idle, armed, running, tail; idle, armed, hunting, receiving, holding its last word); the
   things a half does (5.9.5 to 5.9.7: underruns, overruns, stuff bits, appends, sync, ends by each cause, the CRC
   check); and sstop and ABORT in each state of each half; the half cycles (3.1, 5.2): THALF at a start, a move put
-  at the falling edge by each of its causes and one cancelled by sstop or ABORT, and with RKIND 3 an edge, a window
-  opening and a bit in each half, a hunt's start in the second half, RPER 0 or 1 taken as 2; and REOP's byte end
-  (5.9.7): 1 to 6 bits dropped, and each reason it keeps every bit;
+  at the falling edge by each of its causes and one cancelled by sstop or ABORT; with RKIND 3, in each half step, an
+  edge, a window opening, a window closing empty, a candidate, a bit from an edge and one at the candidate's deadline
+  and an edge outside the window, and a pulse inside one cycle, a candidate replaced, a bit from an edge after a
+  candidate, a hunt's start in the second half, RPER 0 or 1 taken as 2 and RPER above 15 as 15; and the byte ends
+  (5.9.7): REOP's end test with 1 to 6 bits dropped, the Manchester byte end with 1 to 7, and each reason either
+  keeps every bit;
 - host: RUN's stop, start and both masks, STEP, SETPC, RDREG and ABORT on a running and on a stopped thread, RDREG of
   each reg8 group, POST and TAKE on a full and an empty word, STATUS with BUSY 0 and 1, memory commands with a free
   memory cycle and with every thread running (lockstep.py counts the last two, since it sets sim.py's BUSY itself
@@ -141,10 +144,18 @@ def points():
         p.append(('unit', 'tx moved at the falling edge: %s' % x))
     p.append(('unit', 'tx a falling-edge move cancelled by sstop or ABORT'))
     for h in ('first', 'second'):
-        for x in ('edge', 'window opened', 'bit', 'candidate'):
+        for x in ('edge', 'window opened', 'window closed empty', 'candidate', 'bit from an edge',
+                  'bit at the deadline', 'edge outside the window'):
             p.append(('unit', 'rx RKIND 3 %s in the %s half' % (x, h)))
     p += [('unit', 'rx RKIND 3 hunt started in the second half'), ('unit', 'rx RKIND 3 RPER 0 or 1 taken as 2'),
-          ('unit', 'rx RKIND 3 pulse inside one cycle, no edge')]
+          ('unit', 'rx RKIND 3 RPER above 15 taken as 15'),
+          ('unit', 'rx RKIND 3 pulse inside one cycle: an edge in each half'),
+          ('unit', 'rx RKIND 3 candidate replaced by a later one'),
+          ('unit', 'rx RKIND 3 bit from an edge after a candidate')]
+    for n in range(1, 8):
+        p.append(('unit', 'rx Manchester byte end: %d bit%s dropped' % (n, '' if n == 1 else 's')))
+    for x in ('REOP 0', 'no bit past the last byte', 'a stuff violation'):
+        p.append(('unit', 'rx Manchester byte end kept every bit: %s' % x))
     for n in range(1, 7):
         p.append(('unit', 'rx byte end: %d bit%s dropped' % (n, '' if n == 1 else 's')))
     for x in ('no bit past the last byte', 'a 0 past the last byte', 'seven bits past the last byte',
@@ -413,6 +424,8 @@ def install(cov):
         if k == 3:
             if u.RPER < 2:
                 hit('unit: rx RKIND 3 RPER 0 or 1 taken as 2')
+            if u.RPER > 15:
+                hit('unit: rx RKIND 3 RPER above 15 taken as 15')
             if u.RXHUNT and ((c.SYNC2F ^ c.SYNC2) >> u.RPIN) & 1:
                 hit('unit: rx RKIND 3 hunt started in the second half')
     wrap('rx_begin', rx_begin_before)
@@ -484,38 +497,78 @@ def install(cov):
             hit('unit: tx a falling-edge move cancelled by sstop or ABORT')
     wrap('tx_stop', tx_stop_before, static=True)
 
-    half_step = {}
+    # RKIND 3 (rx_manch3, 5.9.6): the half steps read again from the cycle's start, every decision as the code makes
+    # it, with each rx_bit's outcome (did the bit end the reception) taken from sim.py's own call. The reading must end
+    # in sim.py's RXPH, RXOPEN, RXCAND, RXCE and RXWIN, or the run stops: the points can't drift from the code.
+    rk3 = {}
 
-    def run_before(c, u):
-        half_step[id(u)] = 0
-        if u.RXKIND == 3 and u.RXRUN:
-            e = ((c.SYNC2 ^ c.SYNC3) >> u.RPIN) & 1
-            f = ((c.SYNC2F ^ c.SYNC3) >> u.RPIN) & 1
-            g = ((c.SYNC2 ^ c.SYNC2F) >> u.RPIN) & 1
-            if not e and f and g:
-                hit('unit: rx RKIND 3 pulse inside one cycle, no edge')
-    wrap('rx_run', run_before)
+    def manch3_before(c, u, p):
+        rk3[id(u)] = dict(pre=(u.RXRUN, u.RXPH, u.RXOPEN, u.RXCAND, u.RXCE, u.RXWIN, u.RXG),
+                          lv=tuple((v >> u.RPIN) & 1 for v in (c.SYNC3, c.SYNC2F, c.SYNC2)), bits=[])
 
-    def manch_before(c, u, e, v, p, s):
-        if u.RXKIND != 3:
-            return None
-        h = ('first', 'second')[half_step.get(id(u), 0)]
-        half_step[id(u)] = 1
-        w = (p >> 1) if u.RACQ and u.RGAIN != 0 and u.RXG < 16 else (p >> 2)
-        if e:
-            hit('unit: rx RKIND 3 edge in the %s half' % h)
-        if u.RXPH >= p - w:
-            hit('unit: rx RKIND 3 window opened in the %s half' % h)
-        return h, u.RXTOT, u.RXN, u.RXCAND
-    def manch_after(ctx, out, c, u, e, v, p, s):
-        if ctx is None:
-            return
-        h, tot, n, cand = ctx
-        if u.RXTOT != tot or u.RXN != n:
-            hit('unit: rx RKIND 3 bit in the %s half' % h)
-        if u.RXCAND and not cand:
-            hit('unit: rx RKIND 3 candidate in the %s half' % h)
-    wrap('rx_manch', manch_before, manch_after)
+    def manch3_after(ctx, out, c, u, p):
+        st = rk3.pop(id(u))
+        run, ph, op, cd, ce, wn, g = st['pre']
+        lv, bits = st['lv'], st['bits']
+        w = (p >> 1) if u.RACQ and u.RGAIN != 0 and g < 16 else (p >> 2)
+        k = 0 if u.RGAIN == 0 else 1 if g <= 3 else (2, 4, 5)[u.RGAIN - 1]
+        pulled, q = False, 0
+        for h, half in enumerate(('first', 'second')):
+            if not run:
+                break
+            e = lv[h] != lv[h + 1]
+            if e:
+                hit('unit: rx RKIND 3 edge in the %s half' % half)
+                if h and lv[0] != lv[1]:
+                    hit('unit: rx RKIND 3 pulse inside one cycle: an edge in each half')
+            if ph >= p - w:
+                hit('unit: rx RKIND 3 window opened in the %s half' % half)
+                if op:
+                    hit('unit: rx RKIND 3 window closed empty in the %s half' % half)
+                    run = 0
+                op, cd, ph = 1, 0, ph - p
+            if run and op:
+                if e and ph < 0:
+                    hit('unit: rx RKIND 3 candidate in the %s half' % half)
+                    if cd:
+                        hit('unit: rx RKIND 3 candidate replaced by a later one')
+                        wn = 1
+                    cd, ce = 1, ph
+                elif e or (cd and ph >= (p >> 3)):
+                    hit('unit: rx RKIND 3 bit %s in the %s half' % ('from an edge' if e else 'at the deadline', half))
+                    if e and cd:
+                        hit('unit: rx RKIND 3 bit from an edge after a candidate')
+                    if not pulled:
+                        pulled, q = True, (ph if e else ce) >> k
+                    op, cd, wn = 0, 0, 0
+                    run = bits.pop(0)
+            elif run and e:
+                hit('unit: rx RKIND 3 edge outside the window in the %s half' % half)
+                wn = 1
+                if not pulled:
+                    pulled, q = True, (ph - (p >> 1)) >> k
+            ph += 128
+        ph -= q
+        got, want = (u.RXPH, u.RXOPEN, u.RXCAND, u.RXCE, u.RXWIN), (ph, op, cd, ce, wn)
+        assert got == want and not bits, 'fcov reads rx_manch3 as %s, sim.py gives %s' % (want, got)
+    wrap('rx_manch3', manch3_before, manch3_after)
+
+    def bit_after(ctx, out, c, u, b):
+        if id(u) in rk3:
+            rk3[id(u)]['bits'].append(u.RXRUN)
+    wrap('rx_bit', None, bit_after)
+
+    def mend_before(c, u):
+        nb = u.RXTOT & 7
+        if not u.REOP:
+            hit('unit: rx Manchester byte end kept every bit: REOP 0')
+        elif u.RXVIO:
+            hit('unit: rx Manchester byte end kept every bit: a stuff violation')
+        elif nb == 0:
+            hit('unit: rx Manchester byte end kept every bit: no bit past the last byte')
+        else:
+            hit('unit: rx Manchester byte end: %d bit%s dropped' % (nb, '' if nb == 1 else 's'))
+    wrap('rx_mend', mend_before)
 
     def eop_before(c, u):
         nb = u.RXTOT & 7

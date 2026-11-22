@@ -31,7 +31,7 @@ from report import Chip, assemble, src
 
 PROGRAMS = ('advanced/eth_arp.s',)
 PROG = 'advanced/eth_arp.s'
-WORDS = 401                     # section 11.2's count for the program
+WORDS = 402                     # section 11.2's count for the program
 MAC, IP = G.MAC, G.IP
 PEER_MAC, PEER_IP = G.PEER_MAC, G.PEER_IP
 OTHER_MAC = G.OTHER_MAC
@@ -57,12 +57,11 @@ def octets_of(bits):
 
 
 def disposition(bits):
-    """What 802.3 4.2.4 asks a receiving station to do with a frame, from its bits alone: 'bad' (not whole octets,
-    under minFrameSize of 64 octets, or an FCS error: 3.4, 4.2.4.1.2, 4.2.4.2.2), 'other' (DA neither the station's
-    address nor broadcast: 4.2.4.1.1), else 'keep'."""
-    if len(bits) % 8:
-        return 'bad'
-    octs = octets_of(bits)
+    """What 802.3 4.2.4 asks a receiving station to do with a frame, from its bits alone. 4.2.9's ReceiveLinkMgmt
+    first truncates the frame to whole octets (excessBits := frameSize mod 8; 4.2.4.2.1 b), then: 'bad' (under
+    minFrameSize of 64 octets, or an FCS error, an alignmentError if bits were truncated: 3.4, 4.2.4.1.2,
+    4.2.4.2.2), 'other' (DA neither the station's address nor broadcast: 4.2.4.1.1), else 'keep'."""
+    octs = octets_of(bits[:len(bits) - len(bits) % 8])
     if len(octs) < 64:
         return 'bad'
     f = eth_check.parse(octs)
@@ -87,13 +86,17 @@ class Line:
     def frame(self, bits, t, pre=None, jitter=None, tp_hi=None, tp_lo=None):
         """One frame from t (ns): pre preamble bits, the SFD, the bits, TP_IDL of tp_hi bit times (optionally a
         negative tail of tp_lo). jitter: None, ('uniform', pre_ns, frame_ns), random per transition as 802.3
-        7.5.2.2 builds its test signal, or ('alt', ns), bit-boundary transitions early and mid-bit ones late.
-        Returns the end of the last bit cell."""
+        7.5.2.2 builds its test signal, ('alt', ns), bit-boundary transitions early and mid-bit ones late (late
+        and early for a negative ns), or ('step', ns), every transition from a random bit of the frame on (preamble
+        to the last bit) moved ns later, TP_IDL with it. Returns the end of the last bit cell."""
         pre = self.pre if pre is None else pre
         jit = self.jitter if jitter is None else jitter
         allbits = G.preamble(pre) + bits
-        jd = {}
-        if jit:
+        jd, s = {}, 0.0
+        if jit and jit[0] == 'step':
+            j, s = self.rng.randrange(len(allbits)), jit[1]
+            jd = {h: (s if h >= 2 * j else 0.0) for h in range(2 * len(allbits))}
+        elif jit:
             for h in range(2 * len(allbits)):
                 if jit[0] == 'uniform':
                     a = jit[1] if h < 2 * (pre + 8) else jit[2]
@@ -102,6 +105,9 @@ class Line:
                     jd[h] = jit[1] if h % 2 else -jit[1]
         ch, end = G.manchester(allbits, t, bt=self.bt, tp_hi=self.tp_hi if tp_hi is None else tp_hi, tp_lo=tp_lo,
                                jitter=jd)
+        if s:
+            ch = [(tt + s, lv) if tt >= end - 1e-9 else (tt, lv) for tt, lv in ch]
+            end += s
         self.changes += ch
         self.sent.append((t, end, disposition(bits)))
         self.t = end
@@ -227,13 +233,50 @@ def long_run(seed=1, **kw):
     return L, t + 34e6
 
 
-def frames_only(n, seed, jitter=None, phase_seed=0, **kw):
-    """n broadcast frames of 64 octets with random data, 96 bit times apart plus 3 us: R keeps each, T drops each."""
+def frames_only(n, seed, jitter=None, phase_seed=0, octets=46, **kw):
+    """n broadcast frames of 64 octets (data of 46) with random data, 96 bit times apart plus 3 us: R keeps each, T
+    drops each."""
     L = Line(seed, jitter=jitter, **kw)
     t = 0.3e6
     for _ in range(n):
-        t = L.frame(G.frame(BCAST, PEER_MAC, 0x88B5, bytes(L.rng.randrange(256) for _ in range(46))), t) + 12.6e3
+        t = L.frame(G.frame(BCAST, PEER_MAC, 0x88B5, bytes(L.rng.randrange(256) for _ in range(octets))), t) + 12.6e3
     return L, t + 50e3
+
+
+PH8 = (1.9, 4.3, 6.1, 8.7, 11.3, 13.9, 16.6, 19.1)     # sampling phases (ns), none a multiple of 2.5
+CORNERS = ('typ', 'max', 'min')
+
+
+def rx_row(jit, seed, n=20, corners=CORNERS, phases=PH8, duty=0.0, bt=BT, octets=46):
+    """Frames lost, sent less kept (NKEEP), for each FN6307 corner and sampling phase: runs of n frames, each run
+    with its own seed. Returns ({corner: [lost per phase]}, health problems)."""
+    lost, health = {}, set()
+    for ci, corner in enumerate(corners):
+        lost[corner] = []
+        for k, ph in enumerate(phases):
+            L, t = frames_only(n, seed=seed + 37 * k + ci, jitter=jit, bt=bt, octets=octets)
+            r = run(L, t, corner=corner, phase=ph, check=False, duty=duty)
+            lost[corner].append(n - r.count['NKEEP'])
+            health |= set(r.health)
+    return lost, sorted(health)
+
+
+def total(lost):
+    return sum(sum(v) for v in lost.values())
+
+
+def excess_line(seed=21, extra=range(1, 8)):
+    """802.3 frames that end with 1 to 7 bits after their last whole octet: for each count an ARP request and an echo
+    request with good FCSs, which 4.2.9 truncates and keeps, and an ARP request with a bad FCS, which it reports as
+    an alignmentError and drops. Returns (line, end)."""
+    L = Line(seed)
+    rng = random.Random(seed)
+    t = 0.4e6
+    for k in extra:
+        for bits in (arp_req(spa=bytes([192, 168, 2, k])), ping(24, seq=100 + k),
+                     arp_req(spa=bytes([192, 168, 3, k]), bad_fcs=True)):
+            t = L.frame(bits + [rng.getrandbits(1) for _ in range(k)], t) + 150e3
+    return L, t
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -466,6 +509,7 @@ TEETH = [
     ('the receiver\'s polarity wrong (RINV 0)', 'li    R0, 0x002B | (RON << 8)', 'li    R0, 0x0023 | (RON << 8)'),
     ('edges timed to the cycle: RKIND 1, not 3', 'li    R0, 0x002B | (RON << 8)', 'li    R0, 0x0029 | (RON << 8)'),
     ('half bits of 2 and 3 cycles: THALF off', 'li    R0, 0x81A1', 'li    R0, 0x01A1'),
+    ('the byte end not asked for: REOP 0 in the receive CODING', 'li    R0, 0x80FF', 'li    R0, 0x00FF'),
 ]
 
 
@@ -606,22 +650,77 @@ def main(log):
                 lost[corner].append(20 - r.count['NKEEP'])
         log.check('jitter: %s, 20 frames at each of 8 sampling phases and 3 FN6307 corners, none lost' % what,
                   not any(sum(v) for v in lost.values()), 'lost per phase: %s' % lost)
-    # 802.3's own figures (14.3.1.3.1, 7.5.2.2) and the worst fixed pattern, past what the decoder holds today: the
-    # decoder's window takes a bit-boundary edge 23 ns before a clock edge for a candidate (section 7.3)
-    for what, jit in (('+/-13.5 ns random on every transition (802.3 14.3.1.3.1)', ('uniform', 13.5, 13.5)),
-                      ('bit-boundary transitions 13.5 ns late and mid-bit ones 13.5 ns early', ('alt', -13.5)),
-                      ('bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late', ('alt', 13.5)),
-                      ('7.5.2.2\'s test signal, +/-12 ns on the preamble and +/-18 ns on the frame, random',
-                       ('uniform', 12.0, 18.0))):
-        lost = {}
-        for i, corner in enumerate(('typ', 'max', 'min')):
-            lost[corner] = []
-            for k in range(8):
-                L, t = frames_only(10, seed=650 + 10 * k + i, jitter=jit)
-                r = run(L, t, corner=corner, phase=2.5 * k, check=False)
-                lost[corner].append(10 - r.count['NKEEP'])
-        log.info('receive limit at 50 MHz: %s, 10 frames at each of 8 phases and 3 corners: %d of 240 lost; per '
-                 'phase %s' % (what, sum(sum(v) for v in lost.values()), lost))
+    # 802.3's jitter (14.3.1.3.1) at 8 more sampling phases and 3 corners, 480 frames a case: random, and the fixed
+    # patterns of section 7.3 that RKIND 3's window must not follow (a bit-boundary edge in the window gives way to
+    # the clock edge after it, 5.9.6)
+    fixed = [('+/-13.5 ns random on every transition (802.3 14.3.1.3.1)', ('uniform', 13.5, 13.5))]
+    fixed += [('bit-boundary transitions %g ns late and mid-bit ones %g ns early' % (a, a), ('alt', -a))
+              for a in (10.0, 11.0, 12.0, 13.5)]
+    fixed += [('bit-boundary transitions %g ns early and mid-bit ones %g ns late' % (a, a), ('alt', a))
+              for a in (12.0, 13.5)]
+    for i, (what, jit) in enumerate(fixed):
+        lost, hl = rx_row(jit, 81000 + 1009 * i)
+        log.check('jitter: %s, 20 frames at each of 8 sampling phases (none a multiple of 2.5 ns) and 3 FN6307 '
+                  'corners, none of 480 lost' % what, not total(lost) and not hl, 'lost %s%s' % (
+                      lost, ', %s' % hl if hl else ''))
+    lost, hl = rx_row(('alt', 13.5), 82000, corners=('max',), phases=[0.25 * k for k in range(80)])
+    log.check('jitter: bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late at FN6307\'s slowest '
+              'corner, whose 4 ns skew makes pulses of 19 ns, 20 frames at each of 80 sampling phases 0.25 ns apart, '
+              'none of 1600 lost', not total(lost) and not hl, 'lost at %s%s' % (
+                  [(0.25 * k, x) for k, x in enumerate(lost['max']) if x] or 'no phase', ', %s' % hl if hl else ''))
+    # the clock's duty error moves every falling-edge sample d ns late (section 7.3)
+    for d in (1.0, 2.0, 3.3):
+        res = []
+        for i, (what, jit) in enumerate((fixed[4], fixed[6], fixed[0], fixed[1])):
+            lost, hl = rx_row(jit, 83000 + 1009 * i + int(10 * d), n=10, duty=d)
+            res.append((what, total(lost), hl))
+        detail = '; '.join('%s: %d%s' % (w.split(' (')[0], x, ' %s' % h if h else '') for w, x, h in res)
+        if d < 3:
+            log.check('jitter with the falling clock edge %g ns late: the 13.5 ns fixed pattern, its reverse, '
+                      '+/-13.5 ns random and the 10 ns fixed pattern, 10 frames at each of 8 phases and 3 corners, '
+                      'none lost of 240 in each' % d, not any(x or h for _, x, h in res), detail)
+        else:
+            log.info('receive with the falling clock edge 3.3 ns late, the same four cases, frames lost of 240: %s'
+                     % detail)
+    # the partner's clock at the edges of 7.3.2 on long frames: the sampling phase drifts through every value
+    for sign in (1, -1):
+        for what, jit in (('clean', None), ('the 13.5 ns fixed pattern', ('alt', -13.5))):
+            lost, hl = rx_row(jit, 84000 + 500 * (sign > 0) + 100 * (jit is None), n=4, bt=BT * (1 + sign * PPM),
+                              octets=1500)
+            log.check('the partner at 10 Mb/s %+.2f%% (7.3.2) on 1518-octet frames, %s, 4 frames at each of 8 '
+                      'phases and 3 corners, none of 96 lost' % (sign * PPM * 100, what), not total(lost) and not hl,
+                      'lost %s%s' % (lost, ', %s' % hl if hl else ''))
+    # phase steps: every transition after a random bit of the frame moved s ns, TP_IDL with it. Two frames whose
+    # samples 10 ns apart can't be told apart exist from 20 ns, and two that share every transition from 23 ns
+    # (section 7.3), so from 20 ns these are information
+    for st in (5.0, 10.0, 13.5, 17.0, 20.0, 23.0):
+        res = []
+        for sign in (1, -1):
+            lost, hl = rx_row(('step', sign * st), 85000 + int(100 * st) + 50 * (sign > 0))
+            res.append((sign * st, lost, hl))
+        if st < 20:
+            for v, lost, hl in res:
+                log.check('a phase step of %+g ns after a random bit of each frame, 20 frames at each of 8 phases and '
+                          '3 corners, none of 480 lost' % v, not total(lost) and not hl, 'lost %s%s' % (
+                              lost, ', %s' % hl if hl else ''))
+        else:
+            log.info('receive past the limit of section 7.3: phase steps of %+g and %+g ns, frames lost of 480: %d '
+                     '(%s) and %d (%s)' % (res[0][0], res[1][0], total(res[0][1]), res[0][1], total(res[1][1]),
+                                           res[1][1]))
+    lost, hl = rx_row(('uniform', 12.0, 18.0), 86000)
+    log.info('receive beyond 14.3.1.3.1: 7.5.2.2\'s test signal, +/-12 ns random on the preamble and +/-18 ns on the '
+             'frame, frames lost of 480: %d; per phase %s' % (total(lost), lost))
+    # frames that end with 1 to 7 bits after their last whole octet (802.3 4.2.9, 4.2.4.2.1 b): REOP's byte end
+    # (5.9.7) truncates them, so the good ones are kept and answered and the bad ones dropped
+    Lx, tx_end = excess_line()
+    for corner, ph in (('typ', 3.7), ('max', 12.2), ('min', 7.9), ('typ', 17.3), ('max', 1.1), ('min', 14.6)):
+        r = run(Lx, tx_end, corner=corner, phase=ph)
+        v = verdict(r)
+        a, e = replies(r.rep)
+        log.check('frames with 1 to 7 bits after their FCS (802.3 4.2.9 truncates them), %s corner, phase %.1f ns: '
+                  'the 14 good requests kept and answered, the 7 with a bad FCS dropped' % (corner, ph),
+                  not v and (a, e) == wanted(r.rep) == (7, 7) and r.count['NBAD'] == 7,
+                  v or '%d ARP, %d echo replies; counters %s' % (a, e, r.count))
 
     # a frame that arrives while the reply goes out: the program has no collision detection (802.3 4.2.3.2.4), so
     # the reply completes and the collision is reported; the frame that arrived is received and answered after it
@@ -707,6 +806,11 @@ def main(log):
             lost = 20 - r.count['NKEEP']
             log.check('a broken copy is caught: %s' % what, lost > 4,
                       '%d of 20 frames lost with +/-13.5 ns random jitter, max corner, phase 15 ns' % lost)
+            continue
+        if 'byte end' in what:          # frames with bits after their last whole octet fail their check
+            r = run(Lx, tx_end, text=text)
+            v = verdict(r)
+            log.check('a broken copy is caught: %s' % what, bool(v), v[:200] if v else 'every check passed')
             continue
         if 'THALF' in what:             # the transmit check above: half bits of 40 and 60 ns
             r = run(L, t, text=text)

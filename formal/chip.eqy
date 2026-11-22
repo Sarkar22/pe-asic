@@ -59,26 +59,45 @@ cd tt_um_sarkar22_pe
 # which the layout keeps. Every other buffer, the layout's included, keeps its liberty function X = A.
 select -assert-count 44 c:core.mem.*pinbuf*
 chtype -set pe_sram_pinbuf c:core.mem.*pinbuf*
-# The reset-to-1 bits of each unit's window points (pwq_q[7:6], pwh_q[7]; section 8: 192 and 128) are held
-# inverted in reset-to-0 flops that have no name, the library's only kind. Each cell sits in its register's
-# numbering (_63217_ is pwh_q[6], _63218_ this bit, _63219_ pwh_q[8]; _63232_ pwq_q[5], _63235_ pwq_q[8]; each
-# unit's cells 503 further on), and the mux for pw = wide ? pwh_q : pwq_q takes _63218_'s output on A1 and
-# _63234_'s on A0. inv_flops.v puts two inverters after each cell, and the net between them, the RTL's value,
-# gets the RTL's name.
-techmap -map @ROOT@/formal/inv_flops.v c:_63218_ c:_63233_ c:_63234_ c:_63721_ c:_63736_ c:_63737_ c:_64224_ c:_64239_ c:_64240_ c:_64727_ c:_64742_ c:_64743_
+# The reset-to-1 bits of each unit's window points (pwq_q[7:6], pwh_q[7]; section 8: 192 and 128) and of RKIND
+# 3's p and its window points (p3_q[9], wq3_q[8:7], wh3_q[8]; 512, 384 and 256) are held inverted in reset-to-0
+# flops that have no name, the library's only kind. Each cell sits in its register's numbering (_60561_ is
+# pwh_q[6], _60562_ this bit, _60563_ pwh_q[8]; _60576_ pwq_q[5], _60579_ pwq_q[8]; _60519_ p3[8], _60521_
+# p3[10]; _60993_ pq3[6], _60996_ pq3[9]; _60982_ ph3w[7], _60984_ ph3w[9]; each unit's cells 568 further on),
+# and the mux for pw = wide ? pwh_q : pwq_q takes _60562_'s output on A1 and _60578_'s on A0. The synthesis kept
+# the names p3, pq3 and ph3w, pe_shift.sv's copies of p3_q, wq3_q and wh3_q, on the other bits of those three
+# registers, so these bits take the same names. inv_flops.v puts two inverters after each cell, and the net between
+# them, the RTL's value, gets the RTL's name.
+techmap -map @ROOT@/formal/inv_flops.v c:_60562_ c:_60577_ c:_60578_ c:_60520_ c:_60994_ c:_60995_ c:_60983_ c:_61130_ c:_61145_ c:_61146_ c:_61088_ c:_61562_ c:_61563_ c:_61551_ c:_61698_ c:_61713_ c:_61714_ c:_61656_ c:_62130_ c:_62131_ c:_62119_ c:_62266_ c:_62281_ c:_62282_ c:_62224_ c:_62698_ c:_62699_ c:_62687_
 chtype -map $__pe_dfrbpq_1 sg13cmos5l_dfrbpq_1
-rename _63218_.rtl \core.gen_shift[0].shift.pwh_q[7]
-rename _63233_.rtl \core.gen_shift[0].shift.pwq_q[6]
-rename _63234_.rtl \core.gen_shift[0].shift.pwq_q[7]
-rename _63721_.rtl \core.gen_shift[1].shift.pwh_q[7]
-rename _63736_.rtl \core.gen_shift[1].shift.pwq_q[6]
-rename _63737_.rtl \core.gen_shift[1].shift.pwq_q[7]
-rename _64224_.rtl \core.gen_shift[2].shift.pwh_q[7]
-rename _64239_.rtl \core.gen_shift[2].shift.pwq_q[6]
-rename _64240_.rtl \core.gen_shift[2].shift.pwq_q[7]
-rename _64727_.rtl \core.gen_shift[3].shift.pwh_q[7]
-rename _64742_.rtl \core.gen_shift[3].shift.pwq_q[6]
-rename _64743_.rtl \core.gen_shift[3].shift.pwq_q[7]
+rename _60562_.rtl \core.gen_shift[0].shift.pwh_q[7]
+rename _60577_.rtl \core.gen_shift[0].shift.pwq_q[6]
+rename _60578_.rtl \core.gen_shift[0].shift.pwq_q[7]
+rename _60520_.rtl \core.gen_shift[0].shift.p3[9]
+rename _60994_.rtl \core.gen_shift[0].shift.pq3[7]
+rename _60995_.rtl \core.gen_shift[0].shift.pq3[8]
+rename _60983_.rtl \core.gen_shift[0].shift.ph3w[8]
+rename _61130_.rtl \core.gen_shift[1].shift.pwh_q[7]
+rename _61145_.rtl \core.gen_shift[1].shift.pwq_q[6]
+rename _61146_.rtl \core.gen_shift[1].shift.pwq_q[7]
+rename _61088_.rtl \core.gen_shift[1].shift.p3[9]
+rename _61562_.rtl \core.gen_shift[1].shift.pq3[7]
+rename _61563_.rtl \core.gen_shift[1].shift.pq3[8]
+rename _61551_.rtl \core.gen_shift[1].shift.ph3w[8]
+rename _61698_.rtl \core.gen_shift[2].shift.pwh_q[7]
+rename _61713_.rtl \core.gen_shift[2].shift.pwq_q[6]
+rename _61714_.rtl \core.gen_shift[2].shift.pwq_q[7]
+rename _61656_.rtl \core.gen_shift[2].shift.p3[9]
+rename _62130_.rtl \core.gen_shift[2].shift.pq3[7]
+rename _62131_.rtl \core.gen_shift[2].shift.pq3[8]
+rename _62119_.rtl \core.gen_shift[2].shift.ph3w[8]
+rename _62266_.rtl \core.gen_shift[3].shift.pwh_q[7]
+rename _62281_.rtl \core.gen_shift[3].shift.pwq_q[6]
+rename _62282_.rtl \core.gen_shift[3].shift.pwq_q[7]
+rename _62224_.rtl \core.gen_shift[3].shift.p3[9]
+rename _62698_.rtl \core.gen_shift[3].shift.pq3[7]
+rename _62699_.rtl \core.gen_shift[3].shift.pq3[8]
+rename _62687_.rtl \core.gen_shift[3].shift.ph3w[8]
 # Pin flop bits the synthesis found constant and removed (its log: "Setting constant 0-bit at position ..."
 # for pins.shsel_q, sel_q, shbyp_q, byp_q, shd_q and out_q; no legal word sets them): a net of each name, tied
 # to 0, stands for the missing flop, so the RTL's flop is compared with 0 in its piece. Only that piece reads
@@ -108,78 +127,9 @@ connect -set \core.pins.byp_q[2] 1'0
 connect -set \core.pins.byp_q[3] 1'0
 connect -set \core.pins.shd_q[3] 1'0
 connect -set \core.pins.out_q[3] 1'0
-# RKIND 3 reads RXPH through f_r = {ph[17], ph} (pe_shift.sv), and the synthesis kept that name, not rx_ph_q,
-# on RXPH's flops for bits 0 to 16: the netlist has f_r[0..16] on those flops' outputs and no rx_ph_q[0..16]. In
-# the RTL f_r[k] is a copy of rx_ph_q[k] (f_r[17] and f_r[18] of rx_ph_q[16]). With the flops given the
-# register's name, the two sides match flop to flop, and the RTL's f_r is left unmatched.
-rename \core.gen_shift[0].shift.f_r[0] \core.gen_shift[0].shift.rx_ph_q[0]
-rename \core.gen_shift[0].shift.f_r[1] \core.gen_shift[0].shift.rx_ph_q[1]
-rename \core.gen_shift[0].shift.f_r[2] \core.gen_shift[0].shift.rx_ph_q[2]
-rename \core.gen_shift[0].shift.f_r[3] \core.gen_shift[0].shift.rx_ph_q[3]
-rename \core.gen_shift[0].shift.f_r[4] \core.gen_shift[0].shift.rx_ph_q[4]
-rename \core.gen_shift[0].shift.f_r[5] \core.gen_shift[0].shift.rx_ph_q[5]
-rename \core.gen_shift[0].shift.f_r[6] \core.gen_shift[0].shift.rx_ph_q[6]
-rename \core.gen_shift[0].shift.f_r[7] \core.gen_shift[0].shift.rx_ph_q[7]
-rename \core.gen_shift[0].shift.f_r[8] \core.gen_shift[0].shift.rx_ph_q[8]
-rename \core.gen_shift[0].shift.f_r[9] \core.gen_shift[0].shift.rx_ph_q[9]
-rename \core.gen_shift[0].shift.f_r[10] \core.gen_shift[0].shift.rx_ph_q[10]
-rename \core.gen_shift[0].shift.f_r[11] \core.gen_shift[0].shift.rx_ph_q[11]
-rename \core.gen_shift[0].shift.f_r[12] \core.gen_shift[0].shift.rx_ph_q[12]
-rename \core.gen_shift[0].shift.f_r[13] \core.gen_shift[0].shift.rx_ph_q[13]
-rename \core.gen_shift[0].shift.f_r[14] \core.gen_shift[0].shift.rx_ph_q[14]
-rename \core.gen_shift[0].shift.f_r[15] \core.gen_shift[0].shift.rx_ph_q[15]
-rename \core.gen_shift[0].shift.f_r[16] \core.gen_shift[0].shift.rx_ph_q[16]
-rename \core.gen_shift[1].shift.f_r[0] \core.gen_shift[1].shift.rx_ph_q[0]
-rename \core.gen_shift[1].shift.f_r[1] \core.gen_shift[1].shift.rx_ph_q[1]
-rename \core.gen_shift[1].shift.f_r[2] \core.gen_shift[1].shift.rx_ph_q[2]
-rename \core.gen_shift[1].shift.f_r[3] \core.gen_shift[1].shift.rx_ph_q[3]
-rename \core.gen_shift[1].shift.f_r[4] \core.gen_shift[1].shift.rx_ph_q[4]
-rename \core.gen_shift[1].shift.f_r[5] \core.gen_shift[1].shift.rx_ph_q[5]
-rename \core.gen_shift[1].shift.f_r[6] \core.gen_shift[1].shift.rx_ph_q[6]
-rename \core.gen_shift[1].shift.f_r[7] \core.gen_shift[1].shift.rx_ph_q[7]
-rename \core.gen_shift[1].shift.f_r[8] \core.gen_shift[1].shift.rx_ph_q[8]
-rename \core.gen_shift[1].shift.f_r[9] \core.gen_shift[1].shift.rx_ph_q[9]
-rename \core.gen_shift[1].shift.f_r[10] \core.gen_shift[1].shift.rx_ph_q[10]
-rename \core.gen_shift[1].shift.f_r[11] \core.gen_shift[1].shift.rx_ph_q[11]
-rename \core.gen_shift[1].shift.f_r[12] \core.gen_shift[1].shift.rx_ph_q[12]
-rename \core.gen_shift[1].shift.f_r[13] \core.gen_shift[1].shift.rx_ph_q[13]
-rename \core.gen_shift[1].shift.f_r[14] \core.gen_shift[1].shift.rx_ph_q[14]
-rename \core.gen_shift[1].shift.f_r[15] \core.gen_shift[1].shift.rx_ph_q[15]
-rename \core.gen_shift[1].shift.f_r[16] \core.gen_shift[1].shift.rx_ph_q[16]
-rename \core.gen_shift[2].shift.f_r[0] \core.gen_shift[2].shift.rx_ph_q[0]
-rename \core.gen_shift[2].shift.f_r[1] \core.gen_shift[2].shift.rx_ph_q[1]
-rename \core.gen_shift[2].shift.f_r[2] \core.gen_shift[2].shift.rx_ph_q[2]
-rename \core.gen_shift[2].shift.f_r[3] \core.gen_shift[2].shift.rx_ph_q[3]
-rename \core.gen_shift[2].shift.f_r[4] \core.gen_shift[2].shift.rx_ph_q[4]
-rename \core.gen_shift[2].shift.f_r[5] \core.gen_shift[2].shift.rx_ph_q[5]
-rename \core.gen_shift[2].shift.f_r[6] \core.gen_shift[2].shift.rx_ph_q[6]
-rename \core.gen_shift[2].shift.f_r[7] \core.gen_shift[2].shift.rx_ph_q[7]
-rename \core.gen_shift[2].shift.f_r[8] \core.gen_shift[2].shift.rx_ph_q[8]
-rename \core.gen_shift[2].shift.f_r[9] \core.gen_shift[2].shift.rx_ph_q[9]
-rename \core.gen_shift[2].shift.f_r[10] \core.gen_shift[2].shift.rx_ph_q[10]
-rename \core.gen_shift[2].shift.f_r[11] \core.gen_shift[2].shift.rx_ph_q[11]
-rename \core.gen_shift[2].shift.f_r[12] \core.gen_shift[2].shift.rx_ph_q[12]
-rename \core.gen_shift[2].shift.f_r[13] \core.gen_shift[2].shift.rx_ph_q[13]
-rename \core.gen_shift[2].shift.f_r[14] \core.gen_shift[2].shift.rx_ph_q[14]
-rename \core.gen_shift[2].shift.f_r[15] \core.gen_shift[2].shift.rx_ph_q[15]
-rename \core.gen_shift[2].shift.f_r[16] \core.gen_shift[2].shift.rx_ph_q[16]
-rename \core.gen_shift[3].shift.f_r[0] \core.gen_shift[3].shift.rx_ph_q[0]
-rename \core.gen_shift[3].shift.f_r[1] \core.gen_shift[3].shift.rx_ph_q[1]
-rename \core.gen_shift[3].shift.f_r[2] \core.gen_shift[3].shift.rx_ph_q[2]
-rename \core.gen_shift[3].shift.f_r[3] \core.gen_shift[3].shift.rx_ph_q[3]
-rename \core.gen_shift[3].shift.f_r[4] \core.gen_shift[3].shift.rx_ph_q[4]
-rename \core.gen_shift[3].shift.f_r[5] \core.gen_shift[3].shift.rx_ph_q[5]
-rename \core.gen_shift[3].shift.f_r[6] \core.gen_shift[3].shift.rx_ph_q[6]
-rename \core.gen_shift[3].shift.f_r[7] \core.gen_shift[3].shift.rx_ph_q[7]
-rename \core.gen_shift[3].shift.f_r[8] \core.gen_shift[3].shift.rx_ph_q[8]
-rename \core.gen_shift[3].shift.f_r[9] \core.gen_shift[3].shift.rx_ph_q[9]
-rename \core.gen_shift[3].shift.f_r[10] \core.gen_shift[3].shift.rx_ph_q[10]
-rename \core.gen_shift[3].shift.f_r[11] \core.gen_shift[3].shift.rx_ph_q[11]
-rename \core.gen_shift[3].shift.f_r[12] \core.gen_shift[3].shift.rx_ph_q[12]
-rename \core.gen_shift[3].shift.f_r[13] \core.gen_shift[3].shift.rx_ph_q[13]
-rename \core.gen_shift[3].shift.f_r[14] \core.gen_shift[3].shift.rx_ph_q[14]
-rename \core.gen_shift[3].shift.f_r[15] \core.gen_shift[3].shift.rx_ph_q[15]
-rename \core.gen_shift[3].shift.f_r[16] \core.gen_shift[3].shift.rx_ph_q[16]
+# RXPH's flops for bits 0 to 16 carry the name ph in the netlist, the decoders' 18-bit copy of RXPH (ph =
+# {rx_ph_q[16], rx_ph_q[16:0]}, pe_shift.sv), not rx_ph_q. The RTL has both names on those nets, so the two sides
+# match there by ph, flop to flop, as they do by p3, pq3 and ph3w.
 # The latches, by type: the same 40 instances as in the RTL, under the same names (latch_box.v).
 select -assert-count 16 t:sg13cmos5l_dlhq_1
 select -assert-count 24 t:sg13cmos5l_dllrq_1

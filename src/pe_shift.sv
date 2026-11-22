@@ -567,9 +567,11 @@ module pe_shift #(
   logic [2:0]  rx_rl_q;
   logic        rx_rv_q, rx_vio_q, rx_cov_q;
   logic [2:0]  rx_ef_q, rx_be_q, rx_pe_q;
-  logic [15:0] rx_sr8_q, rx_c8_q;     // RXSR8 and RXC8 (section 5.9.7, the byte end)
+  logic [15:0] rx_sr8_q;             // RXSR8 (section 5.9.7, the byte ends)
+  logic [31:0] rx_c8_q;              // RXC8, the whole CRC register at the last byte boundary
   logic [4:0]  rx_n8_q;               // RXN8
   logic        rx_ones_q;             // RXONES
+  logic signed [12:0] rx_ce_q;        // RXCE (RKIND 3: a candidate's phase, 256 - p to -1)
 
   // The window points p - p/4 and p - p/2, loaded in the cycle of an scfg that writes RXPER or
   // RXOPT, from the value written and the other slot as stored.
@@ -585,6 +587,12 @@ module pe_shift #(
   assign pw_pm    = (pw_per == 16'd0) ? 16'd256 : {pw_rs, pw_frac};
   assign pwq_next = pw_pm - {2'b00, pw_pm[15:2]};
   assign pwh_next = pw_pm - {1'b0, pw_pm[15:1]};
+  // RKIND 3's p (512 for RPER 0 and 1, RPER above 15 as 15) and its window points p - p/4 and p - p/2, in flops of
+  // their own loaded with PWQ and PWH (section 5.9.6, implementation note)
+  logic [11:0] p3_q, p3_next, wq3_q, wq3_next, wh3_q, wh3_next;
+  assign p3_next  = (pw_per[15:1] == 15'd0) ? 12'd512 : {((|pw_per[15:4]) ? 4'd15 : pw_per[3:0]), pw_frac};
+  assign wq3_next = p3_next - {2'b00, p3_next[11:2]};
+  assign wh3_next = p3_next - {1'b0, p3_next[11:1]};
 
   // The pins: the data, its edge, the outside clock, and the hunt's edge to HLVL.
   logic lvl2, lvl3, e, ck2, ck3, cedge, hunt_hit;
@@ -731,16 +739,25 @@ module pe_shift #(
   assign rx_fb    = cm1 ? (crc_base[31] ^ bv) : crc_base[31];
   assign crc_r    = rx_crc ? ({crc_base[30:0], 1'b0} ^ (rx_fb ? poly : 32'd0)) : crc_base;
   assign bw       = (rx_crc & cm2) ? (bv ^ crc_base[31]) : bv;    // descrambled
-  // The byte end (section 5.9.7): at the end test, with 1 to 6 ones after the last byte boundary and no stuff
-  // violation, rx_eop() puts RXSR, RXN and the register's bits 31 to 16 back to their copies before the check. No
-  // bit enters the register in that cycle, so the check of the copy is formed from flops beside the other.
-  logic        eop_rest, c8_on;
+  // The byte ends (section 5.9.7). At the end test, with 1 to 6 ones after the last byte boundary and no stuff
+  // violation, rx_eop() puts RXSR, RXN and the register's bits 31 to 16 back to their copies before the check. With
+  // RKIND 3 and REOP, at a window that closes empty with 1 to 7 bits after the last byte boundary and no stuff
+  // violation, rx_mend() puts back RXSR, RXN and the whole register (an IEEE 802.3 MAC's truncation to whole
+  // octets, 4.2.9). No bit enters the register in either cycle (RKIND 3 gives no bit in a cycle whose window
+  // closes empty), so the check of the copy is formed from flops beside the other, and chosen by its 1-bit result.
+  logic        eop_rest, mend_rest, c8_on, c8_hi_eq, c8_lo_eq, crc_lo_eq;
   logic [31:0] crc_e;
 
-  assign c8_on    = ~ctx & cmode_on;
-  assign eop_rest = eop_hit & rx_ones_q & ~rx_vio_q & (rx_tot_q[2:0] != 3'd0) & (rx_tot_q[2:0] != 3'd7);
-  assign crc_e    = {(eop_rest & c8_on) ? rx_c8_q : crc_r[31:16], crc_r[15:0]};
-  assign crc_pass = cm1 & ~ctx & ((eop_rest & c8_on) ? ({rx_c8_q, crc_q[15:0]} == chk) : (crc_r == chk));
+  assign c8_on     = ~ctx & cmode_on;
+  assign eop_rest  = eop_hit & rx_ones_q & ~rx_vio_q & (rx_tot_q[2:0] != 3'd0) & (rx_tot_q[2:0] != 3'd7);
+  assign mend_rest = endw3 & reop & ~rx_vio_q & (rx_tot_q[2:0] != 3'd0);
+  assign crc_e     = {((eop_rest | mend_rest) & c8_on) ? rx_c8_q[31:16] : crc_r[31:16],
+                      (mend_rest & c8_on) ? rx_c8_q[15:0] : crc_r[15:0]};
+  assign c8_hi_eq  = rx_c8_q[31:16] == chk[31:16];
+  assign c8_lo_eq  = rx_c8_q[15:0] == chk[15:0];
+  assign crc_lo_eq = crc_q[15:0] == chk[15:0];
+  assign crc_pass  = cm1 & ~ctx & (((eop_rest | mend_rest) & c8_on) ? (c8_hi_eq & (mend_rest ? c8_lo_eq : crc_lo_eq)) :
+                                   (crc_r == chk));
 
   // The sync search and the words.
   logic [15:0] lowmask, highmask;
@@ -771,158 +788,30 @@ module pe_shift #(
   assign n_b      = dbit ? (full16 ? 5'd0 : n1) : n0;
   assign tot_b    = dbit ? tot1 : tot0;
 
-  // RKIND 3 (section 5.9.6): rx_manch() twice a cycle, half a cycle each (s = 128), first with the falling-edge
-  // sample SYNC2F, then with SYNC2. The cycle's one edge, SYNC2 against SYNC3, falls in the first half if SYNC2F
-  // already shows the new level, and in the second if it still shows the old one. RPER 0 and 1 act as 2, so p is
-  // 512 and the window points 384 and 256. With p at least 512 a cycle has at most one bit and one pull (one edge),
-  // and the second half step runs only while the reception goes on: a window that closes empty, or a bit that ends
-  // the reception (the bit after a stuff violation, or RCNT's), ends it, and the half steps after it don't run.
-  // The bit and the end come from the compares below; RXPH and the window flags from one pull, fed by the half step
-  // that has the edge (the implementation note's shape).
-  logic               lvlf, e1h, e2h, clamp3, bit_ends;
-  logic [15:0]        p3, pq3, ph3w;
+  // RKIND 3 (section 5.9.6, rx_manch3): an edge in each half of the cycle (SYNC3 against SYNC2F, SYNC2F against
+  // SYNC2), decisions on RXPH as it was at the start of the cycle, a candidate kept in RXCE until it gives the bit,
+  // and the cycle's one pull at its end: module rk3n_f below, two carry chains between flops (5.9.6, implementation
+  // note).
+  logic               lvlf, bit_ends, ran3;
+  logic [11:0]        p3, pq3, ph3w;
   logic signed [17:0] r3;
+  logic signed [12:0] ce3;
   logic               op3, cd3, wn3;
   logic [4:0]         g3;
 
   assign lvlf     = sync2f[rpin];
-  assign e1h      = e & (lvlf == lvl2);
-  assign e2h      = e & ~e1h;
-  assign clamp3   = rper[15:1] == 15'd0;
-  assign p3       = clamp3 ? 16'd512 : {rs, rfrac};
-  assign pq3      = clamp3 ? 16'd384 : pwq_q;
-  assign ph3w     = clamp3 ? 16'd256 : pwh_q;
-  // A bit that ends the reception: the bit after a violation, or a data bit that reaches RCNT. Flops only.
-  assign bit_ends = vio0 | (~stuffpos & syn0 & (rcnt != 11'd0) & (tot1 == rcnt));
+  assign p3       = p3_q;
+  assign pq3      = wq3_q;
+  assign ph3w     = wh3_q;
+  // A bit now ends the reception (the bit after a violation, or a data bit that reaches RCNT): from the flops
+  // alone, since the block runs only in rx_run, never with rx_begin.
+  assign bit_ends = rx_vio_q | (~(rx_syn_q & smode_on & (rx_rl_q != 3'd0) & (rx_rl_q >= sne)) & rx_syn_q &
+                    (rcnt != 11'd0) & ((rx_tot_q + 11'd1) == rcnt));
 
-  // The same cycle's bit and end, from compares that all start at the flops, for the long path behind the bit (the
-  // destuffer, the CRC check, the word). Whatever the half steps do to RXPH in between is folded into thresholds:
-  // - First half: the window opens if RXPH >= w1 (o1), then RXPH or RXPH - p decides as it stands.
-  // - Second half after a first-half candidate (an edge before the predicted clock edge, pulled toward 0): the bit
-  //   comes now if the pulled phase plus 128 is 0 or more. rx_pull moves x < 0 to x - (x >> k), which is monotone
-  //   in x, so that is x >= -M with M = 257, 171, 137, 133 for k = 1, 2, 4, 5, and always with RGAIN 0. Its window
-  //   can't open there: the pulled phase is at most 0, and the window points are 256 or more.
-  // - Second half with no edge in the first: RXPH + 128, less p for each window opened, against w1 and 0.
-  // - A first-half edge that is no candidate and no bit is a boundary edge: the window was closed, so the second
-  //   half can open it but has no candidate and no edge, so no bit.
-  // With p at least 512 a cycle has at most one bit, and the code's window points w <= p - 128 keep a second-half
-  // bit out of a cycle whose first half gave one. The code's half steps, run one after the other, give the same bit
-  // and end in every state (a combinational equivalence check, not part of this file).
-  logic               f_o1, f_sr, f_sa1, f_end1, f_op1, f_cd1, f_pos1, f_bit1, f_cand1, f_run2, f_thr, f_bit2a;
-  logic               f_nb, f_o2, f_end2, f_op2, f_cd2, f_pos2, f_bit2b, f_acq;
-  logic signed [18:0] f_r, f_a1, f_dw, f_dwa, f_t0, f_t1;
-  logic [15:0]        f_w1;
-  logic [8:0]         f_m;
-
-  assign f_acq   = rx_g_q[4:2] == 3'd0;                         // RXG <= 3
-  assign f_w1    = (racq & (rgain != 2'd0) & ~rx_g_q[4]) ? ph3w : pq3;
-  assign f_r     = {ph[17], ph};
-  assign f_a1    = f_r - $signed({3'b000, p3});                 // RXPH - p
-  assign f_dw    = f_r - $signed({3'b000, f_w1});               // RXPH - w1
-  assign f_dwa   = f_r - $signed({3'b000, p3}) - $signed({3'b000, f_w1});    // RXPH - p - w1, in one sum
-  assign f_m     = f_acq ? 9'd257 : (rgain == 2'd1) ? 9'd171 : (rgain == 2'd2) ? 9'd137 : 9'd133;
-  assign f_t0    = f_r + $signed({10'd0, f_m});                 // RXPH + M
-  assign f_t1    = f_r - $signed({3'b000, p3}) + $signed({10'd0, f_m});      // RXPH - p + M, in one sum
-  assign f_o1    = ~f_dw[18];
-  assign f_sr    = ~f_r[18];
-  assign f_sa1   = ~f_a1[18];
-  assign f_end1  = f_o1 & rx_open_q;
-  assign f_op1   = rx_open_q | f_o1;
-  assign f_cd1   = ~f_o1 & rx_cand_q;
-  assign f_pos1  = f_o1 ? f_sa1 : f_sr;
-  assign f_bit1  = ~f_end1 & f_op1 & f_pos1 & (e1h | f_cd1);
-  assign f_cand1 = ~f_end1 & f_op1 & e1h & ~f_pos1;
-  assign f_run2  = ~f_end1 & ~(f_bit1 & bit_ends);
-  assign f_thr   = (rgain == 2'd0) | ~(f_o1 ? f_t1[18] : f_t0[18]);
-  assign f_bit2a = f_run2 & f_cand1 & f_thr;
-  assign f_nb    = f_run2 & ~e1h & ~f_bit1;
-  assign f_o2    = f_o1 ? (f_dwa >= -19'sd128) : (f_dw >= -19'sd128);    // RXPH (- p) + 128 >= w1
-  assign f_end2  = f_nb & f_o2 & f_op1;
-  assign f_op2   = f_op1 | f_o2;
-  assign f_cd2   = ~f_o2 & f_cd1;
-  assign f_pos2  = (f_o1 | f_o2) ? (f_a1 >= -19'sd128) : (f_r >= -19'sd128);
-  assign f_bit2b = f_nb & ~f_end2 & f_op2 & f_pos2 & (e2h | f_cd2);
-  assign bit3    = b_run & man3 & (f_bit1 | f_bit2a | f_bit2b);
-  assign endw3   = b_run & man3 & (f_end1 | f_end2);
-  assign blv3    = f_bit1 ? (rdiff ? rx_win_q : lvlf) : rdiff ? (rx_win_q | (f_bit2a & f_cd1)) : lvl2;
-
-  // RXPH, RXOPEN, RXCAND, RXWIN and RXG after the two half steps, with one rx_pull. A cycle's edge is in one half,
-  // so only that half pulls: from the first half's phase if it has the edge, else from the second half's, whose
-  // window opened (or not) on the first half's phase + 128 with no pull. Every phase the code can reach without the
-  // pull is formed from the flops, beside the window compares: RXPH + 128 and + 256, less 0, p or 2p (one window
-  // opening per half step), and the boundary pulls' errors less p/2. So the pull's error is a choice, then the
-  // gain's shift, and what follows the pull (the phase + 128 or + 256, less p if the second half's window opens on
-  // it, and that compare) are sums of three that run side by side. The second half's bit is the fast block's. The
-  // same values as the code's half steps in every state (a combinational equivalence check, not part of this file).
-  logic               s_c1, s_k1, s_b1, s_pl1, s_opa, s_cda, s_wna, s_run2, s_ob, s_o2, s_op2, s_cd2, s_w1h, s_w2h;
-  logic               s_h2, s_c2, s_k2, s_b2, s_pl2, s_tp, s_oa, s_neg2b;
-  logic [4:0]         s_g1, s_gp;
-  logic [15:0]        s_w2;
-  logic signed [18:0] q_p, q_p2, q_r128, q_a128, q_aa128, q_rq, q_aq, q_bh1, q_bh2, q_r256, q_a256, q_aa256;
-  logic signed [18:0] s_r1, s_r1b, s_r2b, s_r2b2, s_x, s_t, s_d, s_sh, s_base, s_f3, s_f1, s_f2, s_fo, s_rn;
-
-  assign q_p     = $signed({3'b000, p3});
-  assign q_p2    = $signed({4'b0000, p3[15:1]});
-  assign q_r128  = f_r + 19'sd128;                                      // RXPH + 128
-  assign q_a128  = f_r - q_p + 19'sd128;                                // RXPH - p + 128
-  assign q_aa128 = f_r - q_p - q_p + 19'sd128;                          // RXPH - 2p + 128
-  assign q_rq    = f_r - $signed({3'b000, pq3}) + 19'sd128;             // RXPH + 128 - (p - p/4)
-  assign q_aq    = f_r - q_p - $signed({3'b000, pq3}) + 19'sd128;       // RXPH - p + 128 - (p - p/4)
-  assign q_bh1   = f_r - q_p2;                                          // RXPH - p/2
-  assign q_bh2   = f_r - q_p2 + 19'sd128;                               // RXPH + 128 - p/2
-  assign q_r256  = f_r + 19'sd256;
-  assign q_a256  = f_r - q_p + 19'sd256;
-  assign q_aa256 = f_r - q_p - q_p + 19'sd256;
-
-  // The first half's decision, before its pull (the fast block's state).
-  assign s_c1   = ~f_end1 & f_op1 & e1h & ~f_pos1;                      // a candidate
-  assign s_k1   = ~f_end1 & f_op1 & f_pos1 & (e1h | f_cd1);             // a bit (f_bit1)
-  assign s_b1   = ~f_end1 & ~f_op1 & e1h;                               // a boundary edge
-  assign s_pl1  = ~f_end1 & e1h;                                        // the first half pulls
-  assign s_r1   = f_o1 ? f_a1 : f_r;
-  assign s_r1b  = f_o1 ? q_a128 : q_r128;                               // the first half's phase + 128
-  assign s_opa  = f_op1 & ~s_k1;
-  assign s_cda  = s_c1 | (~s_k1 & f_cd1);
-  assign s_wna  = s_c1 ? (rx_win_q | f_cd1) : s_k1 ? 1'b0 : s_b1 ? 1'b1 : rx_win_q;
-  assign s_g1   = (s_k1 & ~rx_g_q[4]) ? rx_g_q + 5'd1 : rx_g_q;
-  assign s_run2 = ~f_end1 & ~(s_k1 & bit_ends);
-  // The second half's window. Its point is the first half's unless the first half's bit ended RACQ's wide window.
-  assign s_w1h  = racq & (rgain != 2'd0) & ~rx_g_q[4];
-  assign s_w2h  = racq & (rgain != 2'd0) & ~s_g1[4];
-  assign s_w2   = s_w2h ? ph3w : pq3;
-  assign s_ob   = (s_w1h & ~s_w2h) ? ~(f_o1 ? q_aq[18] : q_rq[18]) : f_o2;   // on the unpulled phase + 128
-  assign s_r2b  = f_o1 ? (s_ob ? q_aa128 : q_a128) : (s_ob ? q_a128 : q_r128);
-  assign s_r2b2 = f_o1 ? (s_ob ? q_aa256 : q_a256) : (s_ob ? q_a256 : q_r256);    // + 128 more
-  assign s_neg2b = s_r2b[18];
-  // The one pull: x, the target (0, or p/2 for a boundary edge), the error, the gain's shift.
-  assign s_tp   = s_pl1 ? ~f_op1 : ~(s_opa | s_ob);
-  assign s_x    = s_pl1 ? s_r1 : s_r2b;
-  assign s_t    = s_tp ? q_p2 : 19'sd0;
-  assign s_d    = s_tp ? (s_pl1 ? q_bh1 : q_bh2) : s_x;
-  assign s_gp   = s_pl1 ? rx_g_q : s_g1;
-  assign s_sh   = (rgain == 2'd0) ? 19'sd0 : (s_gp <= 5'd3) ? (s_d >>> 1) : (rgain == 2'd1) ? (s_d >>> 2) :
-                  (rgain == 2'd2) ? (s_d >>> 4) : (s_d >>> 5);
-  assign s_base = (rgain == 2'd0) ? s_t : s_x;                          // RGAIN 0 pulls all the way
-  assign s_f3   = s_base - s_sh + 19'sd128;                             // pulled + 128
-  assign s_f1   = s_base - s_sh + 19'sd256;                             // pulled + 256
-  assign s_f2   = s_base - s_sh - q_p + 19'sd256;                       // pulled + 256 - p
-  assign s_fo   = s_base - s_sh + 19'sd128 - $signed({3'b000, s_w2});   // pulled + 128 - w2
-  assign s_oa   = ~s_fo[18];                                            // the second half's window, after a pull
-  // The second half.
-  assign s_o2   = s_pl1 ? s_oa : s_ob;
-  assign s_op2  = s_opa | s_o2;
-  assign s_cd2  = ~s_o2 & s_cda;
-  assign s_h2   = s_run2 & ~(s_o2 & s_opa);                             // it decides
-  assign s_k2   = f_bit2a | f_bit2b;                                    // a bit
-  assign s_c2   = s_h2 & s_op2 & e2h & s_neg2b;                         // a candidate (its edge: no first-half pull)
-  assign s_b2   = s_h2 & ~s_op2 & e2h;                                  // a boundary edge
-  assign s_pl2  = s_h2 & e2h;
-  assign s_rn   = ~s_run2 ? (s_pl1 ? s_f3 : s_r1b) : s_pl2 ? s_f3 : s_pl1 ? (s_oa ? s_f2 : s_f1) : s_r2b2;
-  assign r3     = s_rn[17:0];
-  assign op3    = ~s_run2 ? s_opa : (s_op2 & ~s_k2);
-  assign cd3    = ~s_run2 ? s_cda : (s_c2 | (~s_k2 & s_cd2));
-  assign wn3    = ~s_run2 ? s_wna : s_c2 ? (s_wna | s_cd2) : s_k2 ? 1'b0 : s_b2 ? 1'b1 : s_wna;
-  assign g3     = (s_run2 & s_k2 & ~s_g1[4]) ? s_g1 + 5'd1 : s_g1;
+  rk3n_f #(.PW(12), .CW(13)) u_rk3n (.run(b_run & man3), .ph(ph), .op(rx_open_q), .cd(rx_cand_q), .wn(rx_win_q),
+               .g(rx_g_q), .ce(rx_ce_q), .p3(p3), .pq3(pq3), .ph3w(ph3w), .rgain(rgain), .racq(racq), .rdiff(rdiff),
+               .l0(lvl3), .l1(lvlf), .l2(lvl2), .bit_ends(bit_ends), .bit3(bit3), .blv3(blv3), .endw3(endw3),
+               .r3(r3), .op3(op3), .cd3(cd3), .wn3(wn3), .g3(g3), .ce3(ce3), .ran(ran3));
 
   // RXIC and the ends of a reception, at most one per cycle.
   logic [15:0] ic_inc, ic_run;
@@ -955,7 +844,7 @@ module pe_shift #(
   logic               rx_upd, gear, rv_we, rv_b, cov_b, open_b, cand_b, win_b;
   logic [2:0]         rl_b;
   logic [4:0]         g_inc;
-  logic signed [24:0] ph_run, ph_beg;
+  logic signed [24:0] ph_beg;
 
   assign rx_upd = do_begin | b_run;
   assign gear   = (clk_hit | tpull) & ~rx_g_q[4];     // rx_gear()
@@ -967,7 +856,17 @@ module pe_shift #(
   assign open_b = open1 & ~clk_hit;
   assign cand_b = cand_hit | (cand1 & ~clk_hit);
   assign win_b  = clk_hit ? 1'b0 : (bnd_hit | (cand_hit & cand1)) ? 1'b1 : rx_win_q;
-  assign ph_run = man ? {{8{mph3[16]}}, mph3[16:0]} : man3 ? {{8{r3[16]}}, r3[16:0]} : tim ? tnxt[24:0] : rx_ph_q;
+  // RXPH's next value: one AND-OR of every source, its selects from flops (exclusive), so each source is two gates
+  // from the flop.
+  logic signed [24:0] ph_d;
+  logic               sp3, sp1, sp0, spb, sph;
+  assign sp3    = b_run & man3;
+  assign sp1    = b_run & man;
+  assign sp0    = b_run & tim;
+  assign spb    = do_begin;
+  assign sph    = ~(sp3 | sp1 | sp0 | spb);
+  assign ph_d   = ({25{sp3}} & {{8{r3[16]}}, r3[16:0]}) | ({25{sp1}} & {{8{mph3[16]}}, mph3[16:0]}) |
+                  ({25{sp0}} & tnxt[24:0]) | ({25{spb}} & ph_beg) | ({25{sph}} & rx_ph_q);
   // rx_begin(): the Manchester decoders start at 256; RKIND 3 at 128 when a hunt's start edge falls in the second
   // half of its cycle (SYNC2F still shows the old level).
   assign ph_beg = (rkind == 2'd1) ? 25'sd256 : (rkind == 2'd3) ? ((b_hunt & (lvlf != lvl2)) ? 25'sd128 : 25'sd256) :
@@ -998,6 +897,9 @@ module pe_shift #(
       coding_q  <= 16'h0000;
       pwq_q     <= 16'd192;     // p = 256 in the reset configuration
       pwh_q     <= 16'd128;
+      p3_q      <= 12'd512;
+      wq3_q     <= 12'd384;
+      wh3_q     <= 12'd256;
     end else begin
       if (cfg_we) begin
         case (cfg_slot)
@@ -1022,6 +924,9 @@ module pe_shift #(
       if (pw_load) begin
         pwq_q <= pwq_next;
         pwh_q <= pwh_next;
+        p3_q  <= p3_next;
+        wq3_q <= wq3_next;
+        wh3_q <= wh3_next;
       end
     end
   end
@@ -1159,29 +1064,30 @@ module pe_shift #(
       rx_pe_q   <= 3'd0;
       rx_sr8_q  <= 16'h0000;
       rx_n8_q   <= 5'd0;
-      rx_c8_q   <= 16'h0000;
+      rx_c8_q   <= 32'h0000_0000;
       rx_ones_q <= 1'b0;
+      rx_ce_q   <= 13'sd0;
     end else begin
       // rx_byte() (section 5.9.7): the copies at the start, which rx_cbegin() takes, and after every 8th data bit;
       // RXONES clears at a 0 between. The start's own bit, for the Manchester decoders, is bit 1.
       if (do_begin) begin
         rx_sr8_q  <= 16'h0000;
         rx_n8_q   <= 5'd0;
-        if (c8_on) rx_c8_q <= crc_base[31:16];
+        if (c8_on) rx_c8_q <= crc_base;
         rx_ones_q <= ~dbit | bw;
       end else if (dbit) begin
         if (tot1[2:0] == 3'd0) begin
           rx_sr8_q  <= sr_b;
           rx_n8_q   <= n_b;
-          if (c8_on) rx_c8_q <= crc_r[31:16];
+          if (c8_on) rx_c8_q <= crc_r;
           rx_ones_q <= 1'b1;
         end else if (!bw) begin
           rx_ones_q <= 1'b0;
         end
       end
       if (rx_upd) begin
-        rx_sr_q  <= eop_rest ? rx_sr8_q : sr_b;
-        rx_n_q   <= eop_rest ? rx_n8_q : n_b;
+        rx_sr_q  <= (eop_rest | mend_rest) ? rx_sr8_q : sr_b;
+        rx_n_q   <= (eop_rest | mend_rest) ? rx_n8_q : n_b;
         rx_tot_q <= tot_b;
         rx_syn_q <= syn_b;
         rx_rl_q  <= rl_b;
@@ -1189,9 +1095,9 @@ module pe_shift #(
         rx_ef_q  <= ef_b;
       end
       if (rv_we) rx_rv_q <= rv_b;
+      rx_ph_q <= ph_d;
       if (do_begin) begin
         rx_kind_q <= rkind;
-        rx_ph_q   <= ph_beg;
         rx_g_q    <= 5'd1;
         rx_open_q <= 1'b0;
         rx_cand_q <= 1'b0;
@@ -1199,7 +1105,6 @@ module pe_shift #(
         rx_last_q <= lvl3;
         rx_win_q  <= 1'b0;
       end else if (b_run) begin
-        rx_ph_q <= ph_run;
         if (gear) rx_g_q <= g_inc;
         if (man) begin
           rx_open_q <= open_b;
@@ -1211,6 +1116,7 @@ module pe_shift #(
           rx_open_q <= op3;
           rx_cand_q <= cd3;
           rx_win_q  <= wn3;
+          rx_ce_q   <= ce3;
         end
         rx_ic_q <= ic_run;
         if (samp) rx_last_q <= lvl2;
@@ -1287,7 +1193,166 @@ module pe_shift #(
   // Bits the arithmetic forms and nothing reads. TXH, OLA and OLB are section 5.9.2's names for what P, N and the
   // latch hold in another form: the pads take them from there, so nothing reads them here.
   logic _unused;
-  assign _unused = &{mph3[17], tnxt[25], r3[17], tx_h_q, ola_q, olb_q, f_t0[17:0], f_t1[17:0], q_rq[17:0],
-                     q_aq[17:0], s_fo[17:0], s_rn[18], 1'b0};
+  assign _unused = &{mph3[17], tnxt[25], r3[17], tx_h_q, ola_q, olb_q, ran3, 1'b0};
 
+endmodule
+
+// RKIND 3's cycle step, rx_manch3 of section 5.9.6, as its implementation note shapes it: two carry chains between
+// flops. RKIND 3 takes RPER above 15 as 15, so p is below 4096 (PW = 12), every sum fits IW = PW + 3 bits, and RXCE,
+// from 256 - p to -1, fits CW = PW + 1.
+// Chain 1, side by side from the flops: the window compares and the phase compares (x is RXPH at the start of the
+// cycle), every error a pull can take (x - p, x + 128 - p, x - p/2, x + 128, x + 128 - p/2; RXCE is a flop), and the
+// bases. Then the decisions, written flat as sums of products of the compares and the flops, the error's one-hot
+// choice, the gain's fixed wiring, and chain 2: the base less the correction. The base is x + 256, or x + 256 - p
+// after a window opening, and x + 128 (- p) when the first half step ends the reception, since the code then runs no
+// second one. The outputs are the code's in every state that a reception of RKIND 3 keeps while RXPER and RXOPT stay
+// as it found them: p from 512 to 4095 with its window points, RXG from 1 to 16, RXCAND only with RXOPEN, RXPH at
+// least 0 with the window closed and 256 - p with it open, RXPH below p + 128 with RGAIN 1 to 3 and 7p/4 - 128 with
+// RGAIN 0 (so a cycle opens at most one window), and RXCE from 256 - p to -1 with RXCAND. RXPH's next value r3 is
+// the code's while the block runs, the only cycles pe_shift's ph_d takes it.
+module rk3n_f #(parameter int PW = 12, parameter int CW = 13) (
+  input  logic               run,
+  input  logic signed [17:0] ph,
+  input  logic               op, cd, wn,
+  input  logic [4:0]         g,
+  input  logic signed [CW-1:0] ce,
+  input  logic [PW-1:0]      p3,
+  input  logic [PW-1:0]      pq3, ph3w,
+  input  logic [1:0]         rgain,
+  input  logic               racq, rdiff,
+  input  logic               l0, l1, l2,
+  input  logic               bit_ends,
+  output logic               bit3, blv3, endw3,
+  output logic signed [17:0] r3,
+  output logic               op3, cd3, wn3,
+  output logic [4:0]         g3,
+  output logic signed [CW-1:0] ce3,
+  output logic               ran
+);
+  localparam int IW = PW + 3;
+  localparam logic signed [IW-1:0] C128 = IW'(128);
+  localparam logic signed [IW-1:0] C256 = IW'(256);
+  logic signed [IW-1:0] x, p, p2, dec, wq, wh, cex;
+  logic signed [IW-1:0] s_p, s_zp, s_h, s_z, s_zh, s_b0, s_bp;
+  logic               e1, e2, wide0, g16;
+  logic [4:0]         g1;
+
+  assign x     = ph[IW-1:0];                             // RXPH stays in [256 - p, 7p/4 - 128)
+  logic _unused_ph;
+  assign _unused_ph = &{ph[17:IW], 1'b0};
+  assign p     = $signed({3'b000, p3});
+  assign p2    = $signed({4'b0000, p3[PW-1:1]});
+  assign dec   = $signed({6'b000000, p3[PW-1:3]});
+  assign wq    = $signed({3'b000, pq3});
+  assign wh    = $signed({3'b000, ph3w});
+  assign cex   = {{(IW - CW){ce[CW-1]}}, ce};
+  assign e1    = l0 ^ l1;
+  assign e2    = l1 ^ l2;
+  assign g16   = g[4];                                   // RXG is 1 to 16: bit 4 is RXG = 16
+  assign g1    = g16 ? g : g + 5'd1;                     // RXG after a first-half bit
+  assign wide0 = racq & (rgain != 2'd0) & ~g16;
+
+  // chain 1: sums
+  assign s_p  = x - p;                                   // y1 after a first-half opening
+  assign s_zp = x + C128 - p;                            // y2 after an opening in either half
+  assign s_h  = x - p2;                                  // a first-half boundary edge's error
+  assign s_z  = x + C128;                                // y2 with no opening
+  assign s_zh = x + C128 - p2;                           // a second-half boundary edge's error
+  assign s_b0 = x + C256;                                // the base, no opening
+  assign s_bp = x + C256 - p;                            // the base, an opening
+  // chain 1: compares
+  logic c_oq, c_oh, c_xd, c_zdq, c_zdh, c_zd, c_zpd, x_neg, z_neg, zp_neg, p_neg;
+  assign c_oq   = x >= wq;                               // x at the narrow window point
+  assign c_oh   = x >= wh;                               // x at the wide one
+  assign c_xd   = x >= dec;
+  assign c_zdq  = x + C128 >= wq;                        // x + 128 at the window points
+  assign c_zdh  = x + C128 >= wh;
+  assign c_zd   = x + C128 >= dec;
+  assign c_zpd  = x + C128 - p >= dec;
+  assign x_neg  = x[IW-1];
+  assign z_neg  = s_z[IW-1];
+  assign zp_neg = s_zp[IW-1];
+  assign p_neg  = s_p[IW-1];
+
+  // the decisions
+  logic o1, endw1, cand1, bit1e, bit1t, bnd1, bit1, run2, o2, endw2, opa, cda, cand2, bit2e, bit2t, bnd2, bit2;
+  logic a_case;
+  assign o1     = wide0 ? c_oh : c_oq;
+  assign a_case = run & o1;                              // case A: the window opens in the first half
+  assign endw1  = a_case & op;
+  // first half
+  assign cand1  = run & ~endw1 & e1 & (o1 ? p_neg : (op & x_neg));
+  assign bit1e  = run & ~endw1 & e1 & (o1 ? ~p_neg : (op & ~x_neg));
+  assign bit1t  = run & ~o1 & op & ~e1 & cd & c_xd;
+  assign bnd1   = run & ~o1 & ~op & e1;
+  assign bit1   = bit1e | bit1t;
+  assign run2   = run & ~endw1 & ~(bit1 & bit_ends);
+  // second half: the window point is the cycle's (RXG at its start); no opening after a first-half one
+  assign o2     = ~o1 & (wide0 ? c_zdh : c_zdq);
+  assign opa    = (op | o1) & ~bit1;                     // RXOPEN after the first half
+  assign cda    = cand1 | (~o1 & cd & ~bit1);            // RXCAND after the first half
+  assign endw2  = run2 & o2 & opa;
+  // the phase in the second half: z (no opening), x + 128 - p (an opening in either half)
+  logic y2neg, y2dec, op2, cd2;
+  assign y2neg  = (o1 | o2) ? zp_neg : z_neg;
+  assign y2dec  = o1 ? c_zpd : c_zd;                     // (after a second-half opening there is no candidate)
+  assign op2    = opa | o2;
+  assign cd2    = o2 ? 1'b0 : cda;
+  assign cand2  = run2 & ~endw2 & op2 & e2 & y2neg;
+  assign bit2e  = run2 & ~endw2 & op2 & e2 & ~y2neg;
+  assign bit2t  = run2 & ~endw2 & op2 & ~e2 & cd2 & y2dec;
+  assign bnd2   = run2 & ~endw2 & ~op2 & e2;
+  assign bit2   = bit2e | bit2t;
+
+  // RXWIN after the first half
+  logic wna;
+  assign wna  = cand1 ? (wn | (cd & ~o1)) : bit1 ? 1'b0 : bnd1 ? 1'b1 : wn;   // RXWIN after the first half
+
+  // outputs
+  assign bit3   = bit1 | bit2;
+  assign endw3  = endw1 | endw2;
+  assign blv3   = bit1 ? (rdiff ? (wn | (cd & ~o1 & e1)) : l1) : (rdiff ? (wna | (cd2 & e2)) : l2);
+  assign ran    = run & ~endw1 & ~endw2 & ~(bit3 & bit_ends);
+
+  // the error of the one pull (a one-hot choice, flat), the gain's wiring, and chain 2 (a carry-select subtract)
+  // A = o1 (the window opens in the first half), Z = o1 | o2 = x + 128 at the window point.
+  logic signed [IW-1:0] err, sh, base;
+  logic [2:0]         k;
+  logic               u_x, u_p, u_ce, u_h, u_zp, u_z, u_zh, Zw;
+  assign Zw   = wide0 ? c_zdh : c_zdq;
+  assign u_p  = run & o1 & ~op & e1 & (~p_neg | (~e2 & c_zpd));
+  assign u_zp = run & o1 & ~op & ~(e1 & ~p_neg) & e2 & ~zp_neg;
+  assign u_x  = run & ~o1 & op & e1 & (~x_neg | (~Zw & ~e2 & c_zd));
+  assign u_ce = run & ~o1 & op & cd & ~e1 & (c_xd | (~Zw & ~e2 & c_zd));
+  assign u_h  = run & ~o1 & ~op & e1;
+  assign u_z  = run & ~Zw & op & e2 & ~z_neg & ~(e1 & ~x_neg) & ~(~e1 & cd & c_xd);
+  assign u_zh = run & ~Zw & ~op & ~e1 & e2;
+  assign err  = (x & {IW{u_x}}) | (s_p & {IW{u_p}}) | (cex & {IW{u_ce}}) | (s_h & {IW{u_h}}) |
+                (s_zp & {IW{u_zp}}) | (s_z & {IW{u_z}}) | (s_zh & {IW{u_zh}});
+  assign k    = (rgain == 2'd0) ? 3'd0 : ~g[4] & (g[3:2] == 2'b00) ? 3'd1 :
+                (rgain == 2'd1) ? 3'd2 : (rgain == 2'd2) ? 3'd4 : 3'd5;
+  assign sh   = (k == 3'd0) ? err : (k == 3'd1) ? (err >>> 1) : (k == 3'd2) ? (err >>> 2) :
+                (k == 3'd4) ? (err >>> 4) : (err >>> 5);
+  logic ended1;
+  assign ended1 = endw1 | (bit1 & bit_ends);             // the first half step ends the reception
+  assign base = ended1 ? (o1 ? s_zp : s_z) : Zw ? s_bp : s_b0;   // Zw: o1 | o2
+  // base - sh (sh is 0 with no pull: err is 0 then), split at bit LS: the high half both ways, chosen by the borrow
+  localparam int LS = IW / 2;
+  logic [LS-1:0]    lo;
+  logic             bw;
+  logic [IW-LS-1:0] hi0, hi1, hi;
+  logic signed [IW-1:0] rn;
+  assign {bw, lo} = {1'b0, base[LS-1:0]} - {1'b0, sh[LS-1:0]};
+  assign hi0  = base[IW-1:LS] - sh[IW-1:LS];
+  assign hi1  = base[IW-1:LS] - sh[IW-1:LS] - 1'b1;
+  assign hi   = bw ? hi1 : hi0;
+  assign rn   = {hi, lo};
+  assign r3   = {{(18 - IW){rn[IW-1]}}, rn};            // used only while the block runs
+
+  // RXOPEN, RXCAND, RXWIN, RXG and RXCE after the cycle
+  assign op3  = ~run ? op : (op2 & ~bit2 & ~(bit1 & bit_ends));   // a bit that ends it leaves RXOPEN 0
+  assign cd3  = ~run ? cd : (cand2 | (cd2 & ~bit2));
+  assign wn3  = ~run ? wn : cand2 ? (wna | cd2) : bit2 ? 1'b0 : bnd2 ? 1'b1 : wna;
+  assign g3   = (bit3 & ~g16) ? g1 : g;                  // at most one bit a cycle
+  assign ce3  = cand2 ? ((o1 | o2) ? s_zp[CW-1:0] : s_z[CW-1:0]) : cand1 ? (o1 ? s_p[CW-1:0] : x[CW-1:0]) : ce;
 endmodule

@@ -243,6 +243,10 @@ void build_fields(Chip *c) {
   ADDU(rx_n8_q);
   ADDU(rx_c8_q);
   ADDU(rx_ones_q);
+  ADDU(rx_ce_q);
+  ADDU(p3_q);
+  ADDU(wq3_q);
+  ADDU(wh3_q);
   ADDU(pa_q);
   ADDU(na_q);
   ADDU(pb_q);

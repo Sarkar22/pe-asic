@@ -1,7 +1,7 @@
 ; 10BASE-T node at 50 MHz: answers ARP requests (RFC 826) and ICMP echo requests (RFC 792) for its own addresses,
-; sends link test pulses (IEEE 802.3 14.2.1.1), and ignores everything else. Two threads, 512-word memory: 401 words
-; placed (389 of code, 12 of counters and constants), 5 words of addresses and two 52-word buffers unplaced, words 0
-; to 509 in use. The shift units do the line work (section 5.9): thread R's unit decodes the Manchester code with
+; sends link test pulses (IEEE 802.3 14.2.1.1), and ignores everything else. Two threads, 512-word memory: 402 words
+; placed (390 of code, 12 of counters and constants), 5 words of addresses and two 52-word buffers unplaced, words 0
+; to 510 in use. The shift units do the line work (section 5.9): thread R's unit decodes the Manchester code with
 ; clock recovery and checks the CRC-32 FCS; thread T's unit sends Manchester, appends the FCS, and makes TP_IDL and
 ; the link pulses. R and T may be any two threads; the host starts R at label rx and T at tx.
 ;
@@ -21,12 +21,17 @@
 ;   one on RO: the decoder (RKIND 3, RPER 5, RACQ and RGAIN 3, section 5.9.6) hunts for RO falling, the first
 ;   preamble bit's mid-bit edge, RINV makes the level after each clock edge the bit, and the reception ends at the
 ;   first bit with no clock edge, inside TP_IDL (14.3.1.3.3). RKIND 3 times every edge to the half cycle, 10 ns,
-;   with the falling-edge sample (section 3.1), which leaves 13 ns between the latest bit-boundary edge and the
-;   earliest clock edge at 802.3's +/-13.5 ns of jitter (14.3.1.3.1), less the clock's duty error (section 7.3). Sync is the last preamble octet and the SFD, 0xD555
+;   with the falling-edge sample (section 3.1), and a bit-boundary edge in the decoder's window gives way to the
+;   clock edge after it, so 802.3's +/-13.5 ns of jitter (14.3.1.3.1) loses no frame, random or in the fixed
+;   patterns of section 7.3, nor do a partner 0.01% off on long frames and steps of up to 17 ns (section 7.4).
+;   REOP in CODING adds the byte end: a frame that ends with 1 to 7 bits after its last whole octet ends at that
+;   octet, and the FCS is checked there, as an 802.3 MAC truncates a frame (4.2.9, 5.9.7). Sync is the last preamble
+;   octet and the SFD, 0xD555
 ;   (3.2.2, 5.9.6), so 8 preamble bits are enough. A link pulse or an FLP pulse starts a reception that finds no
 ;   sync and gives no word. The receive half's CRC-32 covers DA to FCS and checks the residue (5.9.7). Full words
 ;   go into the next free buffer, at most BUFW of them; the rest of a longer frame is taken unstored. A frame is
-;   kept if its check passed, no word was lost (sstat T), it is whole octets (a last word of 0 or 8 bits), it has
+;   kept if its check passed, no word was lost (sstat T), it is whole octets (a last word of 0 or 8 bits, which the
+;   byte end makes of every frame that a window ends; the test stays for the other ends of 5.9.6), it has
 ;   at least 64 octets with its FCS (802.3 4.4.2, 4.2.4.2.2) and its DA is broadcast or ours (4.2.4.1.1). R hands
 ;   a kept frame to T by writing HANDED after the frame; T writes RELEASED when it is done with one, and R stores
 ;   into buffer HANDED mod 2 only while HANDED - RELEASED is under 2 (section 4.2: a store is seen by any later
@@ -109,8 +114,8 @@ rx:     sstop txrx
         scfg  R0, CHKHI      ; the residue a good frame leaves
         li    R0, 0xDD7B
         scfg  R0, CHKLO
-        ldi   R0, 0xFF
-        scfg  R0, CODING     ; CRC-32 on the receive half: all ones to start, checked at the end
+        li    R0, 0x80FF
+        scfg  R0, CODING     ; CRC-32 on the receive half: all ones to start, checked at the end; REOP: the byte end
         ldi   R1, CFG
         ldi   R2, 5
 rcfg:   recv  R0, MCFG       ; MAC and IP from the host

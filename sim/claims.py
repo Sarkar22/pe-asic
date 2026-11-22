@@ -1648,7 +1648,7 @@ def random_chip(rng, depth):
 # 5.9.2: widths of the unit's sequencing state that is wider than a bit; RXPH is signed
 UNIT_WIDTH = dict(TXSR=16, TXN=5, TXBUF=16, TXBN=5, TXSYM=2, TXCD=17, TXACC=8, TXK=2, TXBK=2, TXAN=6, TXRL=3,
                   RXSR=16, RXN=5, RXTOT=11, RXKIND=2, RXG=5, RXIC=16, RXBUF=16, RXBN=5, RXPN=5, RXRL=3, RXEF=3,
-                  RXBE=3, CRC=32, RXPE=3, RXSR8=16, RXN8=5, RXC8=16)
+                  RXBE=3, CRC=32, RXPE=3, RXSR8=16, RXN8=5, RXC8=32)
 
 
 def random_unit(rng, chip):
@@ -1659,6 +1659,8 @@ def random_unit(rng, chip):
         for n in UNIT_STATE:
             if n == 'RXPH':
                 t.u.RXPH = rng.randrange(-32768, 1 << 24)
+            elif n == 'RXCE':
+                t.u.RXCE = rng.randrange(-2048, 0)
             elif n != 'CMT':
                 t.u.__dict__[n] = rng.getrandbits(UNIT_WIDTH.get(n, 1))
     chip.SEL = [0 if p == 3 else rng.randrange(3) for p in range(16)]
@@ -1747,7 +1749,136 @@ def chk_halfcycle_text(log):
               'THALF %s' % getattr(t.u, 'THALF', None))
 
 
-ALL = [chk_halfcycle_text, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
+def _manch_levels(bits, t0, bt, n, jit=None, rng=None):
+    """n half-cycle levels of a line carrying bits as 802.3 Manchester (a 1 is low then high), high before and after:
+    index 2c is cycle c's falling-edge level, 2c + 1 the rising edge that ends it (3.1). jit(i) moves half-bit
+    boundary i by that many cycles."""
+    half = []
+    for b in bits:
+        half += [1 - b, b]
+    ev, prev = [], 1
+    for i, v in enumerate(half + [1]):
+        if v != prev:
+            x = t0 + i * bt / 2 + (jit(i) if jit else 0.0)
+            ev.append((int(-(-2 * x // 1)), len(ev), v))
+            prev = v
+    lv, v = [], 1
+    for k, _, w in sorted(ev):
+        lv += [v] * (min(k, n) - len(lv))
+        v = w
+    return lv + [v] * (n - len(lv))
+
+
+def _rk3_run(cfg, levels, cycles, watch=('RXPH', 'RXSR', 'RXN', 'RXTOT', 'RXOPEN', 'RXCAND', 'RXCE', 'RXG', 'CRC',
+                                         'RXRUN', 'RXEP', 'RXBUF', 'RXBN', 'RXPN', 'RXPE')):
+    """Thread 0 receives ui0 with the slots in cfg and takes every word (sgo rx, now, then rxw in a loop). Returns
+    the unit states after each cycle, the chip, and the extremes of RXPH and RXCE while an RKIND 3 reception runs."""
+    img = assemble('        sgo   rx\n        now\ntop:    rxw   R2\n        goto  top\n', depth=128)
+    chip = Chip(128, seed=1)
+    for a, w in img.words.items():
+        chip.mem[a] = w
+    t = chip.th[0]
+    for k, v in cfg.items():
+        chip.set_cfg(t, k, v)
+    chip.host_setpc(0, 0)
+    chip.host_run(0, 1)
+    trace, ph, ce = [], [], []
+    for c in range(cycles):
+        chip.cycle(levels[2 * c + 1], 0, levels[2 * c], 0)
+        u = t.u
+        trace.append(tuple(getattr(u, n) for n in watch))
+        if u.RXRUN and u.RXKIND == 3:
+            ph.append(u.RXPH)
+            if u.RXOPEN and u.RXCAND:
+                ce.append(u.RXCE)
+    return trace, chip, ph, ce
+
+
+def _eth_frame(octets, extra, bad=False):
+    """802.3 bits on the wire: preamble and SFD (3.2.2), the octets, the FCS (3.2.8) LSB first, then extra bits."""
+    import zlib
+    fcs = zlib.crc32(bytes(octets)) ^ (1 if bad else 0)
+    data = list(octets) + [(fcs >> (8 * q)) & 255 for q in range(4)]
+    bits = [1, 0] * 28 + [1, 0, 1, 0, 1, 0, 1, 1]
+    for o in data:
+        bits += [(o >> b) & 1 for b in range(8)]
+    return bits + extra
+
+
+def chk_rkind3(log):
+    # 5.9.3, 5.9.6, section 10 item 5: RKIND 3 takes RPER above 15 as 15, and 0 and 1 as 2 with no RFRAC
+    rng = random.Random(20261121)
+    bits = [1, 0] * 6 + [rng.getrandbits(1) for _ in range(60)]
+    base = {4: 0x0063, 10: 0x0233}                  # RKIND 3, HUNT for a rising edge on ui0; RGAIN 1, RFRAC 0x33
+    lv = _manch_levels(bits, 40.3, 15 + 0x33 / 256, 2 * 1400 + 2, lambda i: rng.uniform(-1.5, 1.5))
+    ref = _rk3_run({**base, 5: 15}, lv, 1400)[0]
+    same = {r: _rk3_run({**base, 5: r}, lv, 1400)[0] == ref for r in (16, 17, 31, 255, 0xFFFF)}
+    log.check('5.9.3 RKIND 3 takes RPER above 15 as 15: RPER 16, 17, 31, 255 and 65535 decode exactly as 15, every '
+              'cycle', all(same.values()) and ref[-1][3] > 40, 'same as 15: %s; %d bits' % (same, ref[-1][3]))
+    lv = _manch_levels(bits, 40.3, 2.0, 2 * 400 + 2, lambda i: rng.uniform(-0.3, 0.3))
+    ref = _rk3_run({4: 0x0063, 5: 2, 10: 0x0200}, lv, 400)[0]
+    same = {r: _rk3_run({4: 0x0063, 5: r, 10: 0x0277}, lv, 400)[0] == ref for r in (0, 1)}
+    log.check('5.9.3 RKIND 3 takes RPER 0 and 1 as 2 with no RFRAC: both decode as RPER 2, RFRAC 0, every cycle',
+              all(same.values()) and ref[-1][3] > 40, 'same as 2: %s' % same)
+    # 5.9.6 Period bullet and 5.9.2: RXPH between -2048 and 4223, RXCE below 0 and at least -p/2
+    lo = hi = 0
+    ce_lo, ce_hi, n_ce = 0, -1 << 30, 0
+    for trial in range(60):
+        rper = rng.choice((0, 1, 2, 3, 5, 8, 15, 16, 40))
+        rfrac = rng.getrandbits(8)
+        p = 512 if rper < 2 else (0xF00 | rfrac) if rper > 15 else (rper << 8) | rfrac
+        a = rng.uniform(0.0, 0.3) * p / 512
+        bt = p / 256 * rng.choice((1.0, 1.003, 0.997, 1.02))
+        bb = [1, 0] * rng.randrange(4, 12) + [rng.getrandbits(1) for _ in range(rng.randrange(20, 80))]
+        cyc = min(3000, int(60 + len(bb) * bt + 8 * bt))
+        lv = _manch_levels(bb, 30.0 + rng.random(), bt, 2 * cyc + 2, lambda i: rng.uniform(-a, a))
+        cfg = {4: 0x0063 | rng.getrandbits(1) << 3 | int(rng.random() < 0.15) << 4, 5: rper,
+               10: rfrac | rng.randrange(4) << 9 | rng.getrandbits(1) << 11}
+        _, _, ph, ce = _rk3_run(cfg, lv, cyc)
+        if ph:
+            lo, hi = min(lo, min(ph)), max(hi, max(ph))
+        for x in ce:
+            ce_lo, ce_hi, n_ce = min(ce_lo, x * 1.0 / (p // 2)), max(ce_hi, x), n_ce + 1
+    log.check('5.9.6 Period: RXPH of an RKIND 3 reception stays between -2048 and 4223 (60 receptions, RPER 0 to 40)',
+              -2048 <= lo and hi <= 4223 and hi > 3000, 'RXPH %d to %d' % (lo, hi))
+    log.check('5.9.2 RXCE is below 0, and no lower than -p/2 (RKIND 3, the same receptions)',
+              n_ce > 100 and ce_hi < 0 and ce_lo >= -1.0, '%d candidates, RXCE / (p/2) from %.3f, RXCE up to %d' % (
+                  n_ce, ce_lo, ce_hi))
+    # 5.9.7, the byte end of a Manchester frame: 802.3 frames of whole octets and 0 to 7 bits more, RKIND 3 at 5
+    # cycles a bit, CRC-32 checked with its residue, REOP 1 and 0
+    frames = []
+    for extra in range(8):
+        for bad in (False, True):
+            octs = [rng.getrandbits(8) for _ in range(rng.choice((46, 47, 60, 61)))]
+            frames.append((extra, bad, _eth_frame(octs, [rng.getrandbits(1) for _ in range(extra)], bad), len(octs)))
+    eth = {4: 0x0063, 5: 5, 8: 0x8000, 9: 0xD555, 10: 0x0E00, 11: 0x04C1, 12: 0x1DB7, 13: 0xC704, 14: 0xDD7B}
+    res = {}
+    for reop in (1, 0):
+        for extra, bad, fb, n in frames:
+            cyc = int(40 + len(fb) * 5 + 40)
+            lv = _manch_levels(fb, 30.37, 5.0, 2 * cyc + 2, lambda i: rng.uniform(-0.6, 0.6))
+            _, chip, _, _ = _rk3_run({**eth, 15: 0x00FF | reop << 15}, lv, cyc)
+            u = chip.th[0].u
+            res[reop, extra, bad] = (u.RXPN, u.RXPE & 1, u.RXSEEN, (8 * (n + 4)) % 16)
+    want_on = all(res[1, x, b][:2] == (res[1, x, b][3], 0 if b else 1) for x in range(8) for b in (False, True))
+    want_off = all(res[0, x, False][:2] == ((res[0, x, False][3] + x) % 16, 1 if x == 0 else 0) for x in range(8))
+    log.check('5.9.7 the byte end of a Manchester frame (RKIND 3, REOP): 1 to 7 bits after the FCS are dropped, the '
+              'last word is whole octets and end flag 0 judges the FCS there; a bad FCS fails (802.3 4.2.9)',
+              want_on, 'REOP 1: (bits of the last word, end flag 0) per extra bits 0 to 7: good %s, bad FCS %s' % (
+                  [res[1, x, False][:2] for x in range(8)], [res[1, x, True][:2] for x in range(8)]))
+    log.check('5.9.7 with REOP 0 every bit stays: 1 to 7 extra bits stay in the last word and the check fails',
+              want_off, 'REOP 0, good FCS: %s' % [res[0, x, False][:2] for x in range(8)])
+    # section 10 item 20: REOP with RKIND 1 has no effect
+    fb = frames[2 * 3][2]
+    cyc = int(40 + len(fb) * 10 + 60)
+    lv = _manch_levels(fb, 30.0, 10.0, 2 * cyc + 2)
+    lv1 = [lv[2 * c + 1] for c in range(cyc) for _ in (0, 1)]       # one level per cycle: RKIND 1's world
+    r1 = {reop: _rk3_run({**eth, 4: 0x0061, 5: 10, 15: 0x00FF | reop << 15}, lv1, cyc)[0] for reop in (0, 1)}
+    log.check('10 item 20: REOP with RKIND 1 has no effect (a frame with 3 extra bits, every cycle the same)',
+              r1[0] == r1[1] and r1[0][-1][3] > 500, '%d bits received' % r1[0][-1][3])
+
+
+ALL = [chk_halfcycle_text, chk_rkind3, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
        chk_pins, chk_spacing, chk_host, chk_stop_rules, chk_flags, chk_stop_timing, chk_slots, chk_asm]
 
 
