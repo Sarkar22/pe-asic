@@ -16,13 +16,14 @@ Compared after every cycle:
   data, and a ld or st's address and data in its memory cycle; TB, SYNC1, SYNC2, SYNC3, SYNC1F and SYNC2F;
 - every shift unit: each name of section 5.9.2 (CMT aside: it lasts one cycle, so between cycles it reads 0) and
   the 16 slots of 5.9.3; the RTL's window points PWQ and PWH (5.9.6, implementation note) against p - p/4 and
-  p - p/2 of the slots as they stand, and RKIND 3's p and window points P3, WQ3 and WH3 likewise; and its pad flops
-  P and N (5.2, implementation note), with P = L xor N;
-- while a reception of RKIND 3 runs, the states its datapath (pe_shift.sv's rk3n_f) is written for: RXG 1 to 16,
-  RXCAND only with RXOPEN, RXPH at least 0 with the window closed and 256 - p with it open, below p + 128 with RGAIN
-  1 to 3 and 7p/4 - 128 with RGAIN 0, and RXCE from 256 - p to -1 with RXCAND. The code keeps them while RXPER and
-  RXOPT stay as the reception found them, so leaving them then is a failure. A write of either in mid-reception
-  (section 10, defined 8) can leave them: those unit cycles are counted, and the state compare goes on;
+  p - p/2 of the slots as they stand, and RKIND 3's window points WQ3 and WH3 against p - p/4 and p - p/2 of its
+  RXP3; and its pad flops P and N (5.2, implementation note), with P = L xor N;
+- while a reception of RKIND 3 runs, the states its datapath (pe_shift.sv's rk3n_f) is written for, the bounds of
+  5.9.6's Period bullet with the reception's own p and RGAIN (RXP3, RXRG): RXG 1 to 16, RXCAND only with RXOPEN,
+  RXPH at least 128 - p with the window closed and 256 - p with it open, below p + 128 with RGAIN 1 to 3 and
+  7p/4 - 128 with RGAIN 0, and RXCE from 256 - p to -1 with RXCAND. A reception keeps its p, RGAIN and RACQ whatever
+  RXPER and RXOPT do (5.9.6, Start), so leaving them is a failure; the unit cycles of receptions after a write of
+  either in mid-reception (section 10, defined 8) are counted;
 - the pin layer of 5.2 to 5.4 and 5.9.2: OUT, SHD, OE, SHOE, OD, BYP, SHBYP, OWN, SEL and SHSEL;
 - M0..M7, FULL and BUSY;
 - all of memory, every 64 cycles and at the end.
@@ -59,6 +60,14 @@ Images (--gen):
   takes words in a loop; each frame has its own jitter (none, random, the fixed patterns, a phase step, pulses of
   half a cycle) and 0 to 7 bits after its last whole octet, so REOP's Manchester byte end (5.9.7) ends many of them.
   Host traffic in one gap of 33. Inputs at both edges of every cycle.
+- fcs: as rk3, on sim/compare.py's RKIND 3 image with FCS frames: threads 0 and 1 mostly 802.3 receivers (the SFD
+  as the sync pattern, CRC-32 and its residue, REOP) on frames that carry a real FCS and 0 to 7 excess bits, some
+  with an FCS bit wrong, and thread 0 writing RXOPT after every word, so in mid-reception (a reception keeps its p,
+  RGAIN and RACQ, 5.9.6).
+- can: as rk3, on sim/compare.py's CAN image: timed samples that hunt a falling edge, RESYNC mostly with RACQ (only
+  an edge to HLVL pulls, 5.9.6), SMODE 2 mostly with N 5 (a stuff violation ends the reception at its bit, 5.9.7)
+  and CRC-15 to RCNT, on stuffed CAN-like lines with dominant bits stretched, the sender's clock up to 3% off, a
+  cycle of jitter and stuff violations.
 The other generators give one level per cycle (3.1): the falling-edge sample is the cycle's level, and a uio pad
 loops back its first-half level, as before; both halves of the pads are still compared.
 
@@ -104,7 +113,8 @@ Where sim.py serves in cycle h what the RTL serves later (section 10, item 6), t
   the reply register 2 cycles later (9.4). A memory command that finds every thread running sets BUSY in h + 1 on
   both, and does nothing more.
 
-Usage: lockstep.py [--corners | --gen chips|prog|rows|wide|directed|half|rk3] [--images N] [--cycles C]
+Usage: lockstep.py [--corners | --gen chips|prog|rows|wide|directed|half|rk3|fcs|can] [--images N]
+                   [--cycles C]
                    [--first SEED]
                    [--depths 128,512] [--host quick|full|mixed|pins] [--no-extra] [--jobs J] [--build DIR]
                    [--stop-first] [--out FILE] [--fcov FILE] [--cov FILE]
@@ -525,21 +535,28 @@ def image_half(rng, seed):
     return _compare.unit_image(rng, half=True), [rng.randrange(128) for _ in range(4)]
 
 
-def image_rk3(rng, cycles):
-    """--gen rk3: sim/compare.py's RKIND 3 image, its receivers moved from ui0 to ui3 to ui4 to ui7 (RPIN 4 + k),
-    clear of the link pins. Returns (words, pcs, levels): levels[k][n] is thread k's pin at half cycle n, n = 2c at the
-    falling edge of cycle c and 2c + 1 at the rising edge that ends it (3.1)."""
+def image_rk3(rng, cycles, gen='rk3'):
+    """--gen rk3, fcs and can: sim/compare.py's RKIND 3 image, the same with FCS frames, or its CAN image, the
+    receivers moved from ui0 to ui3 to ui4 to ui7 (RPIN 4 + k), clear of the link pins. Returns (words, pcs, levels):
+    levels[k][n] is thread k's pin at half cycle n, n = 2c at the falling edge of cycle c and 2c + 1 at the rising
+    edge that ends it (3.1)."""
     global _compare
     if _compare is None:
         import compare as _c
         _compare = _c
-    words, starts, levels = _compare.rk3_image(rng, cycles)
-    pcs = [0] * 4
-    for tid, pc in starts:
-        pcs[tid] = pc
     scfg4 = enc('scfg', s=1, k=4)
-    for tid in range(4):                # RXMODE's RPIN is bits 11:8, the low half of the lui before scfg 4
-        a = next(a for a in range(pcs[tid], len(words)) if words[a] == scfg4)
+    while True:
+        if gen == 'can':
+            words, starts, levels = _compare.can_image(rng, cycles)
+        else:
+            words, starts, levels = _compare.rk3_image(rng, cycles, fcs=gen == 'fcs')
+        pcs = [0] * 4
+        for tid, pc in starts:
+            pcs[tid] = pc
+        at = [next(a for a in range(pcs[tid], len(words)) if words[a] == scfg4) for tid in range(4)]
+        if all(asm.decode(words[a - 1])[0].mn == 'lui' for a in at):
+            break                           # the CAN image writes no lui when RXMODE's high byte is 0: draw again
+    for tid, a in enumerate(at):        # RXMODE's RPIN is bits 11:8, the low half of the lui before scfg 4
         row, f = asm.decode(words[a - 1])
         assert row.mn == 'lui' and f['i'] & 0xF == tid, (tid, a)
         words[a - 1] = enc('lui', n=1, i=(f['i'] & 0xF0) | (4 + tid))
@@ -592,10 +609,9 @@ def rk3_period(per, opt):
     return 512 if per < 2 else (min(per, 15) << 8) | (opt & 0xFF)
 
 
-def rk3_flops(per, opt):
-    """RKIND 3's p and its window points p - p/4 and p - p/2 (5.9.6, implementation note)."""
-    p = rk3_period(per, opt)
-    return p, p - (p >> 2), p - (p >> 1)
+def rk3_points(p):
+    """RKIND 3's window points p - p/4 and p - p/2 of its RXP3 (5.9.6, implementation note)."""
+    return p - (p >> 2), p - (p >> 1)
 
 
 def sx(v, w):
@@ -640,7 +656,7 @@ class RtlView:
         self.mem = [f[x] for x in ('mem_q', 'mem_done_q', 'mem_kind_q', 'mem_reg_q')]
         self.rk3cfg = [None] * 4        # RXPER and RXOPT as a running reception of RKIND 3 found them
         self.rk3moved = [False] * 4     # and whether either has changed since
-        self.rk3outside = 0             # unit cycles outside J after such a change (counted, not an error)
+        self.rk3after = 0               # unit cycles of such receptions after a change (they must keep J' too)
 
     def state(self, chip):
         v = chip.snapshot()
@@ -656,20 +672,21 @@ class RtlView:
             units.append(tuple(v[k + i] for k in self.unit) + cfg)
             pw.append((v[f['u_pwq_q'] + i], v[f['u_pwh_q'] + i], window_points(cfg[5], cfg[10])))
             p3 = (v[f['u_p3_q'] + i], v[f['u_wq3_q'] + i], v[f['u_wh3_q'] + i])
-            if p3 != rk3_flops(cfg[5], cfg[10]):
-                pw.append(('unit %d: RKIND 3 flops P3, WQ3, WH3 %s, want %s' % (i, p3, rk3_flops(cfg[5], cfg[10])),))
+            if p3[1:] != rk3_points(p3[0]):
+                pw.append(('unit %d: RKIND 3 window points WQ3, WH3 %s, want %s for RXP3 %d'
+                           % (i, p3[1:], rk3_points(p3[0]), p3[0]),))
             if v[f['u_rx_run_q'] + i] and v[f['u_rx_kind_q'] + i] == 3:
                 if self.rk3cfg[i] is None:
                     self.rk3cfg[i] = (cfg[5], cfg[10])
                 elif self.rk3cfg[i] != (cfg[5], cfg[10]):
                     self.rk3moved[i] = True     # section 10, defined 8: a write of RXPER or RXOPT in mid-reception
-                bad = rk3_states(p3[0], (cfg[10] >> 9) & 3, v[f['u_rx_g_q'] + i], v[f['u_rx_open_q'] + i],
+                self.rk3after += self.rk3moved[i]
+                bad = rk3_states(p3[0], v[f['u_rg3_q'] + i], v[f['u_rx_g_q'] + i], v[f['u_rx_open_q'] + i],
                                  v[f['u_rx_cand_q'] + i], sx(v[f['u_rx_ph_q'] + i], 25), sx(v[f['u_rx_ce_q'] + i], 13))
-                if bad and self.rk3moved[i]:
-                    self.rk3outside += 1
-                elif bad:
+                if bad:
                     pw.append(('unit %d, a reception of RKIND 3 outside the states its datapath is written for '
-                               '(5.9.6, implementation note): %s' % (i, '; '.join(bad)),))
+                               '(5.9.6, the Period bullet)%s: %s' % (i, ' after a write of RXPER or RXOPT in '
+                               'mid-reception' if self.rk3moved[i] else '', '; '.join(bad)),))
             else:
                 self.rk3cfg[i], self.rk3moved[i] = None, False
             for p, n, l in (('pa_q', 'na_q', 'la_q'), ('pb_q', 'nb_q', 'lb_q')):    # 5.2, implementation note
@@ -689,14 +706,16 @@ class RtlView:
 
 
 def rk3_states(p, rgain, g, op, cd, ph, ce):
-    """What a running reception of RKIND 3 keeps while its period stays as it found it, the states pe_shift.sv's
-    rk3n_f gives the code's results in: () if they hold, else the ones that don't."""
+    """What a running reception of RKIND 3 keeps (5.9.6, the Period bullet: J'), with its own p and RGAIN (RXP3,
+    RXRG), the states pe_shift.sv's rk3n_f gives the code's results in: () if they hold, else the ones that don't."""
     bad = []
+    if not 512 <= p < 4096:
+        bad.append('RXP3 %d' % p)
     if not 1 <= g <= 16:
         bad.append('RXG %d' % g)
     if cd and not op:
         bad.append('RXCAND without RXOPEN')
-    if not (256 - p if op else 0) <= ph < (p + 128 if rgain else (7 * p >> 2) - 128):
+    if not (256 - p if op else 128 - p) <= ph < (p + 128 if rgain else (7 * p >> 2) - 128):
         bad.append('RXPH %d with RXOPEN %d, RGAIN %d and p %d' % (ph, op, rgain, p))
     if cd and not 256 - p <= ce < 0:
         bad.append('RXCE %d with p %d' % (ce, p))
@@ -1527,7 +1546,8 @@ STATS = ('post', 'take', 'stop', 'start', 'abort', 'abort_aimed', 'step', 'step_
          'rdreg_running', 'rdreg_any', 'wrmem', 'rdmem', 'mem_busy', 'caps', 'unknown', 'cut', 'aimed_late_run',
          'aimed_mail', 'aimed_abort_pin', 'aimed_stop', 'aimed_step', 'stale_poke', 'cycles', 'retired', 'ill',
          'wrmem_busy', 'rdmem_busy', 'resets', 'stop_start', 'halves_differ', 'rk3', 'byte_end', 'rk3_both',
-         'rk3_deadline', 'rk3_mend', 'rk3_outside')
+         'rk3_deadline', 'rk3_mend', 'rk3_after', 'rk3_good',
+         'can_racq', 'can_vio')
 
 
 class Env:
@@ -1575,8 +1595,8 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
         hold = rng.choice((1, 3, 20, 200))
     elif gen == 'half':
         (words, pcs), depth = image_half(rng, seed), 128
-    elif gen == 'rk3':
-        (words, pcs, levels), depth = image_rk3(rng, cycles), 128
+    elif gen in ('rk3', 'fcs', 'can'):
+        (words, pcs, levels), depth = image_rk3(rng, cycles, gen), 128
     else:
         words, pcs = image_chips(rng), None
     rc = rtl_chip.Chip(depth, seed, 'pins' if mode == 'pins' else 'stub')
@@ -1603,17 +1623,17 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
         last = [(0, 0, 0, 0, 0, 0)] * 4
         f = view.f
         pins = mode == 'pins'
-        half = gen in ('half', 'rk3')
-        # the directed half images and the rk3 ones: a host command in 1 gap of 33, so that stops and ABORTs leave the
-        # senders and receivers time to run
-        quiet = (half and seed % 2 == 0) or gen == 'rk3'
+        half = gen in ('half', 'rk3', 'fcs', 'can')
+        # the directed half images and the rk3, fcs and can ones: a host command in 1 gap of 33, so that stops and
+        # ABORTs leave the senders and receivers time to run
+        quiet = (half and seed % 2 == 0) or gen in ('rk3', 'fcs', 'can')
         for c in range(cycles):
             if gen == 'rows':
                 if hold == 1 or rng.randrange(hold) == 0:
                     e.ui, e.io = rng.getrandbits(8), rng.getrandbits(8)
             elif half:
                 half_levels(rng, e)
-                if gen == 'rk3':
+                if gen in ('rk3', 'fcs', 'can'):
                     rk3_levels(levels, c, e)
             else:
                 if rng.random() < 0.3:
@@ -1656,6 +1676,7 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
             pre3 = [(t.u.RXRUN and t.u.RXKIND == 3, t.u.RXOPEN and t.u.RXCAND,
                      t.u.REOP and not t.u.RXVIO and (t.u.RXTOT & 7) != 0,
                      ((m.SYNC3 ^ m.SYNC2F) >> t.u.RPIN) & 1, ((m.SYNC2F ^ m.SYNC2) >> t.u.RPIN) & 1) for t in m.th]
+            was = [t.u.RXRUN for t in m.th]
             rc.cycle(ui, lvl, ui_f, lvl_f)
             if half:
                 m.cycle(ui, lvl, ui_f, lvl_f)
@@ -1668,6 +1689,10 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
                     st['rk3_both'] += e1 and e2
                     st['rk3_deadline'] += cand and not (e1 or e2) and not t.u.RXOPEN
                     st['rk3_mend'] += mend and not t.u.RXRUN and t.u.RXN == t.u.RXN8 and t.u.RXSR == t.u.RXSR8
+                    st['rk3_good'] += bool(not t.u.RXRUN and t.u.RXEF & 1)
+            for t, w in zip(m.th, was):         # CAN's receive rules: RESYNC with RACQ, and SMODE 2's end (5.9.6, 5.9.7)
+                st['can_racq'] += bool(t.u.RXRUN and t.u.RXKIND == 0 and t.u.RESYNC and t.u.RACQ)
+                st['can_vio'] += bool(w and not t.u.RXRUN and t.u.RXEF & 2 and t.u.SMODE == 2)
             h.c = c
             h.service()
             if h.busy():                        # a host command lands in cycle c of both: h = c
@@ -1716,7 +1741,7 @@ def run(seed, cycles, depth, gen, mode, extra, st, rows_log=None, release=None):
         st['cycles'] += cycles
         st['retired'] += sum(t.retired for t in m.th)
         st['ill'] += sum(t.ILL for t in m.th)
-        st['rk3_outside'] += view.rk3outside
+        st['rk3_after'] += view.rk3after
     finally:
         if release:
             release(rc)
@@ -2111,7 +2136,8 @@ def job(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('--gen', default='chips', choices=('chips', 'prog', 'rows', 'wide', 'directed', 'half', 'rk3'))
+    ap.add_argument('--gen', default='chips', choices=('chips', 'prog', 'rows', 'wide', 'directed', 'half', 'rk3',
+                                                     'fcs', 'can'))
     ap.add_argument('--images', type=int, default=200)
     ap.add_argument('--cycles', type=int, default=6000)
     ap.add_argument('--first', type=int, default=0, help='first seed')
@@ -2131,7 +2157,8 @@ def main(argv=None):
         rtl_chip.BUILD = os.environ['PE_BUILD']
     if a.corners:
         return corners_main(a)
-    depths = [512] if a.gen in ('prog', 'wide', 'directed') else [128] if a.gen in ('half', 'rk3') else \
+    depths = [512] if a.gen in ('prog', 'wide', 'directed') else [128] if a.gen in ('half', 'rk3', 'fcs', 'can') \
+        else \
         [int(x) for x in a.depths.split(',')]
     for d in depths:
         rtl_chip._load('pins' if a.host == 'pins' else 'stub', d)     # fail early if a model is missing
@@ -2186,9 +2213,11 @@ def main(argv=None):
            'receptions the byte end ended at a byte boundary %d' % (total['halves_differ'], total['rk3'],
                                                                      total['byte_end']),
            'RKIND 3: unit cycles with an edge in both halves %d, bits a candidate gave at its deadline %d, receptions '
-           'the Manchester byte end ended at a byte boundary %d; unit cycles outside the states its datapath is '
-           'written for after a write of RXPER or RXOPT in mid-reception %d'
-           % (total['rk3_both'], total['rk3_deadline'], total['rk3_mend'], total['rk3_outside']),
+           'the Manchester byte end ended at a byte boundary %d, that passed the CRC check %d; unit cycles of '
+           'receptions after a write of RXPER or RXOPT in mid-reception %d'
+           % (total['rk3_both'], total['rk3_deadline'], total['rk3_mend'], total['rk3_good'], total['rk3_after']),
+           'timed samples: unit cycles of a reception with RESYNC and RACQ %d; receptions ended by a stuff violation '
+           'with SMODE 2 %d' % (total['can_racq'], total['can_vio']),
            'events: sends started %d, words received %d, CRC passes (end flag 0) %d, stuff bits sent %d, underruns %d, '
            'overruns %d; images with light or sparse host traffic %d'
            % (total['tx_starts'], total['rx_words'], total['crc_pass'], total['stuff_bits'], total['ur'], total['ovr'],

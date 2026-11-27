@@ -15,19 +15,20 @@
 ; - MOUT gets each received frame's words as they arrive, count of them, the last one right after its status.
 ;   They hold the frame's destuffed bits from SOF to the CRC delimiter, the first in bit 15; the last word holds n
 ;   bits.  flags are the end flags of section 5.9.7: 1 is a good frame (acknowledged); 0 a CRC or delimiter error,
-;   2 or 6 a stuff error (an error flag is sent for both).  A reception under 16 bits isn't reported.
+;   2 a stuff error (an error flag is sent for both).  A reception under 16 bits isn't reported.
 ;
 ; How each step holds (section numbers are docs/ISA.md):
-; - Receive (5.9.6, 5.9.7): timed samples, SPU cycles after each edge of RXD (RESYNC, RGAIN 0) and B after the
-;   last sample, starting at a hunted falling edge (SOF).  Destuffing with SMODE 2, N 5; CRC-15 from SOF on
-;   (SYNCLEN 0, CSKIP 0), MSB first (RMSB).  RXCNT = 35 + 8 x min(DLC, 8), or 35 for a remote frame, ends the
-;   reception at the CRC delimiter: a stuff bit after the CRC sequence is dropped inside it, and the ACK slot is
-;   the next bit.  CHK is the good residue 0 fed the delimiter's 1, which is POLY, so a dominant delimiter fails
-;   the check too.  The DLC is whole only in the second word, at bit 32, so RXCNT is written within 3 bit times
-;   of it (at DLC 0): 56 to 60 cycles after that word's last sample here.  The receive half hunts again after
-;   every reception; the tail that an ACK or an error flag starts is a reception under 16 bits, dropped.
-; - RESYNC pulls the sample on rising edges too (11.5), so a dominant bit stretched by more than B - SPU cycles,
-;   by a transceiver or by two transmitters out of step in arbitration, moves the next sample into the next bit.
+; - Receive (5.9.6, 5.9.7): timed samples, SPU cycles after each falling edge of RXD (RESYNC and RACQ, RGAIN 0)
+;   and B after the last sample, starting at a hunted falling edge (SOF).  Destuffing with SMODE 2, N 5; CRC-15
+;   from SOF on (SYNCLEN 0, CSKIP 0), MSB first (RMSB).  RXCNT = 35 + 8 x min(DLC, 8), or 35 for a remote frame,
+;   ends the reception at the CRC delimiter: a stuff bit after the CRC sequence is dropped inside it, and the ACK
+;   slot is the next bit.  CHK is the good residue 0 fed the delimiter's 1, which is POLY, so a dominant delimiter
+;   fails the check too.  The DLC is whole only in the second word, at bit 32, so RXCNT is written within 3 bit
+;   times of it (at DLC 0): 56 to 60 cycles after that word's last sample here.  The receive half hunts again
+;   after every reception; the tail that an ACK or an error flag starts is a reception under 16 bits, dropped.
+; - Only recessive-to-dominant edges resynchronize (Bit Timing Requirements, synchronization rules): RACQ keeps
+;   RESYNC to edges to HLVL, dominant (5.9.6).  So a dominant bit that a transceiver, or two other transmitters
+;   out of step in arbitration, stretch at RXD moves no sample, as long as the stretch ends before SPU.
 ; - ACK (data frame, ACK field): the ACK bit waits in the send half as a 1-bit word of no kind, armed.  After the
 ;   last word, a good end flag starts it with a commit 21 cycles after the rxw, which is 1 to 4 cycles after the
 ;   receiver's own start of the ACK slot (the last word reaches the buffer one cycle after the delimiter's
@@ -49,16 +50,16 @@
 ;   cycles), so the receive half goes on from the CRC of the bus bits before it (section 10 item 17), checks the
 ;   frame, and the node acknowledges it like any other.
 ; - Error flags (error frame; error signalling): six dominant bits, a 6-bit word of no kind, not stuffed.  After
-;   a stuff error at once (the reception ends a bit after the violation, so the flag starts a bit or more late,
-;   which the superposition of error flags allows); after a CRC error at the bit after the ACK delimiter; after a
-;   bit error or a missing ACK at the next bit.
+;   a stuff error at once: with SMODE 2 the reception ends at the violating bit (5.9.7), so the flag starts in
+;   the next bit, as error signalling asks, 0.3 bit times into it; after a CRC error at the bit after the ACK
+;   delimiter; after a bit error or a missing ACK at the next bit.
 ; - Not done: extended frames (IDE 1) are taken for errors; no error counters or error-passive state, no overload
 ;   frames.
 .equ TXP io0
 .equ RXP ui6
 .equ NRX 6
 .equ B 100              ; cycles per bit
-.equ SPU 75             ; the receive half samples SPU cycles after an edge
+.equ SPU 75             ; the receive half samples SPU cycles after a falling edge
 .equ SPF 40             ; the firmware's check point in each bit of its own frame
 .equ TID 0              ; the thread this image runs on: its mailbox word takes send requests
 .equ MOUT 4             ; received words, as they arrive
@@ -89,7 +90,7 @@ start:  sstop txrx              ; a unit isn't reset when its thread starts
         scfg  R0, RXFIRST
         li    R0, 0x0024 | (NRX << 8)   ; timed samples, RMSB, HUNT for a falling edge of RXD
         scfg  R0, RXMODE
-        li    R0, 0x0100        ; RESYNC, RGAIN 0
+        li    R0, 0x0900        ; RESYNC and RACQ, RGAIN 0: only falling edges (to HLVL) pull
         scfg  R0, RXOPT
         li    R0, 0x8B32        ; x^15 + x^14 + x^10 + x^8 + x^7 + x^4 + x^3 + 1, left-aligned
         scfg  R0, POLYHI

@@ -338,6 +338,28 @@ def main(log):
     log.check('one of two echo requests left unanswered: exactly one failure, for it, and the other\'s reply passes',
               len(f) == 1 and f[0][1] == 'icmp_reply' and 'seq 1' in f[0][2] and rep.checks()['icmp_reply'] == (1, 1),
               f)
+    # excess bits (802.3 4.2.9): a frame followed by 1 to 7 bits is truncated to its whole octets and then judged.
+    # With a good FCS it is kept, so a request needs its reply (none is sent here: arp_reply fails); with a bad FCS
+    # it is an alignmentError (4.2.4.2.1 b) that nothing may answer. The last case has an odd number of octets
+    ok, seen = True, []
+    erng = random.Random(9)
+    req = frame(eth_check.BROADCAST, PEER_MAC, 0x0806, arp(1, PEER_MAC, PEER_IP, bytes(6), IP))
+    odd = frame(eth_check.BROADCAST, PEER_MAC, 0x0806, arp(1, PEER_MAC, PEER_IP, bytes(6), IP) + bytes(19))
+    for k, base in [(k, req) for k in range(1, 8)] + [(3, odd), (7, odd)]:
+        for bad in (False, True):
+            f = frame(eth_check.BROADCAST, PEER_MAC, 0x0806, arp(1, PEER_MAC, PEER_IP, bytes(6), IP) +
+                      (bytes(19) if base is odd else b''), bad_fcs=bad)
+            line, _ = manchester(preamble() + f + [erng.getrandbits(1) for _ in range(k)], 1e6)
+            r = eth_check.check([], line, mac=MAC, ip=IP)
+            rf = r.rx_frames
+            n = len(f) // 8
+            good = (len(rf) == 1 and rf[0].octets is not None and len(rf[0].octets) == n and
+                    bool(rf[0].fields.get('fcs_ok')) != bad and r.failing_checks() == ([] if bad else ['arp_reply']))
+            ok &= good
+            seen.append((k, n, bad, good))
+    log.check('a frame with 1 to 7 bits after its FCS is judged on its whole octets (802.3 4.2.9): a good FCS needs '
+              'its reply, a bad one is an alignmentError nothing may answer; also a frame of 65 octets',
+              ok and len(seen) == 18, [x for x in seen if not x[3]] or '%d cases' % len(seen))
     # 7.5.2.2's receive test signal: 47 preamble bits, random jitter up to 12 ns on preamble transitions and
     # 18 ns on frame transitions. The checker must decode it, since the benches send it to the chip.
     rng = random.Random(7)

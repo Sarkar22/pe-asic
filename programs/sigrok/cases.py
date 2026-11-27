@@ -2855,6 +2855,21 @@ def g_can_unit(runner, log):
     can_check(b, ctx, lambda got, errs: (got[:3] == w2 and all('rame' in e or 'EOF' in e or 'eof' in e for e in errs),
                                          'sigrok %s %s' % (short(got), short(errs))))
     b.close()
+    # two other nodes arbitrate, the loser lam cycles behind the winner, so every dominant bit of the arbitration
+    # field is lam cycles longer on the bus; only falling edges resynchronize the chip's receive half (RACQ)
+    b = Batch(runner, 'receive as a third node while two others arbitrate 25 to 70 cycles apart at 500 kbit/s and 13 '
+              'to 35 at 1 Mbit/s: the winner\'s frame, ACKed by the chip', 'frames')
+    win, lose = (0x244, [9]), (0x246, [1, 2])
+    bw = C.frame_bits(*win)
+    for bit, lam in ((100, 25), (100, 50), (100, 70), (50, 13), (50, 35)):
+        ctx = b.run('can_unit_third_%d_%d' % (bit, lam), can_unit_run,
+                    lambda bit=bit, lam=lam: [K.Sender([(4000, bw)], float(bit)),
+                                              CU.LagRival(C.frame_bits(*lose), float(bit), start=4000 + lam)],
+                    cycles=4000 + len(bw) * bit + 3000, b=bit)
+        can_check(b, ctx, [can_expect(*win)], bit=bit)
+        if ctx.value != [CU.want_rx(*win)]:
+            b.fail(ctx.name, 'the firmware reported %s' % short(ctx.value))
+    b.close()
     b = Batch(runner, 'transmit 6 frames, ACKed by another node; at 1 Mbit/s; every thread and alignment', 'frames')
     for ident, data in F:
         n = len(C.frame_bits(ident, data)) - 9

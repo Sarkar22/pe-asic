@@ -12,8 +12,9 @@
 #    - verif/lockstep.py, the RTL against sim/sim.py every cycle, with each generator and host mode, long images
 #      that pass TB's wrap, the half-cycle images (both halves of every pad, inputs with their own falling-edge
 #      levels: THALF, RKIND 3, REOP's byte end), the RKIND 3 images (IEEE 802.3 Manchester frames on four pins at
-#      both clock edges: jitter, phase steps, pulses inside a cycle, the Manchester byte end), and the scripted
-#      corner cases;
+#      both clock edges: jitter, phase steps, pulses inside a cycle, the Manchester byte end), the same with frames
+#      that carry a real FCS and RXOPT written in mid-reception, the CAN-like images (timed samples with RESYNC and
+#      RACQ, SMODE 2's end at a stuff violation), and the scripted corner cases;
 #    - every bench of programs/check.py, with the RTL in place of sim/sim.py (every check must pass).
 #    Each run must pass: the script stops at the first that fails.
 # 3. Writes the reports: OUT/code.md (per module), OUT/code_uncovered.txt (every point never hit), OUT/func.md
@@ -81,6 +82,8 @@ lockstep long_wide  --gen wide  --images "$(n 16)" --cycles 70000 --first 420000
 lockstep directed   --gen directed --images 3 --cycles 70000 --first 430000
 lockstep half       --gen half --images "$(n 600)" --first 600000
 lockstep rk3        --gen rk3 --images "$(n 400)" --first 700000
+lockstep fcs        --gen fcs --images "$(n 400)" --first 800000
+lockstep can        --gen can --images "$(n 400)" --first 900000
 lockstep corners    --corners
 
 echo "== every program bench on the RTL"

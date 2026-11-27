@@ -12,7 +12,45 @@ What the tests cover: reset state, CAPS, MISO timing, memory read and write with
 
 Three more tests run the same exchange under other conditions, each under 100,000 cycles. `test_eth_fixed_jitter` sends the three frames with section 7.3's fixed pattern at 802.3's limit: every bit-boundary transition 13.5 ns late and every mid-bit one 13.5 ns early (typical corner, sampling phase 14.2 ns). `test_eth_short_pulses` sends them with its mirror, bit-boundary transitions early and mid-bit ones late, at the transceiver model's slowest corner, whose 4 ns skew turns the pair's 23 ns pulses into 19 ns pulses of RO, at a sampling phase of 4.9 ns, where the test first checks on RO itself that every such pulse falls between two rising-edge samples: only the falling-edge sample sees them. `test_eth_dribble` sends frames that end 1 to 7 bits after their FCS, which an 802.3 MAC truncates to whole octets before it checks the FCS (4.2.9; 4.2.4.2.1 b), and which the program receives with the Manchester byte end (REOP with RKIND 3, 5.9.7): an ARP request with 1 excess bit, an echo request with 7 and an ARP request from another address with 5 must be answered and the program must count them kept, and an ARP request with an FCS error and 4 excess bits dropped, with random jitter up to +/-13.5 ns on every transition, at the fastest corner, phase 9.6 ns.
 
+Five more run it at the receiver's limits (5.9.6), each under 100,000 cycles. `test_eth_cable_isi` sends the three
+frames with a cable's data-dependent jitter at 802.3's limit, every transition after a whole bit with none 13.5 ns
+late and every other one 13.5 ns early (typical corner, phase 3.1 ns); there `eth_check.py` reads the requests from
+the line as built, before its jitter, since its own decoder looks for each mid-bit transition within a quarter bit
+of its prediction, which this jitter moves past in one step. `test_eth_short_link` takes 802.3
+B.4.1's jitter budget for a short link: a transmitter equalized for the longest cable gives a short one the reverse
+sign of a cable's data-dependent jitter, every transition after a whole bit with none 6 ns early and every other one
+6 ns late (B.4.1's 6.0 ns for the medium with equalization), plus +/-6.5 ns at random on each, the rest of the 12.5 ns
+that 14.3.1.3.1 leaves beside the MAU receiver's 1.5, at the transceiver model's slowest corner with the receiver's
+skew reversed. `test_eth_mirror_uaa` sends the three frames from a universally administered source address (802.3
+3.2.3 c), as a network card would, with the mirror of the fixed pattern at the slowest corner, phase 5.1 ns.
+`test_eth_excess_fixed` and `test_eth_excess_mirror` send ARP requests that end in excess bits, under the fixed pattern
+and under its mirror: good frames with 2, 3, 4, 6 and 7 excess bits (the 7 ending in a 1), which must be answered and
+counted kept, and frames with FCS errors and 1, 3 and 6, which must be dropped. With `test_eth_dribble`, every count
+from 1 to 7 is answered on a good frame. Seven excess bits that end in a 0 under the fixed pattern are one of section
+7.3's stated limits, and none of these tests sends them.
+
 `test_unit_rdiff` receives on `ui5` with RKIND 3 and RDIFF (5.9.6) from a line driven at both clock edges: three frames of biphase mark at 6.144 Mbit/s, S/PDIF's bit rate at 96 kHz, whose clock edges are the bit starts, and three of differential Manchester at 4 Mbit/s, IEEE 802.5's Token Ring rate, whose clock edges are mid-bit, received with RINV; 40 to 159 random bits a frame, every change moved by a random amount up to +/-10 ns (biphase mark) or +/-20 ns, and the line's bit time 0.1% off the unit's. The words the unit receives must be the bits that `ref_decode` finds on the line as the pad saw it, and those must be the bits sent. `ref_decode` is written from the codes' definitions alone, biphase mark as AES3's channel coding gives it (EBU Tech 3250, 2.3: each bit a symbol of two states, the first state different from the previous symbol's second, the second equal to the first for a 0 and different for a 1) and differential Manchester as section 5.9.5's table gives IEEE 802.5's, and reads only the levels the pad got in each half cycle: about one bit between two changes, or two of about half a bit, and nothing else. About 19,000 cycles.
+
+`test_unit_rper2_clean` receives three clean Manchester lines of 81 bits on `ui5` with RKIND 3 at RPER 2 with a
+fraction, p = 586, 594 and 595, and RGAIN 0, a full pull: there the predicted clock edge can sit up to 128 256ths of a
+cycle after the line's, more than *p*/8, so the keep test's bound is 128 at RPER 2 (5.9.6). The unit must give exactly
+the line's bits, one reception a line. A bound of *p*/8 loses all three lines. About 10,000 cycles.
+
+`test_can_third_node` and `test_can_stuff_error_flag` load `../programs/advanced/can_unit.s` on thread 0 and play a
+CAN bus at 500 kbit/s at the pins with the bus model of `../programs/bench/can_unit.py`: TXD on `io0`, open drain,
+through a transmit path of 5 cycles to a wired-AND bus with the bench's reference nodes, and the bus through a receive
+path of 5 cycles to RXD on `ui6`. In the first, two other nodes arbitrate with the loser 50 cycles behind the winner,
+so every dominant bit of the arbitration field reaches RXD 50 cycles longer. A CAN node resynchronizes on
+recessive-to-dominant edges only (Bosch CAN 2.0 part A, the synchronization rules), and so does the unit with RESYNC
+and RACQ (5.9.6): the chip must report the winner's frame and acknowledge it, and the bench's reference decoder must
+read one clean frame on the bus. With every edge pulling the sample point, the chip loses this frame. In the second,
+a sender makes a stuff error in each of three frames and then releases the bus. With SMODE 2 the reception ends at
+the violating bit (5.9.7), so the chip's error flag must start within the next bit, as Error Signalling asks (here
+0.29 bit times into it), and the chip must report a stuff error. About 35,000 and 58,000 cycles.
+`test_can_third_node_mid` is the first with the loser 60 cycles behind and every edge of RXD in the second half of
+its cycle, after the falling-edge sample, where the cycle's two samples differ (section 3.1): timed samples take an
+edge and its level from the rising-edge samples (5.9.6), so the chip must report the same frame. About 35,000
+cycles.
 
 `test_usb_enumerate` loads `../programs/advanced/usb_enum.s` on threads 0, 1 and 2 and plays a USB host at the pins: the bus model of `../programs/bench/frontend.py` (the device's 1.5 kohm pull-up on D-, the host's pull-downs) between `io0` (D+) and `io1` (D-), and the host model of `../programs/bench/usb_enum.py`, whose packets are built from USB 2.0 by `../programs/bench/usb_check_test.py`. The host reads the 18-byte device descriptor at address 0 in packets of 8, sets address 12, reads the descriptor there with one of its ACKs lost, gets a NAK for an IN with nothing due, drives a 50 us SE0 that the device takes as a reset, then reads 8 bytes at address 0 and finds address 12 silent. Every packet the host sends carries dribble bits before its EOP, 1 to 6 bit times in turn, fewer where the packet's own final 1s leave less room for USB 2.0 7.1.9.1's six, which the units' byte end drops in hardware (5.9.7). The record of D+ and D- must pass every check of `../programs/bench/usb_check.py`, told to take that SE0 as a reset (a 10 ms one would be 500,000 cycles): bit rate, jitter, SYNC, stuffing, PIDs, CRCs, EOP, inter-packet delay and response time, the control transfers with their toggles, the retry and the address change, and the descriptor. The program's counters, read with RDMEM, must show address 0, 4 SETUPs and 4 completed transfers. About 147,000 cycles.
 

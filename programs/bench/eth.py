@@ -87,8 +87,12 @@ class Line:
         """One frame from t (ns): pre preamble bits, the SFD, the bits, TP_IDL of tp_hi bit times (optionally a
         negative tail of tp_lo). jitter: None, ('uniform', pre_ns, frame_ns), random per transition as 802.3
         7.5.2.2 builds its test signal, ('alt', ns), bit-boundary transitions early and mid-bit ones late (late
-        and early for a negative ns), or ('step', ns), every transition from a random bit of the frame on (preamble
-        to the last bit) moved ns later, TP_IDL with it. Returns the end of the last bit cell."""
+        and early for a negative ns), ('step', ns), every transition from a random bit of the frame on (preamble
+        to the last bit) moved ns later, TP_IDL with it, ('pwd', ns), every transition to HI ns late and every one
+        to LO ns early (the reverse for a negative ns), or ('isi', ns, r), a cable's data-dependent jitter: every
+        transition that follows a whole bit with none ns late and every other one ns early, which is how a
+        low-pass link moves them (a negative ns is the reverse sign, a transmitter equalized for a long cable on a
+        short one, B.4.1), plus random jitter of +/-r. Returns the end of the last bit cell."""
         pre = self.pre if pre is None else pre
         jit = self.jitter if jitter is None else jitter
         allbits = G.preamble(pre) + bits
@@ -96,6 +100,20 @@ class Line:
         if jit and jit[0] == 'step':
             j, s = self.rng.randrange(len(allbits)), jit[1]
             jd = {h: (s if h >= 2 * j else 0.0) for h in range(2 * len(allbits))}
+        elif jit and jit[0] in ('pwd', 'isi'):
+            halves = []
+            for b in allbits:
+                halves += [-1 if b else 1, 1 if b else -1]       # manchester()'s levels
+            last, lh = 0, None
+            for h, lv in enumerate(halves):
+                if lv == last:
+                    continue
+                if jit[0] == 'pwd':
+                    jd[h] = jit[1] if lv == 1 else -jit[1]
+                else:
+                    whole = lh is not None and h - lh >= 2      # a whole bit with no transition before it
+                    jd[h] = (jit[1] if whole else -jit[1]) + (self.rng.uniform(-jit[2], jit[2]) if jit[2] else 0.0)
+                last, lh = lv, h
         elif jit:
             for h in range(2 * len(allbits)):
                 if jit[0] == 'uniform':
@@ -233,29 +251,35 @@ def long_run(seed=1, **kw):
     return L, t + 34e6
 
 
-def frames_only(n, seed, jitter=None, phase_seed=0, octets=46, **kw):
+def frames_only(n, seed, jitter=None, phase_seed=0, octets=46, src=None, **kw):
     """n broadcast frames of 64 octets (data of 46) with random data, 96 bit times apart plus 3 us: R keeps each, T
-    drops each."""
+    drops each. src: the source address (PEER_MAC, locally administered, by default)."""
     L = Line(seed, jitter=jitter, **kw)
     t = 0.3e6
     for _ in range(n):
-        t = L.frame(G.frame(BCAST, PEER_MAC, 0x88B5, bytes(L.rng.randrange(256) for _ in range(octets))), t) + 12.6e3
+        t = L.frame(G.frame(BCAST, src or PEER_MAC, 0x88B5, bytes(L.rng.randrange(256) for _ in range(octets))),
+                    t) + 12.6e3
     return L, t + 50e3
+
+
+UAA_MAC = bytes.fromhex('001b213a5c7e')          # a universally administered source (3.2.3 c): a real ARP's shape
 
 
 PH8 = (1.9, 4.3, 6.1, 8.7, 11.3, 13.9, 16.6, 19.1)     # sampling phases (ns), none a multiple of 2.5
 CORNERS = ('typ', 'max', 'min')
 
 
-def rx_row(jit, seed, n=20, corners=CORNERS, phases=PH8, duty=0.0, bt=BT, octets=46):
+def rx_row(jit, seed, n=20, corners=CORNERS, phases=PH8, duty=0.0, bt=BT, octets=46, skew=1, src=None):
     """Frames lost, sent less kept (NKEEP), for each FN6307 corner and sampling phase: runs of n frames, each run
-    with its own seed. Returns ({corner: [lost per phase]}, health problems)."""
+    with its own seed. skew -1 swaps the receiver's skew (the data sheet bounds only its size). Returns ({corner:
+    [lost per phase]}, health problems)."""
     lost, health = {}, set()
     for ci, corner in enumerate(corners):
         lost[corner] = []
+        over = None if skew > 0 else dict(skew_rx=-frontend.Rs485Eth.CORNERS[corner]['skew_rx'])
         for k, ph in enumerate(phases):
-            L, t = frames_only(n, seed=seed + 37 * k + ci, jitter=jit, bt=bt, octets=octets)
-            r = run(L, t, corner=corner, phase=ph, check=False, duty=duty)
+            L, t = frames_only(n, seed=seed + 37 * k + ci, jitter=jit, bt=bt, octets=octets, src=src)
+            r = run(L, t, corner=corner, phase=ph, check=False, duty=duty, fe_over=over)
             lost[corner].append(n - r.count['NKEEP'])
             health |= set(r.health)
     return lost, sorted(health)
@@ -663,6 +687,54 @@ def main(log):
         log.check('jitter: %s, 20 frames at each of 8 sampling phases (none a multiple of 2.5 ns) and 3 FN6307 '
                   'corners, none of 480 lost' % what, not total(lost) and not hl, 'lost %s%s' % (
                       lost, ', %s' % hl if hl else ''))
+    # the receiver's own rows (sections 5.9.6, 7.3): the receiver's skew either way, transitions to HI late and to
+    # LO early and the reverse, a cable's data-dependent jitter in both signs, alone and with random jitter making
+    # +/-13.5 ns (B.4.1's budget), and broadcast frames from a universally administered source
+    rows = [('+/-13.5 ns random, the receiver\'s skew reversed', ('uniform', 13.5, 13.5), CORNERS, -1, None),
+            ('bit-boundary transitions 13.5 ns late and mid-bit ones 13.5 ns early, the receiver\'s skew reversed',
+             ('alt', -13.5), CORNERS, -1, None),
+            ('bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late, the receiver\'s skew reversed',
+             ('alt', 13.5), CORNERS, -1, None),
+            ('transitions to HI 13.5 ns late and to LO 13.5 ns early', ('pwd', 13.5), CORNERS, 1, None),
+            ('transitions to HI 13.5 ns early and to LO 13.5 ns late', ('pwd', -13.5), CORNERS, 1, None),
+            ('transitions to HI 13.5 ns late and to LO 13.5 ns early, the receiver\'s skew reversed', ('pwd', 13.5),
+             CORNERS, -1, None),
+            ('transitions to HI 13.5 ns early and to LO 13.5 ns late, the receiver\'s skew reversed', ('pwd', -13.5),
+             CORNERS, -1, None),
+            ('a cable\'s data-dependent jitter of 13.5 ns: transitions after a whole bit late, the others early',
+             ('isi', 13.5, 0.0), CORNERS, 1, None),
+            ('the same, 13.5 ns, the receiver\'s skew reversed', ('isi', 13.5, 0.0), CORNERS, -1, None),
+            ('the same, 6 ns of it with +/-7.5 ns random', ('isi', 6.0, 7.5), CORNERS, 1, None),
+            ('the same, 10 ns of it with +/-3.5 ns random', ('isi', 10.0, 3.5), CORNERS, 1, None),
+            ('the same, 3.5 ns of it with +/-10 ns random (B.4.1\'s link of the greatest length)', ('isi', 3.5, 10.0),
+             CORNERS, 1, None),
+            ('the reverse sign, transitions after a whole bit early, 10 ns', ('isi', -10.0, 0.0), CORNERS, 1, None),
+            ('the reverse sign, 6 ns of it with +/-6.5 ns random (B.4.1\'s short link)', ('isi', -6.0, 6.5), CORNERS,
+             1, None),
+            ('the reverse sign, 7 ns of it with +/-5.5 ns random', ('isi', -7.0, 5.5), CORNERS, 1, 'info'),
+            ('the reverse sign, 4 ns of it with +/-9.5 ns random', ('isi', -4.0, 9.5), CORNERS, -1, None),
+            ('bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late, broadcast frames from a '
+             'universally administered source', ('alt', 13.5), CORNERS, 1, UAA_MAC)]
+    for i, (what, jit, corners, skew, src_mac) in enumerate(rows):
+        info = src_mac == 'info'            # past this receiver's limit (section 7.3): reported, not checked
+        lost, hl = rx_row(jit, 87000 + 1009 * i, corners=corners, skew=skew, src=None if info else src_mac)
+        if info:
+            log.info('receive at this receiver\'s limit (section 7.3): %s, frames lost of %d: %d (%s)%s' % (
+                what, 160 * len(corners), total(lost), lost, ', %s' % hl if hl else ''))
+            continue
+        log.check('jitter: %s, 20 frames at each of 8 sampling phases and %d FN6307 corners, none of %d lost' % (
+            what, len(corners), 160 * len(corners)), not total(lost) and not hl, 'lost %s%s' % (
+                lost, ', %s' % hl if hl else ''))
+    for what, jit in (('the reverse sign of a cable\'s data-dependent jitter, 12 ns', ('isi', -12.0, 0.0)),
+                      ('the reverse sign, 8 ns of it with +/-5.5 ns random', ('isi', -8.0, 5.5))):
+        lost, hl = rx_row(jit, 88000 + int(10 * abs(jit[1])))
+        log.info('receive past this receiver\'s limit (section 7.3): %s, frames lost of 480: %d (%s)%s' % (
+            what, total(lost), lost, ', %s' % hl if hl else ''))
+    lost, hl = rx_row(('alt', 13.5), 89000, corners=('max',), phases=[0.25 * k for k in range(80)], src=UAA_MAC)
+    log.check('jitter: bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late at FN6307\'s slowest '
+              'corner, broadcast frames from a universally administered source, 20 frames at each of 80 sampling '
+              'phases 0.25 ns apart, none of 1600 lost', not total(lost) and not hl, 'lost at %s%s' % (
+                  [(0.25 * k, x) for k, x in enumerate(lost['max']) if x] or 'no phase', ', %s' % hl if hl else ''))
     lost, hl = rx_row(('alt', 13.5), 82000, corners=('max',), phases=[0.25 * k for k in range(80)])
     log.check('jitter: bit-boundary transitions 13.5 ns early and mid-bit ones 13.5 ns late at FN6307\'s slowest '
               'corner, whose 4 ns skew makes pulses of 19 ns, 20 frames at each of 80 sampling phases 0.25 ns apart, '

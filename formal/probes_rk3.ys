@@ -1,0 +1,17 @@
+# rk3_unit.sv's probes: the unit's flops it names, after flattening.
+connect -nomap -nounset -set rxrun u.rx_run_q
+connect -nomap -nounset -set rxep u.rx_ep_q
+connect -nomap -nounset -set op u.rx_open_q
+connect -nomap -nounset -set cd u.rx_cand_q
+connect -nomap -nounset -set kind u.rx_kind_q
+connect -nomap -nounset -set ph u.rx_ph_q
+connect -nomap -nounset -set ce u.rx_ce_q
+connect -nomap -nounset -set g u.rx_g_q
+connect -nomap -nounset -set p3 u.p3_q
+connect -nomap -nounset -set wq3 u.wq3_q
+connect -nomap -nounset -set wh3 u.wh3_q
+connect -nomap -nounset -set rxper u.rxper_q
+connect -nomap -nounset -set rxopt u.rxopt_q
+connect -nomap -nounset -set rg u.rg3_q
+connect -nomap -nounset -set ra u.ra3_q
+connect -nomap -nounset -set beg u.do_begin

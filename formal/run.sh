@@ -24,7 +24,8 @@ mkdir -p "$WORK"
 WORK=$(cd "$WORK" && pwd)
 
 JOBS_ALL="pads:prove pads:cover isolation:prove isolation:cover shift_timing:prove shift_timing:cover
-          reset:gen reset:flops_prove reset:flops_cover reset:pads_prove covers_deep:cover chip.eqy"
+          reset:gen reset:flops_prove reset:flops_cover reset:pads_prove rk3_equiv:prove rk3_inv:prove
+          rk3_inv:cover rk3_unit:prove rk3_unit:cover covers_deep:cover chip.eqy"
 
 # Runs one command, in the image if one is set. bitwuzla may sit outside PATH in the image.
 tool() {

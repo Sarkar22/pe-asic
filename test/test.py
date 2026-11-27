@@ -1794,14 +1794,24 @@ def eth_modules():
     return eth_check, G, frontend
 
 
-def eth_requests(G, eth_check):
+UAA_MAC = bytes.fromhex('001b213a5c7e')    # a universally administered address (802.3 3.2.3 c), a network card's
+
+
+def eth_requests(G, eth_check, src=None):
     """An ARP request, an ICMP echo request with 56 data octets and an ARP request with an FCS error, built from IEEE
-    802.3 and RFCs 826 and 792 by programs/bench/eth_check_test.py: bits from the destination address on."""
+    802.3 and RFCs 826 and 792 by programs/bench/eth_check_test.py: bits from the destination address on. src: the
+    partner's address, G.PEER_MAC (locally administered) unless given."""
+    src = src or G.PEER_MAC
     data = bytes((7 * i + 1) & 255 for i in range(56))
-    arp = G.arp(1, G.PEER_MAC, G.PEER_IP, bytes(6), G.IP)
-    return [G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, arp),
-            G.frame(G.MAC, G.PEER_MAC, 0x0800, G.echo(8, G.PEER_IP, G.IP, 0x4321, 9, data)),
-            G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, arp, bad_fcs=True)]
+    arp = G.arp(1, src, G.PEER_IP, bytes(6), G.IP)
+    return [G.frame(eth_check.BROADCAST, src, 0x0806, arp),
+            G.frame(G.MAC, src, 0x0800, G.echo(8, G.PEER_IP, G.IP, 0x4321, 9, data)),
+            G.frame(eth_check.BROADCAST, src, 0x0806, arp, bad_fcs=True)]
+
+
+def arp_request(G, eth_check, spa, bad=False):
+    """An ARP request for the chip's address from spa (4 octets), broadcast from G.PEER_MAC; bad: an FCS error."""
+    return G.frame(eth_check.BROADCAST, G.PEER_MAC, 0x0806, G.arp(1, G.PEER_MAC, spa, bytes(6), G.IP), bad_fcs=bad)
 
 
 def fixed_jitter(G, bits, ns):
@@ -1810,7 +1820,25 @@ def fixed_jitter(G, bits, ns):
     return {h: (-ns if h % 2 else ns) for h in range(2 * len(G.preamble() + bits))}
 
 
-async def eth_link(dut, frames, corner='typ', phase=7.0):
+def isi_jitter(G, bits, ns, r, rng):
+    """A cable's data-dependent jitter on a frame and its preamble, as programs/bench/eth.py's Line gives it: every
+    transition that follows a whole bit with none ns late and every other one ns early, the way a low-pass link moves
+    them; a negative ns is the reverse sign, a transmitter equalized for a long cable on a short one (802.3 B.4.1);
+    plus random jitter of +/-r on each transition."""
+    halves = []
+    for b in G.preamble() + bits:
+        halves += [-1 if b else 1, 1 if b else -1]       # G.manchester()'s levels
+    jd, last, lh = {}, 0, None
+    for h, lv in enumerate(halves):
+        if lv == last:
+            continue
+        whole = lh is not None and h - lh >= 2          # a whole bit with no transition before it
+        jd[h] = (ns if whole else -ns) + (rng.uniform(-r, r) if r else 0.0)
+        last, lh = lv, h
+    return jd
+
+
+async def eth_link(dut, frames, corner='typ', phase=7.0, fe_over=None, check_clean=False):
     """programs/advanced/eth_arp.s on threads 0 and 1, whose units receive with RKIND 3 (edges timed to the half cycle,
     5.9.6) and send with THALF (half bits of exactly 2.5 cycles, 5.9.5), against an EthPartner: the host loads the
     program and posts the MAC and IP, and the partner sends each of `frames`, (bits from the destination address on,
@@ -1820,7 +1848,11 @@ async def eth_link(dut, frames, corner='typ', phase=7.0):
     record of uo4 (DI) and uo5 (DE) in both halves of every cycle, turned back into the transmit pair by the same
     model, must pass every check of programs/bench/eth_check.py, and every transmitted edge must lie within the
     transceiver's own skew of the grid of exact 50 ns half bits (tSKEW/2 + 0.05 ns), so the chip adds no edge jitter
-    at a 50% clock (7.5.2.1, section 7.3). Returns eth_check's counts, the frames the chip sent, the program's
+    at a 50% clock (7.5.2.1, section 7.3). fe_over: values that override the corner's (skew_rx, its sign).
+    check_clean: eth_check reads the partner's frames from the line as built before its jitter, since eth_check's own
+    decoder looks for each mid-bit transition within a quarter bit of its prediction, a window that jitter shaped like
+    a cable's moves past in one step at 13.5 ns; the chip still gets the jittered line.
+    Returns eth_check's counts, the frames the chip sent, the program's
     counters of frames kept and dropped (read with RDMEM), RO as the chip's pad saw it, and the cycles."""
     eth_check, G, frontend = eth_modules()
     host = await start(dut)
@@ -1837,12 +1869,13 @@ async def eth_link(dut, frames, corner='typ', phase=7.0):
     for k in range(0, 10, 2):                   # MAC, then IP: two octets a word, the first in the low byte
         octs = G.MAC + G.IP
         await post_wait(host, 4, octs[k] | octs[k + 1] << 8)
-    fe = frontend.Rs485Eth(corner)
+    fe = frontend.Rs485Eth(corner, **(fe_over or {}))
     t = (partner.c + 200) * 20.0
-    rx = []
+    rx, clean = [], []
     for bits, jitter in frames:
         line, end = G.manchester(G.preamble() + bits, t, jitter=jitter)
         rx += line
+        clean += G.manchester(G.preamble() + bits, t)[0]
         t = end + 150e3
     ro = fe.ro(G.merge(rx))
     partner.drive(ro)
@@ -1854,7 +1887,7 @@ async def eth_link(dut, frames, corner='typ', phase=7.0):
     di, de = changes(4), changes(5)
     moves = sum(1 for h, _ in partner.rec if h & 1)
     tx = fe.tx_line(di, de, di0=0, de0=0)
-    rep = eth_check.check(tx, G.merge(rx), mac=G.MAC, ip=G.IP, t_start=0.0, t_end=t)
+    rep = eth_check.check(tx, G.merge(clean if check_clean else rx), mac=G.MAC, ip=G.IP, t_start=0.0, t_end=t)
     assert rep.ok, f"eth_check: {rep.failed()[:4]}"
     dev = [f.jitter for f in rep.tx_frames if f.jitter is not None]
     limit = fe.p['skew_dd'] / 2 + 0.05
@@ -1946,6 +1979,100 @@ async def test_eth_dribble(dut):
     assert n['tp_idl'] == (3, 0) and n['fcs'] == (3, 0), f"checks {n}"
     assert sent == 3, f"{sent} frames sent, want 3"
     assert (keep, bad) == (3, 1), f"counters: {keep} kept, {bad} dropped; want 3 and 1"
+
+
+@cocotb.test()
+async def test_eth_short_link(dut):
+    """eth_link on 802.3 B.4.1's jitter budget for a short link: a transmitter equalized for the longest cable gives a
+    short one the reverse sign of a cable's data-dependent jitter (isi_jitter), every transition after a whole bit
+    with none 6 ns early and every other one 6 ns late, B.4.1's 6.0 ns for the medium with equalization, plus
+    +/-6.5 ns at random on each, the rest of the 12.5 ns that 14.3.1.3.1's 13.5 ns leaves beside the MAU receiver's
+    1.5. FN6307's slowest corner with the receiver's skew reversed (its data sheet bounds only the size), phase 13.9 ns.
+    Both requests answered, the bad frame dropped."""
+    eth_check, G, frontend = eth_modules()
+    rng = random.Random(23)
+    frames = [(f, isi_jitter(G, f, -6.0, 6.5, rng)) for f in eth_requests(G, eth_check)]
+    over = dict(skew_rx=-frontend.Rs485Eth.CORNERS['max']['skew_rx'])
+    n, sent, keep, bad, _, _ = await eth_link(dut, frames, 'max', 13.9, over)
+    eth_three(n, sent, keep, bad)
+
+
+@cocotb.test()
+async def test_eth_cable_isi(dut):
+    """eth_link with a cable's data-dependent jitter at 802.3's limit (isi_jitter): every transition after a whole bit
+    with none 13.5 ns late and every other one 13.5 ns early, the way a long low-pass link moves them, typical corner,
+    phase 3.1 ns. 5.9.6's structural rule takes the edge after an edge that wasn't a clock edge as the clock edge:
+    without it, or with none of it, the keep test and the no-pull rule for a cycle with an edge in each half, both
+    requests are lost at this phase. eth_check reads the requests as built (check_clean). Both requests answered, the
+    bad frame dropped."""
+    eth_check, G, _ = eth_modules()
+    rng = random.Random(29)
+    frames = [(f, isi_jitter(G, f, 13.5, 0.0, rng)) for f in eth_requests(G, eth_check)]
+    n, sent, keep, bad, _, _ = await eth_link(dut, frames, 'typ', 3.1, check_clean=True)
+    eth_three(n, sent, keep, bad)
+
+
+@cocotb.test()
+async def test_eth_mirror_uaa(dut):
+    """eth_link with the mirror of section 7.3's fixed pattern at 802.3's limit, bit-boundary transitions 13.5 ns early
+    and mid-bit ones 13.5 ns late, at FN6307's slowest corner and a sampling phase of 5.1 ns, on requests from a
+    universally administered source address (UAA_MAC), as from a network card: a frame and phase on which a decoder
+    with none of 5.9.6's structural rule, keep test and no-pull rule for a cycle with an edge in each half loses the
+    ARP request. Both requests answered, the bad frame dropped."""
+    eth_check, G, _ = eth_modules()
+    frames = [(f, fixed_jitter(G, f, -13.5)) for f in eth_requests(G, eth_check, UAA_MAC)]
+    n, sent, keep, bad, _, _ = await eth_link(dut, frames, 'max', 5.1)
+    eth_three(n, sent, keep, bad)
+
+
+def excess_frames(G, eth_check, plan, jitter, rng):
+    """ARP requests from 192.168.0.(10 + k), each followed by its excess bits: plan is [(k, bad FCS, the last excess
+    bit or None for a random one)]. jitter(bits) gives each frame's {half-bit index: ns}."""
+    out = []
+    for i, (k, bad, last) in enumerate(plan):
+        bits = arp_request(G, eth_check, bytes([192, 168, 0, 10 + i]), bad)
+        extra = [rng.getrandbits(1) for _ in range(k)]
+        if last is not None:
+            extra[-1] = last
+        bits = bits + extra
+        out.append((bits, jitter(bits)))
+    return out
+
+
+@cocotb.test()
+async def test_eth_excess_fixed(dut):
+    """eth_link with ARP requests that end 2, 3 and 4 bits after their FCS, and one with an FCS error and 6, under
+    section 7.3's fixed pattern at 802.3's limit (bit-boundary transitions 13.5 ns late, mid-bit ones 13.5 ns early),
+    typical corner, phase 14.2 ns. 802.3's MAC truncates a frame to whole octets before it checks the FCS (4.2.9;
+    4.2.4.2.1 b), and the Manchester byte end does the same (REOP with RKIND 3, 5.9.7): the three are answered and
+    counted kept, the bad one dropped."""
+    eth_check, G, _ = eth_modules()
+    rng = random.Random(31)
+    frames = excess_frames(G, eth_check, [(2, False, None), (3, False, None), (4, False, None), (6, True, None)],
+                           lambda bits: fixed_jitter(G, bits, 13.5), rng)
+    n, sent, keep, bad, _, _ = await eth_link(dut, frames, 'typ', 14.2)
+    assert n['arp_reply'] == (3, 0) and n['icmp_reply'] == (0, 0), f"replies: {n['arp_reply']}, {n['icmp_reply']}"
+    assert n['tp_idl'] == (3, 0) and n['fcs'] == (3, 0), f"checks {n}"
+    assert sent == 3, f"{sent} frames sent, want 3"
+    assert (keep, bad) == (3, 1), f"counters: {keep} kept, {bad} dropped; want 3 and 1"
+
+
+@cocotb.test()
+async def test_eth_excess_mirror(dut):
+    """eth_link with ARP requests that end 6 and 7 bits after their FCS, the 7 ending in a 1, and two with FCS errors
+    and 1 and 3, under the mirror of the fixed pattern at 802.3's limit, FN6307's slowest corner, phase 5.1 ns. With
+    test_eth_dribble and test_eth_excess_fixed, every count of excess bits from 1 to 7 is answered on a good frame.
+    (Seven excess bits ending in a 0 under the fixed pattern are one of 7.3's stated limits: TP_IDL's rise after that
+    0 can come as an eighth bit.) The two good ones are answered and counted kept, the bad ones dropped."""
+    eth_check, G, _ = eth_modules()
+    rng = random.Random(37)
+    frames = excess_frames(G, eth_check, [(6, False, None), (1, True, None), (7, False, 1), (3, True, None)],
+                           lambda bits: fixed_jitter(G, bits, -13.5), rng)
+    n, sent, keep, bad, _, _ = await eth_link(dut, frames, 'max', 5.1)
+    assert n['arp_reply'] == (2, 0) and n['icmp_reply'] == (0, 0), f"replies: {n['arp_reply']}, {n['icmp_reply']}"
+    assert n['tp_idl'] == (2, 0) and n['fcs'] == (2, 0), f"checks {n}"
+    assert sent == 2, f"{sent} frames sent, want 2"
+    assert (keep, bad) == (2, 2), f"counters: {keep} kept, {bad} dropped; want 2 and 2"
 
 
 # ---- RDIFF with RKIND 3: biphase mark and differential Manchester --------------------------------------------------
@@ -2115,6 +2242,241 @@ async def test_unit_rdiff(dut):
     assert second > edges // 4, f"{second} of {edges} changes first seen by a falling-edge sample"
     dut._log.info(f"rdiff: {len(got)} receptions, {sum(map(len, got))} bits, {partner.c} cycles; {second} of {edges} "
                   f"changes first seen by a falling-edge sample")
+
+
+# ---- RKIND 3 at RPER 2: clean lines ---------------------------------------------------------------------------------
+
+RPER2_LINES = ((2, 74, 0), (4, 82, 1), (8, 83, 1))     # (line seed, RFRAC, RACQ), RGAIN 0
+
+
+def clean_line(seed, rf, nbits=80):
+    """A clean Manchester line for RKIND 3 at RPER 2 with fraction rf, a bit every p = 512 + rf 256ths of a cycle:
+    idle 1, a start edge to 0, then for each bit a clock edge every p/256 cycles and, half a bit before it, the edge
+    a repeated level needs, each bit random. Returns (changes in ns after the start edge, the bits as 5.9.6 gives
+    them: the level after each clock edge, the start edge's first; the line's length to 3 bit times after its last
+    clock edge; where the start edge lies against the sampling grid, in ns mod 20)."""
+    rng = random.Random(seed)
+    tb = (512 + rf) / 256.0 * 20.0
+    t0 = 1000.0 + rng.uniform(0, 40)
+    lv, out, bits = 0, [(0.0, 0)], [0]
+    for n in range(1, nbits + 1):
+        if rng.randrange(2):
+            lv ^= 1
+            out.append(((n - 0.5) * tb, lv))
+        lv ^= 1
+        out.append((n * tb, lv))
+        bits.append(lv)
+    return out, bits, (nbits + 3) * tb, (t0 - rng.uniform(0, 20)) % 20.0
+
+
+@cocotb.test()
+async def test_unit_rper2_clean(dut):
+    """5.9.6: RKIND 3 at RPER 2 with a fraction and RGAIN 0, a full pull, on clean Manchester lines (clean_line) on ui5
+    at both clock edges (EthPartner): three lines of 81 bits, p = 586, 594 and 595 (RFRAC 74, 82 and 83; RACQ 0, 1
+    and 1), each starting at its own place against the samples. With a full pull the predicted clock edge can sit up
+    to 128 256ths of a cycle after the line's, more than p/8 at RPER 2, so the keep test's bound is 128 there: the
+    unit must give exactly the line's bits, one reception a line. A bound of p/8 loses these three lines."""
+    host = await start(dut)
+    img = assemble(UNIT_RDIFF)
+    await load_image(host, img)
+    await host.setpc(0, img.labels['rx'])
+    phase = 7.0
+    partner = EthPartner(dut, host, phase, pin=5, idle=1)
+    cocotb.start_soon(partner.run())
+    await host.run(0, 1)
+    sent = []
+    for seed, rf, racq in RPER2_LINES:
+        for k, v in enumerate((0x0523, 2, rf | racq << 11, 1)):    # RKIND 3, HUNT for a fall, RPIN ui5; RPER 2
+            await post_wait(host, k, v)
+        await host.wait(100)
+        line, bits, length, at = clean_line(seed, rf)
+        t = (partner.c + 100) * 20.0 + phase + at
+        changes = [(t + d, lv) for d, lv in line]
+        if bits[-1] == 0:                           # back to 1 once the reception has ended: not an edge to HLVL
+            changes.append((t + length, 1))
+        partner.drive(changes)
+        sent.append(bits)
+        await partner.until(int((t + length) / 20) + 20)
+        assert await take_wait(host, 4) == 380 + 2 * len(sent), "the thread took one reception a line"
+    tbl = await host.rdmem(380, 2 * len(sent))
+    words = await host.rdmem(400, tbl[-2] - 400)
+    prev = 400
+    for k, want in enumerate(sent):
+        w, n = words[prev - 400:tbl[2 * k] - 400], tbl[2 * k + 1] & 31
+        got = [(x >> i) & 1 for x in w[:-1] for i in range(16)] + [(w[-1] >> i) & 1 for i in range(n)]
+        prev = tbl[2 * k]
+        first = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
+        assert got == want, f"line {k}: the unit gave {len(got)} bits, the line has {len(want)}; first difference " \
+                            f"at bit {first}"
+    dut._log.info(f"RPER 2: {len(sent)} clean lines of {len(sent[0])} bits exact, {partner.c} cycles")
+
+
+# ---- CAN 2.0A: programs/advanced/can_unit.s ----------------------------------------------------------------------
+
+def can_modules():
+    """programs/bench's CAN rig (can_unit.py), reference nodes (can.py), frames and decoder (can_wire.py)."""
+    sys.path.insert(0, os.path.join(PROGRAMS_DIR, 'bench'))
+    sys.dont_write_bytecode = True
+    import can as K
+    import can_unit as U
+    import can_wire as C
+    import rig
+    return U, K, C, rig
+
+
+class CanBus:
+    """A CAN bus at the pins, as programs/bench/can_unit.py's rig has it (its Bus): the chip's TXD on io0, open drain,
+    its pad looped back as on the board and released to recessive by a pull-up, through a transceiver's transmit path
+    to a wired-AND bus with the other nodes, and the bus through the receive path to RXD on ui6, each path 5 cycles
+    for either edge. Cycle c counts from the bus's start. At each tick fall RXD takes the bus's output of the cycle
+    before, as the rig gives a device's output to the next cycle, then the bus steps on the pads; the uio pads loop
+    back in both halves. Records RXD and io0 once a cycle. mid: RXD takes its level at tick's rise instead, 5 ns
+    after the falling clock edge, so the falling-edge sample of that cycle still sees the old level and the next
+    rising-edge sample the new one (section 3.1)."""
+
+    def __init__(self, dut, host, nodes, mid=False):
+        self.U, _, _, self.rig = can_modules()
+        self.dut, self.host, self.mid = dut, host, mid
+        self.bus = self.U.Bus(nodes)
+        self.c, self.rxd, self.txd = 0, [], []
+
+    def loop(self):
+        en = int(self.dut.uio_oe.value)
+        io = (int(self.dut.uio_out.value) & en) | (~en & 0xFF)
+        self.dut.uio_in.value = io
+        return io
+
+    async def run(self):
+        rxp = self.U.RXP
+        while True:
+            await FallingEdge(self.dut.tick)
+            val = self.bus.ui_val
+            if not self.mid:
+                self.host.other = (self.host.other & ~(1 << rxp)) | val
+                self.dut.ui_in.value = (self.host.other & 0xF8) | self.host.link
+            io = self.loop()
+            self.rxd.append((val >> rxp) & 1)
+            self.txd.append(io & 1)
+            self.bus.step(self.c, 0, io)
+            self.c += 1
+            await RisingEdge(self.dut.tick)
+            if self.mid:                    # the host's own writes at tick's fall keep the old level till now
+                self.host.other = (self.host.other & ~(1 << rxp)) | val
+                self.dut.ui_in.value = (self.host.other & 0xF8) | self.host.link
+            self.loop()
+
+    async def until(self, c):
+        while self.c < c:
+            await FallingEdge(self.dut.tick)
+
+    def wave(self, levels):
+        t, v = [0], [levels[0]]
+        for k in range(1, len(levels)):
+            if levels[k] != levels[k - 1]:
+                t.append(k)
+                v.append(levels[k])
+        return self.rig.Wave(t, v, len(levels))
+
+
+async def can_node(dut, nodes, mid=False):
+    """can_unit.s on thread 0 of the chip on a CanBus with the reference nodes (mid: CanBus's), and a host that
+    takes its reports, MOUT (4) and MEND (5), as they come. Returns the host, the bus and the two lists of words."""
+    host = await start(dut)
+    host.other = 1 << 6                     # RXD idles recessive
+    host.drive(1, 0, 0)
+    with open(os.path.join(PROGRAMS_DIR, 'advanced', 'can_unit.s')) as fh:
+        img = assemble(fh.read())
+    await load_image(host, img)
+    await host.setpc(0, img.labels['start'])
+    bus = CanBus(dut, host, nodes, mid)
+    cocotb.start_soon(bus.run())
+    await host.run(0, 1)
+    words, ends = [], []
+
+    async def taker():
+        while True:
+            for n, out in ((4, words), (5, ends)):
+                full, hi, lo = await host.take(n)
+                if full:
+                    out.append(hi << 8 | lo)
+    cocotb.start_soon(taker())
+    return host, bus, words, ends
+
+
+@cocotb.test()
+async def test_can_third_node(dut):
+    """5.9.6, timed samples with RESYNC and RACQ, through programs/advanced/can_unit.s at 500 kbit/s as a third node
+    (can_node): two other nodes arbitrate, the loser starting 50 cycles after the winner's SOF reached the bus, as a
+    node with a long transceiver loop does (can_unit.py's LagRival), so every dominant bit of the arbitration field
+    reaches RXD 50 cycles longer, its falling edge from the winner and its rising edge from the loser. A CAN node
+    resynchronizes on recessive-to-dominant edges only (Bosch CAN 2.0 part A, Bit Timing Requirements, the
+    synchronization rules), and so does the unit with RACQ: the stretch moves none of its samples. The chip reports
+    the winner's frame with end flag 1 and ACKs it, the loser drops out, and the reference decoder reads one clean
+    frame on the bus with its ACK. With every edge pulling the sample point, this frame is lost."""
+    U, K, C, _ = can_modules()
+    t0, lam = 4000, 50
+    win, lose = (0x244, [9]), (0x246, [1, 2])
+    bw = C.frame_bits(*win)
+    riv = U.LagRival(C.frame_bits(*lose), 100.0, start=t0 + lam)
+    host, bus, words, ends = await can_node(dut, [K.Sender([(t0, bw)], 100.0), riv])
+    await bus.until(t0 + len(bw) * 100 + 3000)
+    fr = C.decode(bus.wave(bus.rxd), 100, lo=2000)
+    assert U.parse((ends, words)) == [U.want_rx(*win)], f"the chip reported {U.parse((ends, words))}"
+    assert len(fr) == 1 and fr[0]['id'] == win[0] and fr[0]['crc_ok'] and fr[0]['ack'], f"on the bus: {fr}"
+    assert not riv.alive, "the loser did not drop out"
+    dut._log.info(f"CAN third node, lag {lam} cycles: frame {win[0]:#x} reported and acknowledged, {bus.c} cycles")
+
+
+@cocotb.test()
+async def test_can_third_node_mid(dut):
+    """test_can_third_node, lag 60 cycles, with every edge of RXD in the second half of its cycle (CanBus mid), so
+    that cycle's falling-edge sample still has the old level and its rising-edge sample the new one (section 3.1).
+    Timed samples take an edge and its level from the rising-edge samples (5.9.6, rx_timed: SYNC2 against SYNC3,
+    and SYNC2 against HLVL with RACQ), so the chip resynchronizes on the same recessive-to-dominant edges and reports
+    the winner's frame as before. Taking the edge's level from the falling-edge sample, SYNC2F, would pull on the
+    other edges and lose it."""
+    U, K, C, _ = can_modules()
+    t0, lam = 4000, 60
+    win, lose = (0x244, [9]), (0x246, [1, 2])
+    bw = C.frame_bits(*win)
+    riv = U.LagRival(C.frame_bits(*lose), 100.0, start=t0 + lam)
+    host, bus, words, ends = await can_node(dut, [K.Sender([(t0, bw)], 100.0), riv], mid=True)
+    await bus.until(t0 + len(bw) * 100 + 3000)
+    fr = C.decode(bus.wave(bus.rxd), 100, lo=2000)
+    assert U.parse((ends, words)) == [U.want_rx(*win)], f"the chip reported {U.parse((ends, words))}"
+    assert len(fr) == 1 and fr[0]['id'] == win[0] and fr[0]['crc_ok'] and fr[0]['ack'], f"on the bus: {fr}"
+    assert not riv.alive, "the loser did not drop out"
+    dut._log.info(f"CAN third node, RXD's edges in the second half, lag {lam} cycles: frame {win[0]:#x} reported and "
+                  f"acknowledged, {bus.c} cycles")
+
+
+@cocotb.test()
+async def test_can_stuff_error_flag(dut):
+    """5.9.7, SMODE 2, through programs/advanced/can_unit.s at 500 kbit/s (can_node): a sender puts the run's value
+    once more after five equal bits (a stuff error, Bosch CAN 2.0 part A, Bit Stuffing) and then releases the bus,
+    in three frames (can_unit.py's flag_start). With SMODE 2 the reception ends at the violating bit itself, so the
+    chip's error flag, the first dominant level on io0 after each frame begins, starts in the next bit, as Error
+    Signalling asks: from 0 to 1 bit time after the violating bit ends. The chip reports each reception with end flag
+    2, a stuff error."""
+    U, K, C, _ = can_modules()
+    sched, at, t = [], [], 4000
+    for ident, data in ((0x123, [1, 2]), (0x7EF, [0xFF] * 8), (0x000, [0] * 8)):
+        st = C.stuff(C.with_crc(ident, data)[0])
+        k = next(k for k in range(21, len(st)) if st[k - 5:k] in ([0] * 5, [1] * 5))
+        bad = st[:k] + [st[k - 1]] + [1] * 40
+        sched.append((t, bad))
+        at.append((t, k))
+        t += len(bad) * 100 + 4000
+    host, bus, words, ends = await can_node(dut, [K.Sender(sched, 100.0)])
+    await bus.until(t)
+    starts = []
+    for t0, k in at:
+        e = next(c for c in range(t0, len(bus.txd)) if bus.txd[c] == 0 and bus.txd[c - 1] == 1)
+        starts.append((e - (t0 + (k + 1) * 100)) / 100)
+    assert all(0 <= x < 1 for x in starts), f"error flags start {starts} bit times after the violating bits end"
+    rep = [r for r in U.parse((ends, words)) if r[0] == 'rx']
+    assert [r[1] for r in rep] == [2, 2, 2], f"the chip reported {U.parse((ends, words))}"
+    dut._log.info(f"CAN stuff errors: flags start {starts} bit times into the next bit, {bus.c} cycles")
 
 
 # ---- USB low speed: programs/advanced/usb_enum.s -------------------------------------------------------------------

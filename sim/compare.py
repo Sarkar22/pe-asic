@@ -27,7 +27,16 @@ What runs:
   Manchester frames at the decoder's bit time or near it, timed to the half cycle, with random edge jitter, the
   fixed patterns of section 7.3 (bit-boundary edges late and mid-bit edges early, and the reverse), phase steps,
   pulses of half a cycle and frames of 1 to 7 bits more than whole octets, so that edges come in both halves of a
-  cycle, candidates give their bits at the deadline and REOP's byte end of a Manchester frame runs (5.9.7).
+  cycle, candidates give their bits at the deadline and REOP's byte end of a Manchester frame runs (5.9.7);
+- the same with 802.3 frames that carry a real FCS on some threads, set up as an 802.3 receiver (the start frame
+  delimiter as the sync pattern, CRC-32 with its residue as CHK, REOP's byte end on or off), so that good frames
+  pass the check, frames with 1 to 7 excess bits pass it only through the byte end, and a bad FCS fails it; thread
+  0 rewrites RXOPT after every word, in the middle of its receptions;
+- directed images for CAN (5.9.6, 5.9.7): each thread's receive half takes timed samples of its own ui pin with
+  RESYNC, mostly with RACQ, and the equal-bit destuffer (SMODE 2) and CRC-15, ending at RCNT, on frames of a
+  dominant start bit, stuffed random bits and their CRC, with dominant bits stretched, the sender's clock a few
+  percent off, edges a cycle early or late and stuff violations, so that only some edges pull and a violation
+  ends the reception at its bit.
 
 The host commands are POST, TAKE, RUN with stop and start masks, STEP, SETPC, RDREG of registers 0 to 39,
 STATUS, WRMEM, RDMEM and ABORT. sim2.py and docsim.py take them as bytes, through their framing, and sim.py
@@ -44,6 +53,8 @@ Usage, from the repository root. Python 3, standard library only:
     python3 sim/compare.py --images N --seed S      N images from seed S
     python3 sim/compare.py --half-images N  N images with half cycles
     python3 sim/compare.py --rk3-images N   N directed RKIND 3 images (100, or 20 with --quick)
+    python3 sim/compare.py --fcs-images N   N of them with real FCSs (100, or 20 with --quick)
+    python3 sim/compare.py --can-images N   N directed CAN images (100, or 20 with --quick)
     python3 sim/compare.py --no-programs    random images only
     python3 sim/compare.py --jobs 4         in 4 processes
     python3 sim/compare.py --stop           stop at the first run that differs
@@ -495,12 +506,28 @@ def half_image(rng):
     return {a: w for a, w in enumerate(words)}, starts
 
 
-def rk3_image(rng, cycles):
+SFD = [1, 0, 1, 0, 1, 0, 1, 1]                          # 802.3 4.2.6, in wire order
+
+
+def fcs_bits(data):
+    """data's bits in wire order and 802.3's FCS after them (3.2.9): the CRC-32 register from all ones, fed the
+    bits as the unit's register takes them, complemented and sent bit 31 first."""
+    reg = 0xFFFFFFFF
+    for b in data:
+        f = (reg >> 31) ^ b
+        reg = (reg << 1) & 0xFFFFFFFF
+        if f:
+            reg ^= 0x04C11DB7
+    return list(data) + [((reg >> (31 - i)) & 1) ^ 1 for i in range(32)]
+
+
+def rk3_image(rng, cycles, fcs=False):
     """Directed, for RKIND 3: thread k's receive half hunts on ui pin k with its own period, gain, window, sync,
     CRC and REOP, and takes words in a loop with random unit rows. Returns (words, starts, levels): levels[k][n] is
     ui pin k's level at half cycle n, n = 2c at the falling edge of cycle c and 2c + 1 at the rising edge that ends
     it (3.1). The line is 802.3 Manchester (a 1 is low then high), high when idle, so a hunt for a rising edge
-    starts at the first preamble bit's clock edge."""
+    starts at the first preamble bit's clock edge. fcs: threads 0 and 1 are mostly 802.3 receivers instead, whose lines carry
+    frames with a real FCS (fcs_bits) and 0 to 7 excess bits, a few with one bit of the FCS wrong."""
     words, starts, levels = [], [], []
 
     def li(v):
@@ -515,6 +542,27 @@ def rk3_image(rng, cycles):
         rper = rng.choice((2, 2, 3, 4, 5, 5, 5, 6, 8, 11, 15, 0, 1, 16, 23))
         rfrac = rng.choice((0, 0, 128, 64, rng.getrandbits(8)))
         p = 512 if rper < 2 else (0xF00 | rfrac) if rper > 15 else (rper << 8) | rfrac
+        if fcs and tid < 2 and rng.random() < 0.8:      # an 802.3 receiver, as eth_arp.s sets its receive half up
+            cfg(4, 3 | 1 << 5 | 1 << 6 | tid << 8)       # RKIND 3, HUNT for a rising edge
+            cfg(5, rper)
+            cfg(10, rfrac | rng.choice((0, 1, 2, 3, 3)) << 9 | rng.getrandbits(1) << 11)
+            cfg(8, 8 << 11)                             # SYNCLEN 8, the SFD alone: 0xD500
+            cfg(9, 0xD500)
+            cfg(15, rng.choice((0x80FF, 0x80FF, 0x00FF)))
+            for k, v in ((11, 0x04C1), (12, 0x1DB7), (13, 0xC704), (14, 0xDD7B)):
+                cfg(k, v)
+            if tid == 0:                                # RXOPT written in the middle of receptions: a reception
+                li((rfrac ^ 8) | rng.randrange(4) << 9 | rng.getrandbits(1) << 11)   # keeps its p, RGAIN, RACQ
+            words.append(enc('sgo', m=2))
+            words.append(enc('now'))
+            top = len(words)
+            words.append(enc('rxw', d=rng.randrange(2, 8)))
+            words.append(enc('srd', d=rng.randrange(2, 8), s=2))
+            if tid == 0:
+                words.append(enc('scfg', s=1, k=10))
+            words.append(enc('goto', a=top))
+            levels.append(manch_line(rng, p, SFD, 2 * cycles + 2, fcs=True))
+            continue
         rinv, rdiff, rmsb = rng.getrandbits(1), int(rng.random() < 0.12), rng.getrandbits(1)
         hlvl = 1 if rng.random() < 0.85 else 0
         cfg(4, 3 | rmsb << 2 | rinv << 3 | rdiff << 4 | 1 << 5 | hlvl << 6 | tid << 8 | rng.getrandbits(4) << 12)
@@ -553,27 +601,44 @@ def rk3_image(rng, cycles):
     return {a: w for a, w in enumerate(words)}, starts, levels
 
 
-def manch_line(rng, p, sync, n):
+def manch_line(rng, p, sync, n, fcs=False):
     """n half-cycle levels of one pin: idle high for about 260 cycles, then frames of a preamble, the sync bits and
     random data with gaps between them. The bit time is p / 256 cycles, sometimes a little off, and each frame
     gets its own jitter: none, random, bit-boundary edges late and mid-bit ones early or the reverse, a phase step
-    from a random bit on, or pulses of half a cycle."""
+    from a random bit on, or pulses of half a cycle. fcs: the data is 1 to 6 octets and their FCS, then 0 to 7
+    excess bits, and one frame in 8 has a bit of its FCS wrong."""
     bt = p / 256.0 * rng.choice((1.0, 1.0, 1.0, 1.002, 0.998, 1.02, 0.98))
     hb = bt / 2
     events, pulses = [], []
     t = 260.0 + rng.random() * 8
     while True:
-        nbits = rng.randrange(6, 20) + len(sync) + 8 * rng.randrange(1, 6) + rng.choice((0, 0, 0, 1, 2, 3, 4, 5, 6, 7))
-        if 2 * (t + nbits * bt) + 4 >= n:
-            break
-        pre = []
-        while len(pre) < nbits - len(sync) - 8:
-            pre.append(1 - len(pre) % 2)                    # 1, 0, 1, 0, ...: 802.3's preamble from its first bit
-        bits = pre + sync + [rng.getrandbits(1) for _ in range(nbits - len(pre) - len(sync))]
+        if fcs:
+            body = fcs_bits([rng.getrandbits(1) for _ in range(8 * rng.randrange(1, 7))])
+            if rng.random() < 0.125:
+                body[-1 - rng.randrange(32)] ^= 1
+            body += [rng.getrandbits(1) for _ in range(rng.choice((0, 0, 1, 3, 5, 6, 7, 7)))]
+            nbits = rng.randrange(10, 24) + len(sync) + len(body)
+            if 2 * (t + nbits * bt) + 4 >= n:
+                break
+            pre = []
+            while len(pre) < nbits - len(sync) - len(body):
+                pre.append(1 - len(pre) % 2)
+            bits = pre + sync + body
+            mode = rng.choice(('none', 'rand', 'rand', 'late', 'early', 'step', 'pulse'))
+        else:
+            nbits = rng.randrange(6, 20) + len(sync) + 8 * rng.randrange(1, 6) + rng.choice((0, 0, 0, 1, 2, 3, 4, 5,
+                                                                                               6, 7))
+            if 2 * (t + nbits * bt) + 4 >= n:
+                break
+            pre = []
+            while len(pre) < nbits - len(sync) - 8:
+                pre.append(1 - len(pre) % 2)                # 1, 0, 1, 0, ...: 802.3's preamble from its first bit
+            bits = pre + sync + [rng.getrandbits(1) for _ in range(nbits - len(pre) - len(sync))]
         half = []
         for b in bits:
             half += [1 - b, b]
-        mode = rng.choice(('none', 'rand', 'rand', 'late', 'early', 'step', 'pulse'))
+        if not fcs:
+            mode = rng.choice(('none', 'rand', 'rand', 'late', 'early', 'step', 'pulse'))
         a = rng.uniform(0.05, 0.32) * hb
         jstep, s = rng.randrange(len(bits)), rng.uniform(-0.45, 0.45) * hb
         prev, edges = 1, []
@@ -603,6 +668,93 @@ def manch_line(rng, p, sync, n):
     for q in pulses:
         if 0 < q < n - 1 and lv[q - 1] == lv[q] == lv[q + 1]:
             lv[q] ^= 1                                      # half a cycle: one edge in each half of a cycle
+    return lv
+
+
+def can_crc15(bits):
+    """CAN's CRC-15 of the bits, MSB first (Bosch CAN 2.0, part A, CRC field)."""
+    reg = 0
+    for b in bits:
+        f = ((reg >> 14) & 1) ^ b
+        reg = (reg << 1) & 0x7FFF
+        if f:
+            reg ^= 0x4599
+    return [(reg >> (14 - i)) & 1 for i in range(15)]
+
+
+def can_image(rng, cycles):
+    """Directed, for CAN on timed samples: thread k's receive half hunts for a falling edge on ui pin k and samples
+    FIRST cycles after each edge it pulls on (RESYNC, mostly with RACQ, so only falling edges pull), destuffs runs
+    of equal bits (SMODE 2, mostly N 5) and checks CRC-15 to RCNT. Returns (words, starts, levels) as rk3_image."""
+    words, starts, levels = [], [], []
+
+    def cfg(k, v):
+        words.append(enc('ldi', n=1, i=v & 255))
+        if v >> 8:
+            words.append(enc('lui', n=1, i=(v >> 8) & 255))
+        words.append(enc('scfg', s=1, k=k))
+
+    for tid in range(4):
+        starts.append((tid, len(words)))
+        b = rng.choice((8, 10, 12, 16, 20, 25, 32, 40))
+        first = max(1, int(b * rng.uniform(0.5, 0.85)))
+        ndata = rng.randrange(4, 40)
+        sn = 5 if rng.random() < 0.85 else rng.randrange(8)
+        smode = 2 if rng.random() < 0.85 else rng.choice((0, 1))
+        cfg(4, 1 << 2 | 1 << 5 | tid << 8 | rng.getrandbits(4) << 12)     # timed, RMSB, HUNT for a falling edge
+        cfg(5, b)
+        cfg(6, first)
+        cfg(10, (0 if rng.random() < 0.8 else rng.getrandbits(8)) | int(rng.random() < 0.9) << 8 |
+            rng.choice((0, 0, 1, 1, 2, 3)) << 9 | int(rng.random() < 0.7) << 11)
+        cfg(8, (1 + ndata + 15) if rng.random() < 0.8 else rng.randrange(0, 60))   # RCNT at the CRC's last bit
+        cfg(15, 14 | 1 << 7 | smode << 10 | sn << 12 | int(rng.random() < 0.1) << 15)
+        cfg(11, 0x8B32)
+        words.append(enc('sgo', m=2))
+        words.append(enc('now'))
+        top = len(words)
+        words.append(enc('rxw', d=rng.randrange(2, 8)))
+        words.append(rng.choice((enc('srd', d=rng.randrange(2, 8), s=2), enc('sstat', d=rng.randrange(2, 8)))))
+        words.append(enc('goto', a=top))
+        levels.append(can_line(rng, b, ndata, 2 * cycles + 2))
+    assert len(words) <= 128, len(words)
+    return {a: w for a, w in enumerate(words)}, starts, levels
+
+
+def can_line(rng, b, ndata, n):
+    """n half-cycle levels (both halves of a cycle alike) of a CAN-like line, recessive (1) when idle: frames of a
+    dominant start bit, ndata random bits and their CRC-15, stuffed after 5 equal bits, then recessive. Each frame
+    gets its own faults: dominant bits stretched by up to about a bit, the sender's clock up to 3% off, edges a cycle
+    early or late, and sometimes a stuff violation (6 equal bits)."""
+    lv = [1] * n
+    c = 30 + rng.randrange(20)
+    while True:
+        bits = [0] + [rng.getrandbits(1) for _ in range(ndata)]
+        bits += can_crc15(bits)
+        st, run, last = [], 0, None
+        vio = rng.randrange(len(bits)) if rng.random() < 0.25 else -1
+        for i, x in enumerate(bits):
+            st.append(x)
+            run = run + 1 if x == last else 1
+            last = x
+            if run == 5:
+                st.append(x if i == vio else 1 - x)    # the stuff bit, or a violation
+                run, last = (6, x) if i == vio else (1, 1 - x)
+        st += [1] * 10
+        bt = b * rng.choice((1.0, 1.0, 1.01, 0.99, 1.03, 0.97))
+        lag = rng.choice((0, 0, rng.randrange(0, b), rng.randrange(0, max(1, b // 2))))
+        jit = rng.choice((0, 0, 1, 2))
+        if 2 * (c + len(st) * bt + lag) + 8 >= n:
+            break
+        prev = 1
+        for i, x in enumerate(st):
+            if x == prev:
+                continue
+            t = c + i * bt + (lag if x == 1 else 0) + (rng.randint(-jit, jit) if jit else 0)
+            k = max(0, min(n, 2 * int(t)))
+            for q in range(k, n):
+                lv[q] = x
+            prev = x
+        c = int(c + len(st) * bt + lag) + rng.randrange(3, 30) * b
     return lv
 
 
@@ -676,7 +828,7 @@ def run(words, depth, seed, cycles, starts, inputs, loop, host, half=False):
     a, b, d = sims
     rng = random.Random(seed * 7919 + 1)
     stats = dict(cycles=0, host={}, rdreg_unit=0, rdreg_unit_nonzero=0, sel_cycles=0, rows={}, halves=0, rk3=0,
-                 byte_end=0, rk3_both=0, rk3_deadline=0, rk3_mend=0)
+                 byte_end=0, rk3_both=0, rk3_deadline=0, rk3_mend=0, rk3_good=0, can_racq=0, can_vio=0)
 
     def done(why):
         for _, _, _, w in a.m.log:
@@ -702,6 +854,7 @@ def run(words, depth, seed, cycles, starts, inputs, loop, host, half=False):
                  t.u.REOP and not t.u.RXVIO and (t.u.RXTOT & 7) != 0,
                  ((a.m.SYNC3 ^ a.m.SYNC2F) >> t.u.RPIN) & 1, ((a.m.SYNC2F ^ a.m.SYNC2) >> t.u.RPIN) & 1)
                 for t in a.m.th] if half else ()
+        was = [t.u.RXRUN and t.u.RXKIND == 0 for t in a.m.th] if half else ()
         sa, sb, sd = (a.cycle(pins),) + a.state(), (b.cycle(pins),) + b.state(), (d.cycle(pins),) + d.state()
         stats['cycles'] = c + 1
         if not sa == sb == sd:
@@ -718,6 +871,12 @@ def run(words, depth, seed, cycles, starts, inputs, loop, host, half=False):
                     stats['rk3_both'] += e1 and e2
                     stats['rk3_deadline'] += cand and not (e1 or e2) and not t.u.RXOPEN
                     stats['rk3_mend'] += mend and not t.u.RXRUN and t.u.RXN == t.u.RXN8 and t.u.RXSR == t.u.RXSR8
+                    stats['rk3_good'] += bool(not t.u.RXRUN and t.u.RXEF & 1)
+            for t in a.m.th:
+                if t.u.RXRUN and t.u.RXKIND == 0 and t.u.RESYNC and t.u.RACQ:
+                    stats['can_racq'] += 1
+            for t, w in zip(a.m.th, was):
+                stats['can_vio'] += bool(w and not t.u.RXRUN and t.u.RXEF & 2 and t.u.SMODE == 2)
         if c % 64 == 63 and not a.mem == b.mem == d.mem:
             return done((c,) + memory_diff(a.mem, b.mem, d.mem))
         cmd = host_command(rng, host, depth) if c >= lead else None
@@ -780,6 +939,12 @@ def job(spec):
     elif kind == 'rk3':
         words, starts, levels = rk3_image(rng, cycles)
         why, st = run(words, 128, seed, cycles, starts, rk3_inputs(levels), True, 'mail', half=True)
+    elif kind == 'fcs':
+        words, starts, levels = rk3_image(rng, cycles, fcs=True)
+        why, st = run(words, 128, seed, cycles, starts, rk3_inputs(levels), True, 'mail', half=True)
+    elif kind == 'can':
+        words, starts, levels = can_image(rng, cycles)
+        why, st = run(words, 128, seed, cycles, starts, rk3_inputs(levels), True, 'mail', half=True)
     elif kind == 'half':
         words = unit_image(rng, half=True)
         why, st = run(words, 128, seed, cycles, [(i, rng.randrange(128)) for i in range(4)], half_inputs, True,
@@ -801,6 +966,8 @@ def main(argv):
     n_images = int(_arg('--images', 40 if quick else 300))
     n_half = int(_arg('--half-images', 20 if quick else 100))
     n_rk3 = int(_arg('--rk3-images', 20 if quick else 100))
+    n_fcs = int(_arg('--fcs-images', 20 if quick else 100))
+    n_can = int(_arg('--can-images', 20 if quick else 100))
     seed0 = int(_arg('--seed', 0))
     jobs = int(_arg('--jobs', 1))
     stop = '--stop' in argv
@@ -821,9 +988,11 @@ def main(argv):
     specs += [('image', 'image %d' % s, s, i_cycles) for s in range(seed0, seed0 + n_images)]
     specs += [('half', 'half image %d' % s, s, i_cycles) for s in range(50000 + seed0, 50000 + seed0 + n_half)]
     specs += [('rk3', 'RKIND 3 image %d' % s, s, i_cycles) for s in range(70000 + seed0, 70000 + seed0 + n_rk3)]
+    specs += [('fcs', 'FCS image %d' % s, s, i_cycles) for s in range(80000 + seed0, 80000 + seed0 + n_fcs)]
+    specs += [('can', 'CAN image %d' % s, s, i_cycles) for s in range(90000 + seed0, 90000 + seed0 + n_can)]
     t0 = time.time()
     tot = dict(cycles=0, host={}, rdreg_unit=0, rdreg_unit_nonzero=0, sel_cycles=0, halves=0, rk3=0, byte_end=0,
-               rk3_both=0, rk3_deadline=0, rk3_mend=0)
+               rk3_both=0, rk3_deadline=0, rk3_mend=0, rk3_good=0, can_racq=0, can_vio=0)
     groups = {}
     bad = []
     rows = {}
@@ -831,12 +1000,13 @@ def main(argv):
     it = pool.imap(job, specs) if pool else map(job, specs)
     for n, (spec, why, st) in enumerate(it, 1):
         g = groups.setdefault(spec[0] if spec[0] == 'program' else 'image, half cycles' if spec[0] == 'half' else
-                              'image, RKIND 3' if spec[0] == 'rk3' else
+                              'image, RKIND 3' if spec[0] == 'rk3' else 'image, RKIND 3 with FCS' if spec[0] == 'fcs'
+                              else 'image, CAN' if spec[0] == 'can' else
                               ('image, uniform' if spec[2] % 2 == 0 else 'image, shift units'), [0, 0, 0])
         g[0] += 1
         g[1] += st['cycles']
         for k in ('cycles', 'rdreg_unit', 'rdreg_unit_nonzero', 'sel_cycles', 'halves', 'rk3', 'byte_end',
-                  'rk3_both', 'rk3_deadline', 'rk3_mend'):
+                  'rk3_both', 'rk3_deadline', 'rk3_mend', 'rk3_good', 'can_racq', 'can_vio'):
             tot[k] += st[k]
         for k, v in st['host'].items():
             tot['host'][k] = tot['host'].get(k, 0) + v
@@ -866,10 +1036,14 @@ def main(argv):
     if n_half:
         print('half-cycle images: %d cycles whose two halves differ on a pad, %d with an RKIND 3 reception, %d '
               'receptions ended at a byte boundary by REOP' % (tot['halves'], tot['rk3'], tot['byte_end']))
-    if n_half or n_rk3:
+    if n_half or n_rk3 or n_fcs:
         print('RKIND 3 receptions: %d cycles with an edge in both halves of the cycle, %d bits given by a candidate at '
               'its deadline, %d receptions ended at a byte boundary by the byte end of a Manchester frame'
               % (tot['rk3_both'], tot['rk3_deadline'], tot['rk3_mend']))
+        print('RKIND 3 receptions that passed the CRC check: %d' % tot['rk3_good'])
+    if n_can:
+        print('CAN images: %d cycles of a timed reception with RESYNC and RACQ, %d receptions ended by a stuff '
+              'violation with SMODE 2' % (tot['can_racq'], tot['can_vio']))
     print('rows sim.py ran: %d of %d; shift-unit rows, times run (a row that blocks counts at every slot it tries): %s'
           % (len(rows), len(ROWS), ', '.join('%s %d' % (r.mn, rows.get(r.syntax, 0)) for r in ROWS if r.mn in UNIT_MN)))
     kinds = {}

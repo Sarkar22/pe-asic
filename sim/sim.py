@@ -59,7 +59,7 @@ UNIT_STATE = ('TXARM', 'TXRUN', 'TXTL', 'TXSR', 'TXN', 'TXLW', 'TXBUF', 'TXBN', 
               'RXARM', 'RXHUNT', 'RXRUN', 'RXEP', 'RXSR', 'RXN', 'RXTOT', 'RXSYN', 'RXKIND', 'RXPH', 'RXG',
               'RXOPEN', 'RXCAND', 'RXIC', 'RXLAST', 'RXWIN', 'RXBUF', 'RXBN', 'RXBL', 'RXFULL', 'RXPN', 'RXOVR',
               'RXSEEN', 'RXRL', 'RXRV', 'RXVIO', 'RXCOV', 'RXEF', 'RXBE', 'CMT', 'CRC', 'RXPE',
-              'TXH', 'OLA', 'OLB', 'RXSR8', 'RXN8', 'RXC8', 'RXONES', 'RXCE')
+              'TXH', 'OLA', 'OLB', 'RXSR8', 'RXN8', 'RXC8', 'RXONES', 'RXCE', 'RXP3', 'RXRG', 'RXRA')
 
 
 class Unit:
@@ -653,6 +653,9 @@ class Chip:
         u.RXOPEN = 0
         u.RXCAND = 0
         u.RXG = 1
+        u.RXP3 = 512 if u.RPER < 2 else (0xF00 | u.RFRAC) if u.RPER > 15 else (u.RPER << 8) | u.RFRAC
+        u.RXRG = u.RGAIN
+        u.RXRA = u.RACQ
         self.rx_cbegin(u)
         if u.RXKIND == 1 or u.RXKIND == 3:
             u.RXPH = 128 if h else 256
@@ -670,12 +673,8 @@ class Chip:
             if u.RPER > 255:
                 p = 0xFF00 | u.RFRAC
             self.rx_manch(u, e, (self.SYNC2 >> u.RPIN) & 1, p, 256)
-        elif u.RXKIND == 3:                         # two half steps a cycle (5.9.6, rx_manch3)
-            if u.RPER > 15:
-                p = 0xF00 | u.RFRAC
-            elif u.RPER < 2:
-                p = 512
-            self.rx_manch3(u, p)
+        elif u.RXKIND == 3:                         # two half steps a cycle (5.9.6, rx_manch3), on the p it began with
+            self.rx_manch3(u, u.RXP3)
         elif u.RXKIND == 2:
             now = (self.SYNC2 >> u.RCLK) & 1
             if now != ((self.SYNC3 >> u.RCLK) & 1) and now != u.RFALL:
@@ -697,7 +696,7 @@ class Chip:
             u.RXPH -= 256
         if e:
             u.RXIC = 0
-            if u.RESYNC:
+            if u.RESYNC and (not u.RACQ or ((self.SYNC2 >> u.RPIN) & 1) == u.HLVL):   # RACQ: edges to HLVL only
                 self.rx_pull(u, (u.FIRST - 1 if u.FIRST else 0) << 8)
                 self.rx_gear(u)
 
@@ -733,17 +732,21 @@ class Chip:
         """RKIND 3 (5.9.6): a half step on the edge between SYNC3 and SYNC2F, then one between SYNC2F and SYNC2. The
         decisions read RXPH as it was at the start of the cycle, moved only by the half steps' own + 128 and window
         openings; the cycle's one pull, the first half step's, is applied at the end, with the gain and the window
-        width that RXG gives at the start of the cycle."""
-        w = (p >> 1) if u.RACQ and u.RGAIN != 0 and u.RXG < 16 else (p >> 2)
-        if u.RGAIN == 0:
+        width that RXG gives at the start of the cycle, and none in a cycle with an edge in each half. The gain and
+        RACQ are the ones the reception began with (RXRG, RXRA)."""
+        w = (p >> 1) if u.RXRA and u.RXRG != 0 and u.RXG < 16 else (p >> 2)
+        if u.RXRG == 0:
             k = 0
         elif u.RXG <= 3:
             k = 1
         else:
-            k = (2, 4, 5)[u.RGAIN - 1]
+            k = (2, 4, 5)[u.RXRG - 1]
+        bound = 128 if p < 768 else p >> 3      # the keep test: RXCE at least -bound keeps the bit
         pulled = False
         q = 0
+        gave = False                            # a bit in this cycle
         levels = ((self.SYNC3 >> u.RPIN) & 1, (self.SYNC2F >> u.RPIN) & 1, (self.SYNC2 >> u.RPIN) & 1)
+        both = levels[0] != levels[1] and levels[1] != levels[2]
         for h in (0, 1):
             if not u.RXRUN:
                 break
@@ -755,21 +758,42 @@ class Chip:
                 u.RXOPEN = 1
                 u.RXCAND = 0
                 u.RXPH -= p
-            if u.RXRUN and u.RXOPEN:
+            if (u.RXRUN and e and u.RXWIN and not u.RXCAND and not gave
+                    and (u.RXOPEN or u.RXPH >= p - w - (p >> 3))):
+                # an edge other than a clock edge came last, so this one is the clock edge
+                if not u.RXOPEN:
+                    u.RXPH -= p                 # before the window: it uses up that prediction
+                b = 1 if u.RDIFF else after
+                if not pulled:
+                    pulled = True
+                    q = u.RXPH >> k
+                u.RXOPEN = 0
+                u.RXWIN = 0
+                u.RXIC = 0
+                gave = True
+                self.rx_gear(u)
+                self.rx_bit(u, b)
+            elif u.RXRUN and u.RXOPEN:
                 if e and u.RXPH < 0:                # a candidate: its phase is kept, and it doesn't pull yet
                     if u.RXCAND:
                         u.RXWIN = 1
                     u.RXCAND = 1
                     u.RXCE = u.RXPH
                 elif e or (u.RXCAND and u.RXPH >= (p >> 3)):
-                    b = (1 if (u.RXWIN or (u.RXCAND and e)) else 0) if u.RDIFF else after
+                    keep = u.RXCAND and u.RXPH >= (p >> 3) and u.RXCE >= -bound
+                    if u.RDIFF:
+                        b = 1 if (u.RXWIN or (u.RXCAND and e and not keep)) else 0
+                    else:
+                        b = before if keep else after
+                    err = u.RXPH if (e and not keep) else u.RXCE
                     if not pulled:
                         pulled = True
-                        q = (u.RXPH if e else u.RXCE) >> k
+                        q = err >> k
                     u.RXOPEN = 0
                     u.RXCAND = 0
-                    u.RXWIN = 0
+                    u.RXWIN = 1 if (e and keep) else 0
                     u.RXIC = 0
+                    gave = True
                     self.rx_gear(u)
                     self.rx_bit(u, b)
             elif u.RXRUN and e:
@@ -778,7 +802,8 @@ class Chip:
                     pulled = True
                     q = (u.RXPH - (p >> 1)) >> k
             u.RXPH += 128
-        u.RXPH -= q
+        if not both:
+            u.RXPH -= q
 
     @staticmethod
     def rx_pull(u, r):
@@ -813,9 +838,12 @@ class Chip:
                 u.RXEF |= 4
             self.rx_end(u)
         elif u.RXSYN and stuffing and u.RXRL != 0 and u.RXRL >= u.SN and (u.SMODE == 1 or u.RXRL >= 2):
-            if b == u.RXRV:
-                u.RXVIO = 1
+            if b == u.RXRV:                         # a stuff violation
                 u.RXEF |= 2
+                if u.SMODE == 2:
+                    self.rx_end(u)                  # SMODE 2: the violating bit ends the reception
+                else:
+                    u.RXVIO = 1                     # SMODE 1: the next bit does
             else:
                 self.rx_run_len(u, b)
         elif not u.RXSYN:

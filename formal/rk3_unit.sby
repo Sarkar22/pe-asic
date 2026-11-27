@@ -1,0 +1,32 @@
+# J', the bounds of 5.9.6's Period bullet, on one shift unit: src/pe_shift.sv with every input free in every cycle,
+# by k-induction, with no assumption on the design (a reception of RKIND 3 keeps the p, RGAIN and RACQ it started
+# with, 5.9.6, Start). The checks are in rk3_unit.sv; the covers show the bounds are reached from reset.
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 4
+cover: mode cover
+cover: depth 24
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+script read_shift.ys
+read_verilog -formal -sv rk3_unit.sv
+hierarchy -top rk3_unit
+proc
+flatten
+cd rk3_unit
+script probes_rk3.ys
+cd ..
+
+[files]
+../src/pe_shift.sv
+cells_formal.v
+read_shift.ys
+rk3_unit.sv
+probes_rk3.ys

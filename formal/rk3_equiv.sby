@@ -1,0 +1,22 @@
+# RKIND 3's block in src/pe_shift.sv (rk3n_f) equals the code of 5.9.6 (rk3_code.sv) in every state of J', the
+# bounds of 5.9.6's Period bullet. Combinational: prove at depth 1. The checks are in rk3_equiv.sv.
+[tasks]
+prove
+
+[options]
+prove: mode prove
+prove: depth 1
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+read_verilog -formal cells_formal.v
+read_slang -D FORMAL --top rk3_equiv rk3_equiv.sv rk3_code.sv pe_shift.sv
+prep -top rk3_equiv
+
+[files]
+../src/pe_shift.sv
+cells_formal.v
+rk3_equiv.sv
+rk3_code.sv

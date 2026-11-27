@@ -36,3 +36,12 @@ jobs:
           python3 verif/lockstep.py --gen chips --images 40 --jobs 4 --first 300000 --host pins
           python3 verif/lockstep.py --gen rows --images 40 --jobs 4 --first 320000 --host pins
           python3 verif/lockstep.py --corners --jobs 4
+
+      # Both clock edges: half cycles (THALF, RKIND 3, the byte ends), 802.3 Manchester frames on all four units,
+      # the same with real FCSs and RXOPT written in mid-reception, and CAN-like lines (RESYNC with RACQ, SMODE 2)
+      - name: Lockstep, half cycles, RKIND 3, FCS frames and CAN
+        run: |
+          python3 verif/lockstep.py --gen half --images 150 --jobs 4 --first 600000
+          python3 verif/lockstep.py --gen rk3 --images 150 --jobs 4 --first 700000
+          python3 verif/lockstep.py --gen fcs --images 100 --jobs 4 --first 800000
+          python3 verif/lockstep.py --gen can --images 100 --jobs 4 --first 900000

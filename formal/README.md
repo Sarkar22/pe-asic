@@ -21,11 +21,18 @@ the LibreLane image.
 | **3b. Units are their own thread's** (`isolation.sv`): LA, LB of unit t change only while its send half runs or is in its tail, at thread t's commit, at thread t's `sstop tx`, or at ABORT; every step-3 strobe of unit t comes from thread t's instruction of that row; unit t's CMT is thread t's commit | 5.9.1: "A unit starts only at a commit of its own thread". "Units share nothing with each other, so one thread's unit can't change another thread's timing." | k-induction | 3 | proved | (same job) |
 | **3c. ABORT releases every uio pad** (`isolation.sv`, `abort_*`): from the next cycle `uio_oe` is 0, OE, SHOE and the uio SEL, SHSEL are 0, OUT and SHD are 1 on open-drain pins | 9.3: "So every `uio` pad is undriven" | k-induction | 3 | proved | (same job) |
 | **4. The unit's timing** (`shift_timing.sv`, one unit, every input free in every cycle): `start_cmt` TXRUN rises only after TXARM and CMT; `start_sym` in the commit's cycle `tx_symbol()` runs and from the next cycle LA, LB show symbol 0 of the first bit (MAPA, MAPB, TGLA, TGLB, TMSB, LFSR) and TXCD is TPER; `start_empty` a start with no word is an underrun; `sym_tper` with TFRAC 0 each symbol lasts exactly TPER cycles (TPER 0 as 1); `sym_frac` with any TFRAC it lasts TPER plus the carry of TXACC + TFRAC; `hold` LA, LB move only at those cycles; `tail_len` ENDA, ENDB for exactly TAIL cycles, then IDLEA, IDLEB; `stop_tx` and `stop_rx` the cycle after `sstop` or ABORT the half is stopped; `rx_start` a reception starts only at a commit or the hunt's edge; `half_pads` the unit's pads in both halves of every cycle: LA and LB in the second half, and in the first half too, except after a move (a symbol, the end of a send, the end of a tail) with THALF, TPER 1 or more, TEXT 0 and bit 7 of TXACC as `tx_half()` reads it (0 at a start), and no `sstop tx` or ABORT, where the first half shows the levels from before the move; formed from LA, LB, TXACC and the slots, not from TXH; and 0 in reset and in cycle 0. With `sym_frac` and the TXACC invariant it gives the half-cycle grid: symbol *k* reaches the pad at E + 1 + *k* x (TPER + TFRAC / 256), rounded down to a half cycle | 5.9.5: "A symbol written in cycle *w* is on the pad from *w* + 1 (section 5.7), for exactly TPER cycles plus any fraction carry. TPER 0 gives one cycle and leaves TXACC alone, whatever TFRAC is. The commit at E writes the first symbol". "the outputs show ENDA and ENDB for TAIL cycles, then IDLEA and IDLEB". 5.9.4: "A stopped send half shows its idle levels on its outputs from the next cycle." 5.9.6: "Without HUNT, a reception begins at the commit." 5.9.5, Half cycles: "a symbol, a tail or an idle level that starts while it is 128 or more sets TXH in `tx_half`, so the pads show the new levels from the falling edge of the cycle after the write". "`sstop tx` and ABORT move the outputs at a rising edge." | k-induction, with 7 helper invariants that are proved too | 4 | proved for every TPER, TFRAC and TAIL (16, 8 and 8 bits, no bound), THALF on or off | 1 s |
-| **5. Reset: every flop and latch** (`reset_flops.sv`, generated, 535 flop cells, 4041 bits, and 24 latch cells): every flop is an asynchronous-load flop on `rst_n` (the synchroniser) or on the synchronised reset, its value under reset is section 8's (0, or 192 and 128 for each unit's window points, and 512, 384 and 256 for RKIND 3's own *p* and window points, since RKIND 3 takes RPER 0 as 2: 5.9.6, implementation note), and it holds that value in every reset cycle and in cycle 0. Every latch is gated by `clk`; each `sg13cmos5l_dllrq_1` (16 behind the input pads' falling-edge samples, 8 behind the units' N flops) is cleared by the synchronised reset and shows 0 in both halves of every reset cycle, and the 8 behind N in cycle 0 too; each `sg13cmos5l_dlhq_1` has no reset and drives only the D input of one of those, so a pad's level from before reset can't reach SYNC1F | 8: "Reset is asynchronous, active low, on every flop, and its release passes a synchroniser". The reset table. 5.2, implementation note: "at reset P, N and SYNC1F are 0, and the output latch is cleared with them" | structural check (`gen_reset.py`) and k-induction | 2 | proved | 6 s |
+| **5. Reset: every flop and latch** (`reset_flops.sv`, generated, 543 flop cells, 4053 bits, and 24 latch cells): every flop is an asynchronous-load flop on `rst_n` (the synchroniser) or on the synchronised reset, its value under reset is section 8's (0, or 192 and 128 for each unit's window points: 5.9.6, implementation note; RKIND 3's own *p* and window points are loaded when a reception starts, so they reset to 0, as RXRG and RXRA do), and it holds that value in every reset cycle and in cycle 0. Every latch is gated by `clk`; each `sg13cmos5l_dllrq_1` (16 behind the input pads' falling-edge samples, 8 behind the units' N flops) is cleared by the synchronised reset and shows 0 in both halves of every reset cycle, and the 8 behind N in cycle 0 too; each `sg13cmos5l_dlhq_1` has no reset and drives only the D input of one of those, so a pad's level from before reset can't reach SYNC1F | 8: "Reset is asynchronous, active low, on every flop, and its release passes a synchroniser". The reset table. 5.2, implementation note: "at reset P, N and SYNC1F are 0, and the output latch is cleared with them" | structural check (`gen_reset.py`) and k-induction | 2 | proved | 12 s |
 | **5b. No pad drives until a program asks** (`reset_pads.sv`): `uio_oe` is 0 until a running thread has `oe`, `oe8` or `pcfg PP/OD` on a uio pin in stage 4; every uo pin but uo3 is 0 until one has a word that writes or configures a uo pin. In cycle 0, `uio_oe` and `uo_out` are 0. Each output latch shows either half, freely | 8: "So after reset every `uio` pin is undriven, and every `uo` pin is low, in both halves of the cycle." "Nothing runs until the host starts it." | k-induction | 3 | proved | 5 s |
-| **6. Netlist against RTL** (`chip.eqy`): the gate netlist's 4721 compared points (the 24 output pins, flop outputs, the inputs of the SRAM and of the half-cycle latches) equal the RTL's, in every state reachable from reset, for the synthesis output and for the final netlist after layout | | EQY: both designs cut at the matched nets into 125 pieces; k-induction on each, PDR on the 6 that hold the host's command FSM | 3 | **proved: 125 of 125 pieces**, on both netlists of the half-cycle build, with the 40 latch cells boxed on both sides as the SRAM pin buffers are. Details below | 171 s, 98 s |
+| **6. Netlist against RTL** (`chip.eqy`): the gate netlist's 4733 compared points (the 24 output pins, flop outputs, the inputs of the SRAM and of the half-cycle latches) equal the RTL's, in every state reachable from reset, for the synthesis output and for the final netlist after layout | | EQY: both designs cut at the matched nets into 125 pieces; k-induction on each, PDR on the 6 that hold the host's command FSM | 3 | **proved: 125 of 125 pieces**, on both netlists of the half-cycle build, with the 40 latch cells boxed on both sides as the SRAM pin buffers are. Details below | 209 s, 145 s |
+| **7. RKIND 3's datapath is its code** (`rk3_equiv.sv`): the block `rk3n_f` that `src/pe_shift.sv` instantiates for RKIND 3, read from that file, gives every output of the code of 5.9.6's `rx_manch3` (`rk3_code.sv`, that code transcribed in wide arithmetic): whether a bit is given and its value, whether the window closes empty, whether the reception still runs, RXPH's next value, RXOPEN, RXCAND, RXWIN, RXG and RXCE, in every state that satisfies J' (7b), with `rx_bit`'s end free, SMODE 2's end at a stuff violation included | 5.9.6, `rx_manch3`, and its implementation note: "the arithmetic is 15 bits and RXCE 13" | k-induction (the check is combinational) | 1 | proved | 12 s |
+| **7b. J' holds on the code** (`rk3_inv.sv`): from the start of a reception, every state the code of 5.9.6 reaches satisfies J': RXG 1 to 16; RXCAND only with RXOPEN; RXPH at least 256 - *p* with the window open and at least 128 - *p* with it closed, below *p* + 128 with RGAIN 1 to 3 and below 7*p*/4 - 128 with RGAIN 0; with RXCAND, RXCE from 256 - *p* to -1. For every *p* from 512 to 4095, every RGAIN, RACQ and RDIFF, any pin levels at both edges and any end of `rx_bit`; a reception that ends starts again | 5.9.6, the Period bullet | k-induction | 8 | proved | 3 s |
+| **7c. J' holds on the unit** (`rk3_unit.sv`): `src/pe_shift.sv` with every input free in every cycle, so any `scfg` in any cycle, RXPER and RXOPT written in mid-reception included: in every cycle of a reception of RKIND 3, J' with the reception's own *p* and RGAIN (RXP3, RXRG), and RKIND 3's window points equal to RXP3 - RXP3/4 and RXP3 - RXP3/2. No assumption but reset in the first step: a reception keeps the *p*, RGAIN and RACQ it started with, so no write of RXPER or RXOPT can take it out of J'. And a reception takes RXP3, RXRG and RXRA from the slots as the cycle it starts in reads them, before that cycle's own `scfg` (3.2) | 5.9.6, Start: "with RKIND 3 the *p*, RGAIN and RACQ of that cycle too (RXP3, RXRG and RXRA)"; section 10, defined 8 | k-induction | 4 | proved | 2 s |
 
-The real host link is in every proof above (pe_host and pe_spi read from free `ui_in` pins), so they hold for
+Properties 7 to 7c together say that in every state the unit can reach, RKIND 3's datapath computes what the code
+of 5.9.6 says: 7b that the ranges of the Period bullet are the code's own, so its 15-bit arithmetic is wide enough,
+7c that the unit stays inside them whatever firmware writes, and 7 that inside them the block equals the code.
+
+The real host link is in every whole-chip proof above (pe_host and pe_spi read from free `ui_in` pins), so they hold for
 every host command sequence; the memory's read data is a free input in every cycle (`sram_free.v`), so they
 hold for every program.
 
@@ -42,13 +49,19 @@ the host can also produce on the chip, only more slowly.
 | `isolation:cover` | whole chip, host commands free | per pin (15; uo3 has none: no legal word names it and its flops are held at 0): a claim of another thread's pin, another thread's commit with SHD and OUT apart that leaves the pin, the owner's commit moving it, a non-owner's `put` that would change SHD; per unit (4): `scfg`, `txw`, `sgo tx`, `sstop rx` strobes | step 10 | 306 s |
 | `shift_timing:cover` | one unit | a start with a word and without, `sstop tx` and ABORT while running, `sstop rx` while receiving, a reception started at a commit and at a hunt, a TPER-3 symbol, a long and a short symbol with TFRAC, a 3-cycle tail; a move THALF puts at the falling edge, by a symbol (with its first half showing the old level), by the end of a send and by the end of a tail, and the second half of such a move showing the new level | step 6 | 12 s |
 | `reset:flops_cover` | whole chip | cycle 0, with the pads as section 8 says | step 3 | 6 s |
+| `rk3_inv:cover` | the code of 5.9.6, as in 7b | RXPH below 0 with the window closed (step 2), and below -*p*/2 with it open (step 5) | step 5 | 1 s |
+| `rk3_unit:cover` | one unit, every input free, as in 7c | from reset, RXPH below -*p*/2 with the window open (step 9), and at *p* + 128 or more with it closed, which RGAIN 0 allows (step 12); a reception that starts in the cycle of a write of RXPER or RXOPT | step 12 | 39 s |
 | `covers_deep:cover` | reduced (`cut_cover.ys`) | thread 0's open-drain pin on its shift output pulled low (step 17) and released (21), unit 0's LA moving at a start (13) and while running (18), a driven pad released by ABORT (14), a pad driving (13) and a uo pin high (9) once a program asked | step 21 | 709 s |
 
 On the RTL with the half-cycle latches every cover task was run again and reaches every cover: `pads:cover`
 914 s, `isolation:cover` 365 s and `covers_deep:cover` 1181 s, each on one CPU, `shift_timing:cover` 12 s and
 `reset:flops_cover` 6 s. With RKIND 3's decoder as 5.9.6 now gives it and the Manchester byte end, every prove task
 passes again (1 to 6 s each) and every cover task reaches every cover: `pads:cover` 1012 s, `isolation:cover`
-339 s, `covers_deep:cover` 1344 s, `shift_timing:cover` 12 s and `reset:flops_cover` 7 s.
+339 s, `covers_deep:cover` 1344 s, `shift_timing:cover` 12 s and `reset:flops_cover` 7 s. With RKIND 3's keep test,
+structural rule and held *p*, RGAIN and RACQ, timed samples' RESYNC with RACQ and SMODE 2's end at the violating bit
+(5.9.6, 5.9.7), every prove task passes again (2 to 12 s each) and every cover task reaches every cover, each on one
+CPU from a fresh `FORMAL_WORK`: `pads:cover` 1031 s, `isolation:cover` 393 s, `covers_deep:cover` 1391 s,
+`shift_timing:cover` 15 s, `reset:flops_cover` 12 s, `rk3_inv:cover` 1 s and `rk3_unit:cover` 39 s.
 
 `covers_deep.sv` holds the covers whose traces are too deep for the whole chip in reasonable time (past
 step 17, each step took over 10 minutes there). Its model also frees the register file's and the mailbox's
@@ -108,8 +121,15 @@ for each. `netlist_differs` is the equivalence check's: on the final netlist of 
 gives it, exactly the uio pads' piece fails and the other 124 are proved. On the RTL with
 RKIND 3's decoder as 5.9.6 now gives it and the Manchester byte end, all 24 bugs of the proofs are caught, the 3 new
 ones being the reset values of the state that decoder adds: RKIND 3's *p*, RXCE and the half of RXC8 that the
-Manchester byte end added. The equivalence
-check's own teeth, bugs in the netlist, are under "The equivalence check".
+Manchester byte end added. On the RTL with RKIND 3's keep test, structural rule and held *p*, RGAIN and RACQ, the
+32 bugs of the proofs other than `netlist_differs` (which needs a netlist) are all caught. The 9 new ones: two reset values
+(RXP3 and RXRG; RXP3 now resets to 0, so the old bug that reset it to 0 is gone); four in RKIND 3's block, which
+`rk3_equiv` catches with a state of J' (7b, 7c) in which the block and the code differ, not a trace from reset; a
+reception that doesn't load RXP3, and one that starts in the cycle of a write of RXOPT and takes the written RFRAC,
+which `rk3_unit` catches in its base case, a trace from reset; and a sign error in the code's pull, which `rk3_inv`
+catches in its base case. On that RTL's final netlist `netlist_differs` is caught
+too: exactly the uio pads' piece fails and the other 124 are proved.
+The equivalence check's own teeth, bugs in the netlist, are under "The equivalence check".
 
 | Bug | Change | Check | Fails |
 |---|---|---|---|
@@ -131,7 +151,15 @@ check's own teeth, bugs in the netlist, are under "The equivalence check".
 | `latch_gate_inverted` | `pe_shift.sv`: output A's latch open while the clock is high, so its halves swap | `reset:gen` | the structural check: GATE_N is not `clk` |
 | `pair_no_reset` | `pe_core.sv`: the falling-edge sample's second latch not cleared by reset | `reset:gen` | the structural check: RESET_B is not the synchronised reset |
 | `sync1f_first_latch` | `pe_core.sv`: SYNC1F reads the first latch, which opens at the very rising edge SYNC1F samples on | `reset:gen` | the structural check: the open-high latch reaches a flop |
-| `p3_reset_0` | `pe_shift.sv`: RKIND 3's *p* resets to 0, not to 512 | `reset:gen` | the structural check: `p3_q` resets to 0, section 8 says 512 |
+| `p3_reset_512` | `pe_shift.sv`: RKIND 3's *p* (RXP3) resets to 512, though a reception loads it at its start | `reset:gen` | the structural check: `p3_q` resets to 512, section 8 says 0 |
+| `rg3_reset_1` | `pe_shift.sv`: RXRG resets to 1 | `reset:gen` | the structural check: `rg3_q` resets to 1, section 8 says 0 |
+| `rk3_f1_removed` | `pe_shift.sv`, `rk3n_f`: before the window the structural rule fires from RXPH 0, not only within *p*/8 of the window's opening | `rk3_equiv:prove` | the bit, whether the reception runs, and RXPH's next value |
+| `rk3_keep_bound` | `rk3n_f`: the keep test's bound *p*/8 at RPER 2 too, not 128 | `rk3_equiv:prove` | whether the reception runs, the bit's value, RXPH's next value |
+| `rk3_two_edge_pull` | `rk3n_f`: a cycle with an edge in each half pulls | `rk3_equiv:prove` | RXPH's next value |
+| `rk3_smode2_end` | `rk3n_f`: with SMODE 2 a first-half bit that is a stuff violation doesn't end the reception, so the second half step runs | `rk3_equiv:prove` | whether the reception runs, RXPH's next value, RXWIN |
+| `rk3_p3_not_loaded` | `pe_shift.sv`: a reception doesn't load RXP3 | `rk3_unit:prove` | *p* at least 512 and the window points against RXP3, in the base case at step 3 |
+| `rk3_p3_scfg_start` | `pe_shift.sv`: a reception that starts in the cycle of a write of RXOPT takes the written RFRAC | `rk3_unit:prove` | RXP3 against the slots the start cycle read, in the base case |
+| `rk3_code_pull_sign` | `rk3_code.sv`: the code's pull moves RXPH away from the edge | `rk3_inv:prove` | J''s RXPH range, in the base case at step 3 |
 | `rxce_reset_1` | `pe_shift.sv`: RXCE resets to -1 | `reset:gen` | the structural check: `rx_ce_q` resets to 8191, section 8 says 0 |
 | `rxc8_low_reset` | `pe_shift.sv`: bit 15 of RXC8, in the half the Manchester byte end added, resets to 1 | `reset:gen` | the structural check: `rx_c8_q` resets to 32768, section 8 says 0 |
 | `own_reset` | `pe_pins.sv`: OWN resets to 1 | `reset:flops_prove` | OWN's reset value, step 0 |
@@ -160,10 +188,10 @@ piece is proved when its outputs equal the RTL's wherever the RTL's are known; s
 
 | Netlist | Pieces proved | By k-induction | By PDR | Time |
 |---|---|---|---|---|
-| synthesis output | **125 of 125** | 119 | 6: the host, the mailbox, the four threads | 171 s (3 proofs at a time) |
-| final netlist, after layout | **125 of 125** | 119 | the same 6 | 98 s (4 at a time) |
+| synthesis output | **125 of 125** | 119 | 6: the host, the mailbox, the four threads | 209 s (3 proofs at a time) |
+| final netlist, after layout | **125 of 125** | 119 | the same 6 | 145 s (4 at a time) |
 
-The two runs match the same 4920 names into the same 125 pieces and compare the same 4721 points: the layout
+The two runs match the same 4932 names into the same 125 pieces and compare the same 4733 points: the layout
 changed no name the check uses. Sixteen of the pieces are the falling-edge latches' inputs, one per pad
 (`core.ui_in.0` to `core.uio_in.7`), and the units' N flops are compared as their output latches' inputs. The six
 PDR pieces are the ones that hold the host's command FSM (below).
@@ -173,7 +201,7 @@ the netlist:
 
 | Rule | Why | Pieces |
 |---|---|---|
-| **Inverted flops**: for each unit's seven reset-to-1 bits, three of the window points (`pwq_q[7:6]`, `pwh_q[7]`; section 8: 192 and 128) and four of RKIND 3's own *p* and window points (`p3_q[9]`, `wq3_q[8:7]`, `wh3_q[8]`; 512, 384 and 256), `inv_flops.v` puts two inverters after the flop cell and gives the net between them the RTL's name | the library has only reset-to-0 flops, so the synthesis keeps these bits inverted, in flops with no name. Each cell sits in its register's numbering (`_60561_` is `pwh_q[6]`, `_60563_` `pwh_q[8]`; `_60519_` and `_60521_` are bits 8 and 10 of RKIND 3's *p*), and the mux of `pw = wide ? pwh_q : pwq_q` takes the two bit-7 cells on its two inputs. RKIND 3's three registers carry the names of their copies in pe_shift.sv (`p3`, `pq3`, `ph3w`) in the netlist, so their inverted bits get those names too. Naming only the inverse of the cell's output would cut the RTL side alone: the netlist's loads read the cell itself | the four units |
+| **Inverted flops**: for each unit's three reset-to-1 window-point bits (`pwq_q[7:6]`, `pwh_q[7]`; section 8: 192 and 128), `inv_flops.v` puts two inverters after the flop cell and gives the net between them the RTL's name | the library has only reset-to-0 flops, so the synthesis keeps these bits inverted, in flops with no name. Each cell sits in its register's numbering (`_62887_` is `pwh_q[6]`, `_62889_` `pwh_q[8]`), and the mux of `pw = wide ? pwh_q : pwq_q` takes the two bit-7 cells on its two inputs. RKIND 3's own *p* and window points, and RXRG and RXRA, are loaded when a reception starts and reset to 0 (section 8), so they need no rule. Naming only the inverse of the cell's output would cut the RTL side alone: the netlist's loads read the cell itself | the four units |
 | **Constant flops**: 12 pin flop bits (`sel_q[7:6]`, `shsel_q[7:6]`, `byp_q[3:1]`, `shbyp_q[3:1]`, `shd_q[3]`, `out_q[3]`) are matched to netlist nets tied to 0 | the synthesis found them constant and removed them (its log: "Setting constant 0-bit at position ..."); no legal word sets them. The RTL's flop is compared with 0 in its piece | the pin flops |
 | **A merged flop**: the SPI's `sck_q` is matched to unit 0's `sync3[1]` | `sck_q <= sck` with `sck = sync2_q[1]` (pe_spi.sv), and `sync3_q <= sync2_q` (pe_core.sv): the same input, the same reset; the netlist's only flop with D = `sync2[1]` serves both. Both RTL flops are compared with it | the host's argument bytes, the host |
 | **`core.host.miso` not matched** | in the RTL it is an alias of `spi.tx_q[7]` ahead of `uo_out[3]`; in the netlist the flop drives `uo_out[3]` and the name sits on a buffer after it, so matched, it would cut the two sides on either side of the flop | `uo_out[3]`, now in the host's piece |
@@ -181,7 +209,7 @@ the netlist:
 | **Merges kept apart**: the host's `reg_q`, which the netlist names after unit 0's port `rd_reg`, is merged with the host, and the SCK flop with unit 0, by the merge patterns themselves; the units' latch boxes (`lat_na`, `lat_nb`) are kept out of the units' merges too | either would join unit 0's piece with the host's into one too large for PDR (this EQY's `nomerge` has no effect); a merge that names a box cell crashes EQY's partitioning | unit 0, the host |
 | **Final netlist**: the 44 SRAM pin buffers boxed by instance name, every other buffer its liberty function; the names flattening and the layout add (`hold5290.X`, `net5288`, `clknet_*`) made private | the RTL has only `core.*` names and ports, and with the buffers X = A each net keeps its synthesis name | all, on the final netlist |
 | **Latch boxes**: each latch cell becomes a box of the same instance name on both sides (`latch_box.v`, by the techmap rule `latch_map.v`), with its D (and RESET_B) and Q but no gate pin | the RTL instantiates these cells by name (pe_core.sv, pe_shift.sv) and the netlist keeps the 40 instances under the same names. EQY puts every flop on one global clock and has no clock to give a box: a box input driven by `clk` makes a piece with no logic, which EQY rejects (why the SRAM's `A_CLK` is tied off) | the pads' latch inputs, the units, the pads |
-| **Flops under their copies' names**, no rule needed: RXPH's flops for bits 0 to 16 carry `ph` (`ph = {rx_ph_q[16], rx_ph_q[16:0]}`, pe_shift.sv), and RKIND 3's *p* and window points carry `p3`, `pq3` and `ph3w` | the synthesis kept the copies' names on those flops instead of the registers'. The RTL has both names on the same nets, so the two sides match there by EQY's default rule, flop to flop | the four units |
+| **Flops under their copies' names**, no rule needed: RXPH's flops for bits 0 to 16 carry `ph` (`ph = {rx_ph_q[16], rx_ph_q[16:0]}`, pe_shift.sv), and RKIND 3's *p* and window points carry `p3`, `pq3` and `ph3w`, every bit | the synthesis kept the copies' names on those flops instead of the registers'. The RTL has both names on the same nets, so the two sides match there by EQY's default rule, flop to flop | the four units |
 | Unmatched, as before: `core.fetch`, `core.exec.tb_next`, `core.decode.ra`, `core.decode.rb`, `core.host.rd_here`, the clock's port wires | the synthesis kept these names on nets it computes again from their inputs; matched, they would give one side a free value the chip can't have | |
 
 A constant flop that another piece reads must not be matched to a constant: EQY compares a constant-matched bit
@@ -219,20 +247,18 @@ counterexample.
 
 | Bug | Netlist | Technique it tests | Piece that fails |
 |---|---|---|---|
-| `swap_reset:_61146_`: unit 1's `pwq_q[7]` resets to the wrong value | synthesis | inverted flops | unit1 |
-| `swap_reset:_60562_`: unit 0's `pwh_q[7]` the same | synthesis | inverted flops, the merges kept apart | unit0 |
-| `swap_reset:_61656_`: unit 2's `p3_q[9]` (RKIND 3's *p*, 512 at reset) the same | synthesis | inverted flops | unit2 |
-| `swap_reset:_62699_`: unit 3's `wq3_q[8]` (RKIND 3's window point, 384 at reset) the same | synthesis | inverted flops | unit3 |
-| `invert_d:_60425_`: `byp_q[0]` loads the inverse | synthesis | constant flops | pins |
-| `drop_flop:_60424_`: the real flop `byp_q[4]` removed and its net tied to 0, as the synthesis does to the constant ones | synthesis | constant flops (a wrong one is caught) | pins; and `uo_out.4`, which reads it |
-| `hold_d:_62925_`: `hm_wdata[9]` never loads | synthesis | the merged SCK flop | `core.hm_wdata.9` |
-| `buf_to_inv:_63839_`: `uo_out[3]` through an inverter | synthesis | `core.host.miso` unmatched | host |
-| `rewire_d:_63017_:_63023_`: the FSM's one-hot RUN bit takes SETPC's next state | synthesis | the FSM unmatched, PDR | thread0 to thread3 |
-| `invert_d:_63769_`: a bit of the FSM's unnamed binary copy loads the inverse | synthesis | the FSM unmatched, PDR | host |
-| `invert_pin:_41138_:B`: unit 0's output A reads its latch inverted | synthesis | the latch boxes' outputs | every pad piece unit 0's output A reaches (`uo_out.0` and 8 more) |
-| `buf_to_inv:fanout3959`: a layout fanout buffer on unit 2's `tx_stf_q` inverts | final | the final netlist's buffers | unit2 |
-| `buf_to_inv:hold6185`: a hold cell on the host's `addr_q[7]` inverts | final | the final netlist's buffers | host; `core.mem.addr.0` |
-| `buf_to_inv:wire6096`: the repeater in front of `ui_in[3]`'s falling-edge latch inverts | final | the latch boxes' inputs | `core.ui_in.3`; `uo_out.0` (the repeater feeds the rising-edge sample too) |
+| `swap_reset:_63475_`: unit 1's `pwq_q[7]` resets to the wrong value | synthesis | inverted flops | unit1 |
+| `swap_reset:_62888_`: unit 0's `pwh_q[7]` the same | synthesis | inverted flops, the merges kept apart | unit0 |
+| `invert_d:_62751_`: `byp_q[0]` loads the inverse | synthesis | constant flops | pins |
+| `drop_flop:_62750_`: the real flop `byp_q[4]` removed and its net tied to 0, as the synthesis does to the constant ones | synthesis | constant flops (a wrong one is caught) | pins; and `uo_out.4`, which reads it |
+| `hold_d:_65263_`: `hm_wdata[9]` never loads | synthesis | the merged SCK flop | `core.hm_wdata.9` |
+| `buf_to_inv:_66177_`: `uo_out[3]` through an inverter | synthesis | `core.host.miso` unmatched | host |
+| `rewire_d:_65355_:_65361_`: the FSM's one-hot RUN bit takes SETPC's next state | synthesis | the FSM unmatched, PDR | thread0 to thread3 |
+| `invert_d:_66107_`: a bit of the FSM's unnamed binary copy loads the inverse | synthesis | the FSM unmatched, PDR | host |
+| `invert_pin:_43201_:B`: unit 0's output A reads its latch inverted | synthesis | the latch boxes' outputs | every pad piece unit 0's output A reaches (`uo_out.0` and 8 more) |
+| `buf_to_inv:fanout3948`: a layout fanout buffer on unit 2's `tx_stf_q` inverts | final | the final netlist's buffers | unit2 |
+| `buf_to_inv:hold6349`: a hold cell on the host's `addr_q[7]` inverts | final | the final netlist's buffers | host; `core.mem.addr.0` |
+| `buf_to_inv:wire6263`: the repeater in front of `ui_in[3]`'s falling-edge latch inverts | final | the latch boxes' inputs | `core.ui_in.3`; `uo_out.0` (the repeater feeds the rising-edge sample too) |
 
 In each run every other piece still passes. Three more bugs put an inverter straight at a latch box's pin, where the
 real netlist has only a buffer or a wire: the hold cell between a pad's two latches, the hold cell in front of an
@@ -245,7 +271,7 @@ counts only a failing piece.
 ## Running
 
 ```sh
-formal/run.sh                     # every job, about 30 minutes
+formal/run.sh                     # every job, about 51 minutes
 formal/run.sh isolation:prove     # one job
 formal/teeth.sh                   # the planted bugs
 ```
@@ -270,7 +296,7 @@ parts eqy needs, and `run.sh` puts them on PATH only when the real ones are miss
 `run.sh reset:gen` regenerates `reset_flops.sv` and `probes_reset.ys` from the RTL and fails if they differ from
 the ones here: after a change to the flops, copy the new ones in.
 
-The proofs alone (the prove tasks) take under a minute; the covers take about 25 minutes and the equivalence
+The proofs alone (the prove tasks) take under a minute; the covers take about 48 minutes and the equivalence
 check a minute or two with 4 jobs. A CI workflow would need the LibreLane image (or an OSS CAD Suite with
 yosys-slang and bitwuzla), about 30 minutes for every job or about a minute for the prove tasks, and for the
 equivalence check the PDK and a netlist from the flow. An EQY run writes a folder per piece, about 3000 files and
@@ -287,6 +313,9 @@ set also runs the netlist bugs, one EQY run each.
 | `shift_timing.sv`, `shift_timing.sby` | property 4 |
 | `reset_flops.sv`, `probes_reset.ys`, `gen_reset.py`, `reset_flops.ys` | property 5; the first two are generated |
 | `reset_pads.sv`, `reset.sby` | property 5b, and the tasks of property 5 |
+| `rk3_equiv.sv`, `rk3_equiv.sby`, `rk3_code.sv` | property 7; the code of 5.9.6's `rx_manch3`, transcribed |
+| `rk3_inv.sv`, `rk3_inv.sby` | property 7b |
+| `rk3_unit.sv`, `rk3_unit.sby`, `probes_rk3.ys` | property 7c |
 | `covers_deep.sv`, `covers_deep.sby`, `cut_cover.ys` | the deep covers |
 | `chip.eqy`, `buf_bbox.v`, `pinbuf_box.v`, `latch_box.v`, `latch_map.v`, `inv_flops.v`, `unbuf.v` | the equivalence check |
 | `plant_netlist.py` | plant a bug in a scratch copy of a netlist, for `teeth.sh` |

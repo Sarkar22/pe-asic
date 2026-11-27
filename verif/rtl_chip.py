@@ -52,12 +52,12 @@ UNIT = (('TXARM', 'tx_arm_q'), ('TXRUN', 'tx_run_q'), ('TXTL', 'tx_tl_q'), ('TXS
         ('RXCOV', 'rx_cov_q'), ('RXEF', 'rx_ef_q'), ('RXBE', 'rx_be_q'), ('RXPE', 'rx_pe_q'), ('CRC', 'crc_q'),
         ('PWQ', 'pwq_q'), ('PWH', 'pwh_q'), ('TXH', 'tx_h_q'), ('OLA', 'ola_q'), ('OLB', 'olb_q'),
         ('RXSR8', 'rx_sr8_q'), ('RXN8', 'rx_n8_q'), ('RXC8', 'rx_c8_q'), ('RXONES', 'rx_ones_q'),
-        ('PA', 'pa_q'), ('NA', 'na_q'), ('PB', 'pb_q'), ('NB', 'nb_q'), ('RXCE', 'rx_ce_q'), ('P3', 'p3_q'),
-        ('WQ3', 'wq3_q'), ('WH3', 'wh3_q'))
+        ('PA', 'pa_q'), ('NA', 'na_q'), ('PB', 'pb_q'), ('NB', 'nb_q'), ('RXCE', 'rx_ce_q'), ('RXP3', 'p3_q'),
+        ('RXRG', 'rg3_q'), ('RXRA', 'ra3_q'), ('WQ3', 'wq3_q'), ('WH3', 'wh3_q'))
 # PA, NA, PB and NB are the RTL's own: the flops P and N behind each shift output's pads (5.2, implementation note),
-# with P = L xor N in every cycle. P3, WQ3 and WH3 are RKIND 3's p and window points p - p/4 and p - p/2, in flops of
-# their own loaded with PWQ and PWH (5.9.6, implementation note).
-RTL_OWN = ('PWQ', 'PWH', 'PA', 'NA', 'PB', 'NB', 'P3', 'WQ3', 'WH3')
+# with P = L xor N in every cycle. WQ3 and WH3 are RKIND 3's window points p - p/4 and p - p/2 of its RXP3, in flops of
+# their own loaded with it in the cycle a reception starts (5.9.6, implementation note).
+RTL_OWN = ('PWQ', 'PWH', 'PA', 'NA', 'PB', 'NB', 'WQ3', 'WH3')
 SLOTS = ('txmode_q', 'txmap_q', 'txper_q', 'txtail_q', 'rxmode_q', 'rxper_q', 'rxfirst_q', 'rxend_q', 'rxcnt_q',
          'rxsync_q', 'rxopt_q', 'polyhi_q', 'polylo_q', 'chkhi_q', 'chklo_q', 'coding_q')
 FIELDS += ('sync3_q', 'sync1f_q', 'sync2f_q', 'sel_q', 'shsel_q') + tuple('u_' + f for _, f in UNIT) + \

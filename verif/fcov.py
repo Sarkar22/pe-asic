@@ -21,9 +21,13 @@ Points, by group:
   at the falling edge by each of its causes and one cancelled by sstop or ABORT; with RKIND 3, in each half step, an
   edge, a window opening, a window closing empty, a candidate, a bit from an edge and one at the candidate's deadline
   and an edge outside the window, and a pulse inside one cycle, a candidate replaced, a bit from an edge after a
-  candidate, a hunt's start in the second half, RPER 0 or 1 taken as 2 and RPER above 15 as 15; and the byte ends
-  (5.9.7): REOP's end test with 1 to 6 bits dropped, the Manchester byte end with 1 to 7, and each reason either
-  keeps every bit;
+  candidate, a hunt's start in the second half, RPER 0 or 1 taken as 2 and RPER above 15 as 15; the structural rule
+  in and before the window, an edge too early for it and one held back by a bit earlier in the cycle, the keep test
+  keeping a candidate against an edge (by the bound of 128 at RPER 2 too) and an edge overriding one, no pull in a
+  cycle with an edge in each half, and a reception on its own p, RGAIN and RACQ after RXPER or RXOPT was written
+  (5.9.6, Start); timed samples' RESYNC alone and with RACQ, an edge to HLVL pulling and one away from it not
+  (5.9.6, Timed samples); the byte ends (5.9.7): REOP's end test with 1 to 6 bits dropped, the Manchester byte end
+  with 1 to 7, and each reason either keeps every bit; and an end at the violating bit with SMODE 2;
 - host: RUN's stop, start and both masks, STEP, SETPC, RDREG and ABORT on a running and on a stopped thread, RDREG of
   each reg8 group, POST and TAKE on a full and an empty word, STATUS with BUSY 0 and 1, memory commands with a free
   memory cycle and with every thread running (lockstep.py counts the last two, since it sets sim.py's BUSY itself
@@ -152,6 +156,18 @@ def points():
           ('unit', 'rx RKIND 3 pulse inside one cycle: an edge in each half'),
           ('unit', 'rx RKIND 3 candidate replaced by a later one'),
           ('unit', 'rx RKIND 3 bit from an edge after a candidate')]
+    p += [('unit', 'rx RKIND 3 structural rule in the window'), ('unit', 'rx RKIND 3 structural rule before the window'),
+          ('unit', 'rx RKIND 3 an edge too early for the structural rule'),
+          ('unit', 'rx RKIND 3 structural rule held back: a bit given earlier in the cycle'),
+          ('unit', 'rx RKIND 3 keep test: a candidate kept against an edge'),
+          ('unit', 'rx RKIND 3 keep test: kept at RPER 2 by the bound of 128'),
+          ('unit', 'rx RKIND 3 keep test: an edge overrode a candidate'),
+          ('unit', 'rx RKIND 3 no pull: an edge in each half'),
+          ('unit', 'rx RKIND 3 reception on its own p, RXPER or RFRAC since written'),
+          ('unit', 'rx RKIND 3 reception on its own RGAIN and RACQ, RXOPT since written'),
+          ('unit', 'rx timed RESYNC: an edge pulled'),
+          ('unit', 'rx timed RESYNC with RACQ: an edge to HLVL pulled'),
+          ('unit', 'rx timed RESYNC with RACQ: an edge away from HLVL, no pull')]
     for n in range(1, 8):
         p.append(('unit', 'rx Manchester byte end: %d bit%s dropped' % (n, '' if n == 1 else 's')))
     for x in ('REOP 0', 'no bit past the last byte', 'a stuff violation'):
@@ -199,7 +215,8 @@ def points():
         p.append(('unit', 'tx %s' % x))
     for x in ('word delivered', 'last word delivered', 'overrun', 'sync found', 'stuff bit removed',
               'stuff violation', 'CRC check passed', 'CRC check failed', 'end by RCNT', 'end by REND',
-              'end by REOP', 'end by a stuff violation', 'end by the Manchester window', 'gear reached 16',
+              'end by REOP', 'end by a stuff violation', 'end by a stuff violation at its bit (SMODE 2)',
+              'end by the Manchester window', 'gear reached 16',
               'phase pulled by an edge'):
         p.append(('unit', 'rx %s' % x))
     for cmd in ('sstop', 'ABORT'):
@@ -457,6 +474,8 @@ def install(cov):
     def rx_end_before(u):
         if u.RXVIO:
             hit('unit: rx end by a stuff violation')
+        elif u.SMODE == 2 and u.RXEF & 2:           # SMODE 2: the violating bit ends the reception (5.9.7, rx_bit)
+            hit('unit: rx end by a stuff violation at its bit (SMODE 2)')
         elif u.RCNT and u.RXTOT == u.RCNT:
             hit('unit: rx end by RCNT')
         elif u.REND and u.RXIC >= u.REND:
@@ -472,6 +491,16 @@ def install(cov):
     def pull_before(u, r):
         hit('unit: rx phase pulled by an edge')
     wrap('rx_pull', pull_before, static=True)
+
+    def timed_before(c, u, e, p):                   # 5.9.6, Timed samples: with RACQ only an edge to HLVL pulls
+        if e and u.RESYNC:
+            if not u.RACQ:
+                hit('unit: rx timed RESYNC: an edge pulled')
+            elif ((c.SYNC2 >> u.RPIN) & 1) == u.HLVL:
+                hit('unit: rx timed RESYNC with RACQ: an edge to HLVL pulled')
+            else:
+                hit('unit: rx timed RESYNC with RACQ: an edge away from HLVL, no pull')
+    wrap('rx_timed', timed_before)
 
     # the half cycles: which call of tx_half() set TXH, and the two half steps of RKIND 3
     caller = {}
@@ -502,17 +531,26 @@ def install(cov):
     # in sim.py's RXPH, RXOPEN, RXCAND, RXCE and RXWIN, or the run stops: the points can't drift from the code.
     rk3 = {}
 
+    def p3(u):                                      # the p that rx_begin would load now (5.9.6, Start)
+        return 512 if u.RPER < 2 else (0xF00 | u.RFRAC) if u.RPER > 15 else (u.RPER << 8) | u.RFRAC
+
     def manch3_before(c, u, p):
         rk3[id(u)] = dict(pre=(u.RXRUN, u.RXPH, u.RXOPEN, u.RXCAND, u.RXCE, u.RXWIN, u.RXG),
                           lv=tuple((v >> u.RPIN) & 1 for v in (c.SYNC3, c.SYNC2F, c.SYNC2)), bits=[])
+        if u.RXRUN and p3(u) != u.RXP3:
+            hit('unit: rx RKIND 3 reception on its own p, RXPER or RFRAC since written')
+        if u.RXRUN and (u.RGAIN, u.RACQ) != (u.RXRG, u.RXRA):
+            hit('unit: rx RKIND 3 reception on its own RGAIN and RACQ, RXOPT since written')
 
     def manch3_after(ctx, out, c, u, p):
         st = rk3.pop(id(u))
         run, ph, op, cd, ce, wn, g = st['pre']
         lv, bits = st['lv'], st['bits']
-        w = (p >> 1) if u.RACQ and u.RGAIN != 0 and g < 16 else (p >> 2)
-        k = 0 if u.RGAIN == 0 else 1 if g <= 3 else (2, 4, 5)[u.RGAIN - 1]
-        pulled, q = False, 0
+        w = (p >> 1) if u.RXRA and u.RXRG != 0 and g < 16 else (p >> 2)
+        k = 0 if u.RXRG == 0 else 1 if g <= 3 else (2, 4, 5)[u.RXRG - 1]
+        bound = 128 if p < 768 else p >> 3
+        both = lv[0] != lv[1] and lv[1] != lv[2]
+        pulled, q, gave = False, 0, False
         for h, half in enumerate(('first', 'second')):
             if not run:
                 break
@@ -527,7 +565,20 @@ def install(cov):
                     hit('unit: rx RKIND 3 window closed empty in the %s half' % half)
                     run = 0
                 op, cd, ph = 1, 0, ph - p
-            if run and op:
+            near = op or ph >= p - w - (p >> 3)
+            if run and e and wn and not cd and near and gave:
+                hit('unit: rx RKIND 3 structural rule held back: a bit given earlier in the cycle')
+            if run and e and wn and not cd and not gave and not near:
+                hit('unit: rx RKIND 3 an edge too early for the structural rule')
+            if run and e and wn and not cd and not gave and near:
+                hit('unit: rx RKIND 3 structural rule %s the window' % ('in' if op else 'before'))
+                if not op:
+                    ph -= p
+                if not pulled:
+                    pulled, q = True, ph >> k
+                op, wn, gave = 0, 0, True
+                run = bits.pop(0)
+            elif run and op:
                 if e and ph < 0:
                     hit('unit: rx RKIND 3 candidate in the %s half' % half)
                     if cd:
@@ -535,12 +586,20 @@ def install(cov):
                         wn = 1
                     cd, ce = 1, ph
                 elif e or (cd and ph >= (p >> 3)):
-                    hit('unit: rx RKIND 3 bit %s in the %s half' % ('from an edge' if e else 'at the deadline', half))
-                    if e and cd:
+                    keep = cd and ph >= (p >> 3) and ce >= -bound
+                    hit('unit: rx RKIND 3 bit %s in the %s half' % ('from an edge' if e and not keep
+                                                                    else 'at the deadline', half))
+                    if e and cd and not keep:
                         hit('unit: rx RKIND 3 bit from an edge after a candidate')
+                        if ph >= (p >> 3):
+                            hit('unit: rx RKIND 3 keep test: an edge overrode a candidate')
+                    if e and keep:
+                        hit('unit: rx RKIND 3 keep test: a candidate kept against an edge')
+                        if ce < -(p >> 3):
+                            hit('unit: rx RKIND 3 keep test: kept at RPER 2 by the bound of 128')
                     if not pulled:
-                        pulled, q = True, (ph if e else ce) >> k
-                    op, cd, wn = 0, 0, 0
+                        pulled, q = True, (ph if e and not keep else ce) >> k
+                    op, cd, wn, gave = 0, 0, 1 if e and keep else 0, True
                     run = bits.pop(0)
             elif run and e:
                 hit('unit: rx RKIND 3 edge outside the window in the %s half' % half)
@@ -548,7 +607,10 @@ def install(cov):
                 if not pulled:
                     pulled, q = True, (ph - (p >> 1)) >> k
             ph += 128
-        ph -= q
+        if both and pulled:
+            hit('unit: rx RKIND 3 no pull: an edge in each half')
+        if not both:
+            ph -= q
         got, want = (u.RXPH, u.RXOPEN, u.RXCAND, u.RXCE, u.RXWIN), (ph, op, cd, ce, wn)
         assert got == want and not bits, 'fcov reads rx_manch3 as %s, sim.py gives %s' % (want, got)
     wrap('rx_manch3', manch3_before, manch3_after)

@@ -1,7 +1,9 @@
 # Coverage
 
-Updated 2026-11-21: the half cycles (THALF, RKIND 3, REOP's byte end), then RKIND 3's decoder as section 5.9.6 now
-gives it, with the Manchester byte end (5.9.7).
+Updated 2026-11-23: RKIND 3's decoder with its structural rule and keep test, and a reception of RKIND 3 that keeps
+the *p*, RGAIN and RACQ it started with (5.9.6); timed samples' RESYNC with RACQ (5.9.6); SMODE 2's end at the
+violating bit (5.9.7). Before that, 2026-11-21: the half cycles (THALF, RKIND 3, REOP's byte end) and the Manchester
+byte end.
 
 Three measures of how much of the chip the tests reach, all from one set of runs:
 
@@ -18,7 +20,7 @@ Three measures of how much of the chip the tests reach, all from one set of runs
 |---|---|---|
 | The Verilator models (Verilator 5 and a C++ compiler) | `make -C verif JOBS=8` | |
 | One lockstep run, on those models | `python3 verif/lockstep.py --gen chips --images 200` | 10 s |
-| Everything in this page: coverage models, every run of section 2.4, the program benches on the RTL, the reports | `verif/coverage.sh [OUT]` | 20 min (66 min with 3 threads and the 24 benches of 2026-11-21; 91 min with the `rk3` images and the 10BASE-T bench's new rows, 46 of them that bench's) |
+| Everything in this page: coverage models, every run of section 2.4, the program benches on the RTL, the reports | `verif/coverage.sh [OUT]` | 20 min (66 min with 3 threads and the 24 benches of 2026-11-21; 91 min with the `rk3` images and the 10BASE-T bench's new rows, 46 of them that bench's; 115 min with the `fcs` and `can` images and the 10BASE-T bench's rows of 2026-11-23, 65 of them that bench's) |
 | The proof of section 3.3, with SymbiYosys and bitwuzla as in `formal/` | `sby -f tx_rl.sby prove` and `cover`, in `verif/unreachable/` | seconds |
 
 `verif/coverage.sh` writes `OUT/code.md` and `OUT/code_uncovered.txt` (code coverage per module, and every point
@@ -51,14 +53,15 @@ Both chips get the same memory, the same pad inputs every cycle and the same hos
 3. The pipeline, by where each thread's memory cycle puts its word (3.1, 4.2): IV and IR in stages 2 to 4, a load's
    data, and a `ld` or `st`'s address and data in its memory cycle. TB, SYNC1, SYNC2, SYNC3, SYNC1F and SYNC2F.
 4. Every shift unit: each name of 5.9.2 (CMT aside: it lasts one cycle, so between cycles it reads 0) and the 16
-   slots of 5.9.3; the RTL's window points PWQ and PWH against p - p/4 and p - p/2 of the slots as they stand, and
-   RKIND 3's own p and window points P3, WQ3 and WH3 likewise (5.9.6, implementation note); and its pad flops P and
-   N, with P = LA xor N (5.2, implementation note). While a unit receives with RKIND 3, its state must also lie in
-   the set RKIND 3's datapath is written for: RXG 1 to 16, RXCAND only with RXOPEN, RXPH at least 0 with the window
-   closed and at least 256 - p with it open, below p + 128 with RGAIN 1 to 3 and below 7p/4 - 128 with RGAIN 0, and
-   RXCE from 256 - p to -1 with RXCAND. The code keeps that set while RXPER and RXOPT stay as the reception found
-   them; a write of either in mid-reception (section 10, defined 8) can leave it, and the bench counts such cycles
-   rather than failing them for that, while the compare of the state goes on.
+   slots of 5.9.3, RXP3, RXRG and RXRA among the names; the RTL's window points PWQ and PWH against p - p/4 and
+   p - p/2 of the slots as they stand, and RKIND 3's window points WQ3 and WH3 against p - p/4 and p - p/2 of RXP3
+   (5.9.6, implementation note); and its pad flops P and N, with P = LA xor N (5.2, implementation note). While a unit
+   receives with RKIND 3, its state must also lie in J', the set of 5.9.6's Period bullet, with the reception's own
+   p and RGAIN (RXP3, RXRG): RXG 1 to 16, RXCAND only with RXOPEN, RXPH at least 128 - p with the window closed and
+   at least 256 - p with it open, below p + 128 with RGAIN 1 to 3 and below 7p/4 - 128 with RGAIN 0, and RXCE from
+   256 - p to -1 with RXCAND. A reception keeps its p, RGAIN and RACQ whatever RXPER and RXOPT do (5.9.6, Start), so
+   leaving that set is a failure; the bench counts the unit cycles of receptions after a write of either in
+   mid-reception (section 10, defined 8). `formal/rk3_unit.sby` proves the same set on the unit.
 5. The pin layer (5.2 to 5.4, 5.9.2): OUT, SHD, OE, SHOE, OD, BYP, SHBYP, OWN, SEL and SHSEL.
 6. M0..M7, FULL and BUSY.
 7. All of memory, every 64 cycles and at the end.
@@ -73,8 +76,10 @@ Both chips get the same memory, the same pad inputs every cycle and the same hos
 | `rows` | Every word of memory a random legal word of any of the 89 rows of 6.3, and 7% random 16-bit words, so some are illegal (section 10). The inputs hold for 1, 3, 20 or 200 cycles. Every 1500 cycles one thread's D is put half the ring from TB on both chips, so STALE sets (3.5) without waiting 32,768 cycles |
 | `wide` | As `prog`, but every slot is written, each field drawn over its whole range (5.9.3): every CRC width, CINIT, CXOR, CMODE, SMODE and SN, TPER and RPER up to 65535, TFRAC, TAIL, every decoder and option. Pins are any of io0 to io7 in IN, PP or OD, uo pins and bypass lanes. One image in four is reset in mid-run (section 8): `rst_n` goes low for 4 edges on the RTL and is released through its synchroniser, and `sim/sim.py` starts again as a new chip with the RTL's memory, which has no reset |
 | `directed` | Programs in the assembly language of 6.6 for corners chance doesn't reach, one per seed, with no random host traffic: RXIC saturating at 65535 and starting again at an edge (5.9.6); TPER 65535 with a TFRAC carry (5.9.5), stopped by an ABORT in the very cycle that writes the 65,536-cycle symbol, then started again; and CTX moved in the middle of a CRC append (section 10, defined 17) |
-| `half` | Half cycles (3.1): even seeds a directed image, a THALF Manchester sender on io0 and io1 looped back into an RKIND 3 receiver at its bit time or near it, and an NRZ sender whose tail is an SE0 into timed samples with REOP (the byte end of 5.9.7), with host traffic in one gap of 33; odd seeds random unit images with slot values biased to THALF, fractions, RKIND 3, short RPER and REOP. Every input has its own level at the falling edge, and a looped-back `uio` pad gives the falling-edge sample its first-half level and the rising-edge sample its second-half level (3.1). The other generators give one level per cycle, but `rk3` |
+| `half` | Half cycles (3.1): even seeds a directed image, a THALF Manchester sender on io0 and io1 looped back into an RKIND 3 receiver at its bit time or near it, and an NRZ sender whose tail is an SE0 into timed samples with REOP (the byte end of 5.9.7), with host traffic in one gap of 33; odd seeds random unit images with slot values biased to THALF, fractions, RKIND 3, short RPER and REOP. Every input has its own level at the falling edge, and a looped-back `uio` pad gives the falling-edge sample its first-half level and the rising-edge sample its second-half level (3.1). The other generators give one level per cycle, but `rk3`, `fcs` and `can` |
 | `rk3` | All four receive halves on RKIND 3 (5.9.6), at both edges of every cycle: each thread hunts on its own pin, `ui4` to `ui7`, for IEEE 802.3 Manchester frames at its decoder's bit time or 0.2% or 2% off it, with its own RPER (0 to 23, so both of RKIND 3's clamps), RFRAC, RGAIN, RACQ, RINV, RDIFF, RMSB, sync pattern, RCNT, REND, CRC, stuffing and REOP (in 7 receptions of 10), and takes words in a loop. Each frame has its own jitter, none, random, section 7.3's fixed pattern or its mirror, a phase step, or pulses of half a cycle, and 0 to 7 bits after its last whole octet, so the Manchester byte end (5.9.7) ends many receptions. Host traffic in one gap of 33 |
+| `fcs` | As `rk3`, with IEEE 802.3 frames that carry a real FCS: threads 0 and 1 mostly 802.3 receivers (the SFD as the sync pattern, CRC-32 and its residue, REOP) on frames with 0 to 7 excess bits, one in 8 with an FCS bit wrong, and thread 0 writing RXOPT after every word it takes, so in mid-reception: a reception keeps its p, RGAIN and RACQ (5.9.6, Start) |
+| `can` | As `rk3`, with CAN-like lines: timed samples that hunt a falling edge, RESYNC mostly with RACQ (only an edge to HLVL pulls, 5.9.6), SMODE 2 mostly with N 5 (a stuff violation ends the reception at its bit, 5.9.7) and CRC-15 to RCNT, on stuffed lines with dominant bits stretched, the sender's clock up to 3% off, a cycle of jitter and stuff violations |
 
 And `--corners`, instead of images: 2,708 scripted cases, each on every thread, with host commands landing in the
 cycle the script picks, compared every cycle as above:
@@ -175,8 +180,9 @@ window a cycle and runs on, with RXPH one new period above the code's. Each imag
 the cycles after it are not compared. Re-run alone, each has such a write in its differing unit during the
 reception, in the cycle before the difference: RXPER 39 to 1 (prog seed 100394, *p* 3840 to 512), 295 to 4 (wide
 500034, *p* 3938 to 1122), 143 to 0 (wide 501472) and 32768 to 0 (half 600593). Nothing else differs. (A write of
-RXOPT that moves RGAIN 0 to a gain with RACQ can do the same.) So `verif/coverage.sh` as written stops at run 2 on
-this RTL; the numbers on this page come from the same runs, carried on past each such image.
+RXOPT that moves RGAIN 0 to a gain with RACQ can do the same.) So `verif/coverage.sh` as written stopped at run 2
+on that RTL; the numbers for it came from the same runs, carried on past each such image. Below, a reception keeps
+the *p*, RGAIN and RACQ it started with, and the four images agree.
 
 Run 15 reaches RKIND 3's half steps: 3,785,403 unit cycles of an RKIND 3 reception, 12,458 with an edge in both
 halves, 184,286 bits given at a candidate's deadline, and 3,394 receptions that the Manchester byte end ended at a
@@ -190,6 +196,47 @@ The program benches on the RTL (`vlcov.py benches`, `programs/check.py` with the
 decoder as 5.9.6 now gives it and the Manchester byte end: 869 checks of the same 24 benches, all pass, among them
 the 10BASE-T bench's 109, with frames at 802.3's jitter, the fixed patterns of 7.3, phase steps, a partner 0.01% off
 on full-size frames and frames that end in excess bits.
+
+On the RTL of 2026-11-23, with a reception of RKIND 3 that keeps the *p*, RGAIN and RACQ it started with (5.9.6,
+Start), RKIND 3's structural rule and keep test, timed samples' RESYNC with RACQ and SMODE 2's end at the violating
+bit, the same runs with the same seeds, and the `fcs` and `can` images as runs 16 and 17:
+
+| Run | Generator | Host | Images × cycles | Cycles compared | Differ |
+|---|---|---|---|---|---|
+| 1 | `chips` | `mixed` | 2,000 × 6,000 | 12,000,000 | 0 |
+| 2 | `prog` | `mixed` | 1,000 × 6,000 | 6,000,000 | 0 |
+| 3 | `rows` | `mixed` | 2,000 × 6,000 | 12,000,000 | 0 |
+| 4 | `wide` | `mixed` | 2,000 × 6,000 | 12,000,000 | 0 |
+| 5 to 8 | `chips`, `prog`, `rows`, `wide` | `pins` | 1,100 × 6,000 | 6,600,000 | 0 |
+| 9 to 11 | `chips`, `rows`, `wide` | `mixed` | 48 × 70,000 | 3,360,000 | 0 |
+| 12 | `directed` | `none` | 3 × 70,000 | 210,000 | 0 |
+| 13 | `half` | `mixed` | 600 × 6,000 | 3,600,000 | 0 |
+| 14 | `--corners` | scripted | 2,708 cases | | 0 |
+| 15 | `rk3` | `mixed` | 400 × 6,000 | 2,400,000 | 0 |
+| 16 | `fcs` | `mixed` | 400 × 6,000 | 2,400,000 | 0 |
+| 17 | `can` | `mixed` | 400 × 6,000 | 2,400,000 | 0 |
+| | all | | 9,951 images and the corners | 62,970,000 | 0 |
+
+**No image differs, and `verif/coverage.sh` runs to its end** (115 minutes with 3 threads). The four images that
+differed on the RTL of 2026-11-21 are among these runs' seeds and give 0 differences: each still writes RXPER in
+mid-reception, and the reception goes on with the *p* it started with, on both sides. The bench counts the unit
+cycles of RKIND 3 receptions after such a write: 104 in run 2, 2,510 in run 4, 53 in run 13 and 90,989 in run 16,
+where thread 0 writes RXOPT after every word it takes; every one of them stays in the set of 2.1, item 4.
+
+Run 15 gives 3,783,866 unit cycles of an RKIND 3 reception, 12,418 with an edge in both halves, 148,523 bits given
+at a candidate's deadline and 3,405 receptions that the Manchester byte end ended at a byte boundary. In run 16
+threads 0 and 1 are mostly 802.3 receivers that check CRC-32 against its residue on frames with a real FCS, many of
+them ending in excess bits: 9,296 RKIND 3 receptions passed their CRC check in that run. (In the `rk3` images
+threads 2 and 3 leave the CRC polynomial and check value at 0, so their CRC register reads 0, and passes, once 32
+bits have gone through it; run 15's 10,922 passes include those.) Run 17 gives 2,063,796 unit cycles of timed
+reception with RESYNC and RACQ and 3,900 receptions ended at a stuff violation with SMODE 2. Run 13 gives 35,015
+cycles in which a pad's two halves differ and 821 receptions that REOP's byte end ended at a byte boundary.
+
+The program benches on this RTL: 897 checks of 24 benches, all pass, among them the 10BASE-T bench's 96,
+with the rows for 802.3 B.4.1's jitter budget (a cable's data-dependent jitter in both signs, with random jitter),
+the mirror pattern on frames from a universally administered source, the partner's rate 0.01% off, and the CAN
+unit bench's checks of the two receive rules (a third node behind two arbitrating ones, dominant bits stretched at
+RXD, the sender's clock, the stuff-error flag in the next bit).
 
 ### 2.5 Planted bugs
 
@@ -209,6 +256,16 @@ the batch moved its line: integration 31 of 31 (chips 31), host replies 10 of 10
 prog 1, wide 1) and 12 of the other 13 by the corners, the same one missed as before. The
 half-cycle paths have their own planted bugs, caught by the `half` generator, the program benches and the proofs
 of `formal/`.
+
+On the RTL of 2026-11-23, where `pe_shift.sv` is the only source file that changed, the integration, host and link
+sets were planted again with the same seeds: integration 31 of 31 (chips 31), host replies 10 of 10 (chips 9, prog
+1), the link 6 of 8, the same two missed. Of the earlier review's list, the control and the 13 bugs that only the
+corners caught before were planted again, the corners first: 12 of the 13 caught by the corners (`stale4`,
+`boundary` 3, `nowstale`, `steplate`, `world`, `stepld`, `ring` 2, `abortpin` 2), the same one missed (S07,
+equivalent within 9.1); its other 67 bugs, which the images caught before, were not run again. The control survives
+every generator and seed range the runner uses. RKIND 3's structural rule and keep test, a reception's held *p*,
+RGAIN and RACQ, and the two receive rules for CAN have their own planted bugs, caught by the `rk3`, `fcs`, `can` and
+`half` generators, by `formal/`'s RKIND 3 proofs and by `test/test.py`'s tests at the pins.
 
 The control survives every run. The three missed are equivalent within the specification. With CS high,
 `pe_host.sv` resets its byte counter and its command; the command reset is redundant, because every use of the
@@ -273,6 +330,28 @@ written, 472 branch and 6,602 toggle points; its decoder is smaller now). The po
 | `pe_decode` | 91 of 91 (100.0%) | 0 of 0 (-) | 62 of 62 (100.0%) |
 | all | 312 of 313 (99.7%) | 640 of 668 (95.8%) | 12982 of 13202 (98.3%) |
 
+On the RTL of 2026-11-23: every run of section 2.4 (runs 1 to 17, the `fcs` and `can` images included) and the 24
+program benches on the RTL. `pe_shift` has 20 more branch points and 190 more toggle points than on 2026-11-21: RKIND
+3's structural rule, keep test and one bit a cycle, the reception's held *p*, RGAIN and RACQ (RXP3, RXRG, RXRA), the
+timed samples' pull that RACQ keeps to edges to HLVL, and SMODE 2's end at the violating bit. Every new branch point
+is reached; of the new toggle points, 18 never toggle, the zero-extended top bits of two of the block's values
+(section 3.4, row 10). The points missed are those of sections 3.3 and 3.4.
+
+| Module | Line points hit | Branch points hit | Toggle points hit |
+|---|---|---|---|
+| `pe_core` | 7 of 7 (100.0%) | 10 of 10 (100.0%) | 2385 of 2386 (100.0%) |
+| `pe_thread` | 4 of 4 (100.0%) | 68 of 68 (100.0%) | 618 of 618 (100.0%) |
+| `pe_exec` | 85 of 85 (100.0%) | 38 of 38 (100.0%) | 1194 of 1210 (98.7%) |
+| `pe_pins` | 12 of 13 (92.3%) | 30 of 30 (100.0%) | 924 of 982 (94.1%) |
+| `pe_shift` | 65 of 65 (100.0%) | 428 of 456 (93.9%) | 6413 of 6576 (97.5%) |
+| `pe_host` | 39 of 39 (100.0%) | 62 of 62 (100.0%) | 684 of 684 (100.0%) |
+| `pe_spi` | 2 of 2 (100.0%) | 6 of 6 (100.0%) | 88 of 88 (100.0%) |
+| `pe_mailbox` | 4 of 4 (100.0%) | 16 of 16 (100.0%) | 476 of 476 (100.0%) |
+| `pe_regfile` | 3 of 3 (100.0%) | 2 of 2 (100.0%) | 132 of 132 (100.0%) |
+| `pe_mem` | 0 of 0 (-) | 0 of 0 (-) | 178 of 178 (100.0%) |
+| `pe_decode` | 91 of 91 (100.0%) | 0 of 0 (-) | 62 of 62 (100.0%) |
+| all | 312 of 313 (99.7%) | 660 of 688 (95.9%) | 13154 of 13392 (98.2%) |
+
 ### 3.3 Every line and branch point never hit
 
 After every run, 3 kinds of point remain, all unreachable in this chip:
@@ -289,9 +368,9 @@ After every run, 3 kinds of point remain, all unreachable in this chip:
 | `CUT_TFRAC` | TFRAC | 170 |
 | `CUT_RESYNC` | RESYNC | 200 |
 | `CUT_RFRAC` | RFRAC | 199, 585 |
-| `CUT_CRC` | the CRC register | 203, 214 to 219, 221, 540, 855, 937 |
+| `CUT_CRC` | the CRC register | 203, 214 to 219, 221, 540, 867, 943 |
 | `CUT_LFSR` | CMODE 2 | 220 |
-| `CUT_STUFF` | the stuffer and the destuffer | 222, 223, 231, 541, 852 |
+| `CUT_STUFF` | the stuffer and the destuffer | 222, 223, 231, 541, 864 |
 | `CUT_EOP` | REOP | 224 |
 
 Before the holes were closed (section 4.4), 7 more were missed, all reachable and only not stimulated: the decode
@@ -304,6 +383,9 @@ The half cycles add no line or branch point that stays unhit: every arm of the R
 and the pad stage is reached, by the `half` images above all (section 2.4, run 13), and the points missed are the
 same 29 as on 2026-11-11, at the lines above. So does RKIND 3's decoder as now given: every arm of its block
 `rk3n_f` and of the Manchester byte end's restore and check is reached, by the `rk3` images above all (run 15).
+On the RTL of 2026-11-23 the same 29 points are missed, three of them at lines that moved (`CUT_STUFF`'s 852 to 864,
+`CUT_CRC`'s 855 to 867 and 937 to 943; the table gives the new lines), and every arm of RKIND 3's block with its
+structural rule and keep test, of the timed samples' RESYNC with RACQ and of SMODE 2's end is reached.
 
 ### 3.4 Bits that never toggle
 
@@ -320,7 +402,7 @@ Every bit left is constant by design, but one, row 12:
 | 7 | `pe_word` (`pe_shift`) | 15 to 3 | `{13'd0, RXPE}`: RXPE is 3 bits (5.9.2) |
 | 8 | `pp`, `pw` / `p2`, `mfull` (`pe_shift`) | 17, 16 / 17 to 15 | Periods of 16 and 15 bits, zero-extended into the Manchester decoder's 18-bit signed arithmetic |
 | 9 | `rt`, `nrt`, `sp`, `ph_beg` (`pe_shift`) | `rt`, `nrt`: 7 to 0 and 25, 24; `sp`: 25, 24; `ph_beg`: 6 to 0 and 24 | The timed decoder's 26-bit phase words, in 256ths of a cycle: `rt` and `nrt` are FIRST - 1 and FIRST shifted left by 8, so their low byte is constant (0, and 1 in `nrt`, which is inverted), a phase at a start is a multiple of 128 (256, or 128 for RKIND 3's start in the second half, 5.9.6), and the top bits of all four extend values of 24 bits or fewer |
-| 10 | `p`, `wq`, `wh` / `p2` / `dec` (`pe_shift`, in RKIND 3's block `rk3n_f`) | 14 to 12 / 14 to 11 / 14 to 9 | RKIND 3's *p* (512 to 4095) and its two window points, 12 bits, and *p*/2 and *p*/8, 11 and 9 bits, zero-extended into the block's 15-bit signed arithmetic (5.9.6, implementation note). This `p2` is not row 8's: the report lists the two under one name |
+| 10 | `p`, `wq`, `wh`, `wsel` / `p2` / `dec`, `kbd` (`pe_shift`, in RKIND 3's block `rk3n_f`) | 14 to 12 / 14 to 11 / 14 to 9 | RKIND 3's *p* (512 to 4095), its two window points and the one of them the structural rule's bound takes (`wsel`, by the window's width), 12 bits; *p*/2, 11 bits; and *p*/8 and the keep test's bound (`kbd`: 128 when *p* is below 768, else *p*/8), 9 bits; all zero-extended into the block's 15-bit signed arithmetic (5.9.6, implementation note). This `p2` is not row 8's: the report lists the two under one name |
 | 11 | `rx_n8_q` (`pe_shift`) | 2 to 0 | RXN8 is RXN copied at each byte boundary (5.9.7, the byte end), so 0, 8 or 16: its low 3 bits are 0 |
 | 12 | `pwh_q` (`pe_shift`) | 15, from 1 to 0 only | Reachable, and not reached in these runs: bit 15 of the window point p - p/2 is 1 only for p = 65535 (RPER 255 or more with RFRAC 255), and falls back only when a later `scfg` gives a shorter period or a reset follows. The 2026-11-11 runs hit it; the generators now draw other slot values (THALF and RKIND 3 among them), and none of them falls back from it |
 
@@ -335,7 +417,7 @@ and counts each point every time it happens. The lockstep shows the RTL did the 
 |---|---|---|
 | row | 376 | Each of the 89 rows of 6.3 run on each thread; `recv`, `send`, `txw` and `rxw` stalling on each thread; an illegal word on each thread (section 10) |
 | pin | 51 | `pcfg` from each mode to each on each kind of pin (uio IN, PP and OD; lane PP and BYP; other uo PP), a claim from another thread and a `pcfg` on a pin that is on a shift output (5.3, section 10, defined 9); `smap` of each output by the owner and by another thread; each change of SEL at a commit, on each kind of pin; an open-drain pin on a shift output (5.2, 5.4) |
-| unit | 351 | The settings each send and reception starts with (5.9.3): every CRC width with the CRC on, CINIT and CXOR in each CRC mode, every CMODE, SMODE with every SN, TPER, RPER, TFRAC, TAIL, FIRST, REND, RCNT, CSKIP and SYNCLEN ranges, SYMS, TGLA and TGLB, outside clocks rising and falling, TMSB, every output code, every RKIND with RDIFF, RINV, RMSB, RESYNC, RACQ, REOP, RGAIN, and the hunt. Every change of each half's state, and each send and receive state together (5.9.5, 5.9.6). What the halves do: underruns at a start and after a word, an end at the last word, stuff bits sent and removed, a stuff violation, an appended CRC, words loaded while sending and into an idle shift register, words and last words delivered, overruns, sync found, ends by RCNT, REND, REOP, a violation and the Manchester window, the CRC check passing and failing, the receive gear reaching 16, a phase pulled by an edge (5.9.5 to 5.9.7). `sstop` and ABORT in each state of each half (5.9.4, 9.3); `sstat` clearing TXUR and RXOVR. The half cycles (3.1, 5.2): THALF 0 and 1 at a start; a move put at the falling edge by a symbol, by the end of a send and by the end of a tail, and one cancelled by `sstop` or ABORT (5.9.5); with RKIND 3, in each half step, an edge, a window opening, a window closing empty, a candidate, a bit from an edge, a bit at a candidate's deadline and an edge outside the window, then a pulse inside one cycle (an edge in each half), a candidate replaced by a later one, a bit from an edge after a candidate, a hunt started in the second half, RPER 0 or 1 taken as 2 and RPER above 15 as 15, and the RPER ranges (5.9.6); REOP's byte end dropping 1 to 6 bits, and keeping every bit for each of its reasons: no bit past the last byte, a 0 there, seven bits, a stuff violation; the Manchester byte end dropping 1 to 7 bits, and keeping every bit with REOP 0, with no bit past the last byte, or after a stuff violation (5.9.7) |
+| unit | 365 | The settings each send and reception starts with (5.9.3): every CRC width with the CRC on, CINIT and CXOR in each CRC mode, every CMODE, SMODE with every SN, TPER, RPER, TFRAC, TAIL, FIRST, REND, RCNT, CSKIP and SYNCLEN ranges, SYMS, TGLA and TGLB, outside clocks rising and falling, TMSB, every output code, every RKIND with RDIFF, RINV, RMSB, RESYNC, RACQ, REOP, RGAIN, and the hunt. Every change of each half's state, and each send and receive state together (5.9.5, 5.9.6). What the halves do: underruns at a start and after a word, an end at the last word, stuff bits sent and removed, a stuff violation, an appended CRC, words loaded while sending and into an idle shift register, words and last words delivered, overruns, sync found, ends by RCNT, REND, REOP, a violation and the Manchester window, the CRC check passing and failing, the receive gear reaching 16, a phase pulled by an edge (5.9.5 to 5.9.7). `sstop` and ABORT in each state of each half (5.9.4, 9.3); `sstat` clearing TXUR and RXOVR. The half cycles (3.1, 5.2): THALF 0 and 1 at a start; a move put at the falling edge by a symbol, by the end of a send and by the end of a tail, and one cancelled by `sstop` or ABORT (5.9.5); with RKIND 3, in each half step, an edge, a window opening, a window closing empty, a candidate, a bit from an edge, a bit at a candidate's deadline and an edge outside the window, then a pulse inside one cycle (an edge in each half), a candidate replaced by a later one, a bit from an edge after a candidate, a hunt started in the second half, RPER 0 or 1 taken as 2 and RPER above 15 as 15, and the RPER ranges (5.9.6); REOP's byte end dropping 1 to 6 bits, and keeping every bit for each of its reasons: no bit past the last byte, a 0 there, seven bits, a stuff violation; the Manchester byte end dropping 1 to 7 bits, and keeping every bit with REOP 0, with no bit past the last byte, or after a stuff violation (5.9.7); with RKIND 3, the structural rule in the window and before it, an edge too early for it and one it holds back because a bit came earlier in the cycle, the keep test keeping a candidate against an edge (by the bound of 128 at RPER 2 too) and an edge overriding a candidate, no pull in a cycle with an edge in each half, and a reception on its own *p*, and on its own RGAIN and RACQ, after RXPER or RXOPT was written (5.9.6); timed samples' RESYNC alone and with RACQ, where an edge to HLVL pulls and one away from it doesn't (5.9.6); an end at a stuff violation's own bit with SMODE 2 (5.9.7) |
 | host | 36 | Each of RUN stop, RUN start, both masks, STEP, SETPC, RDREG and ABORT on a running and on a stopped thread; RDREG of each `reg8` group of a stopped thread; POST to a full and an empty word, TAKE of a full and an empty word, STATUS with BUSY 0 and 1, WRMEM and RDMEM with a free memory cycle and with every thread running, ABORT with a uio pin on a shift output (section 9) |
 | event | 47 | Each way of arming (`tick`, `edge` with a constant and with a register, `now`, `until` and `untilm`, each with and without a timeout) and each way of ending (on time, late, a match, the inbox, a timeout on time and past due, cancelled), with LATE 0 and 1 after it; a deadline armed on a stale D, so late; STALE setting; `tlate` reading LATE 0 and 1 (3.3 to 3.5) |
 | mail | 42 | `recv`, `send`, `tryrecv` and `trysend` on a full and an empty word; for each of the 8 words, a thread putting, a thread taking, the host putting and the host taking; a host POST and TAKE in the cycle a thread's mailbox row used the same word (9.4) |
@@ -363,6 +445,28 @@ times, replaced a candidate by a later one 5,945 times, saw a pulse inside one c
 times, and its hunt started in the second half 21,123 times; the Manchester byte end dropped 1 to 7 bits 968, 571,
 497, 415, 393, 456 and 547 times; a move at the falling edge cancelled by `sstop` or ABORT happened 909 times, and a
 symbol moved at the falling edge 47,994.
+
+On the RTL of 2026-11-23, every run of section 2.4 (runs 1 to 17): the unit group has 14 more points, for RKIND 3's
+structural rule and keep test, a reception's held *p*, RGAIN and RACQ, the timed samples' RESYNC with RACQ and SMODE
+2's end at the violating bit, and every one of them is hit. The 8 holes are those of 2026-11-21.
+
+| Group | Points | Hit | Holes |
+|---|---|---|---|
+| row | 376 | 376 | 0 |
+| pin | 51 | 51 | 0 |
+| unit | 365 | 357 | 8 |
+| host | 36 | 36 | 0 |
+| event | 47 | 47 | 0 |
+| mail | 42 | 42 | 0 |
+| all | 917 | 909 | 8 |
+
+The new points with the fewest hits: the structural rule held back because a bit came earlier in the cycle, 21 times
+(it needs the wide window, *p* below 1024 and an edge in each half after a kept candidate's bit); an edge overriding
+a candidate in its deadline half step, 2,150; an end at a stuff violation's own bit with SMODE 2, 5,687; the keep
+test keeping a candidate at RPER 2 by the bound of 128, 6,661; and the structural rule before the window, 7,635.
+RKIND 3 receptions went on with their own *p* in 91,132 unit cycles after RXPER or RFRAC was written, and with their
+own RGAIN and RACQ in 82,206 after RXOPT was; with RACQ, 47,693 edges away from HLVL pulled nothing while 43,711
+edges to HLVL pulled.
 
 ### 4.3 Holes
 
@@ -403,6 +507,9 @@ Each point the "before" stimulus missed is credited to the first run, in this or
    written by hand from sections 2 to 9, and the program benches and `programs/sigrok/` check behaviour against
    the protocol standards instead.
 5. Builds with a `CUT_` option of `pe_shift.sv` set are not measured.
-6. The `rk3` images' frames seldom end with a right CRC, so a wrong end check of the Manchester byte end, one that
-   judged the CRC register's live low half as REOP's end test does, can pass every lockstep run. `test/test.py`'s
-   `test_eth_dribble`, whose good frames end in excess bits, fails on such a copy.
+6. A wrong end check of the Manchester byte end, one that judged the CRC register's live low half as REOP's end
+   test does, once passed every lockstep run, since the `rk3` images' frames seldom ended with a right CRC. On the
+   RTL of 2026-11-23 the lockstep catches it, in the `fcs` images (802.3 frames with a real FCS and excess bits; the
+   first difference in image 800001) and in the `rk3` images (image 700003), and `test/test.py`'s
+   `test_eth_dribble`, `test_eth_excess_fixed` and `test_eth_excess_mirror`, whose good frames end in excess bits,
+   each fail on such a copy.

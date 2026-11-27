@@ -184,6 +184,49 @@ FRAMES = [(0x555, [0xAA]), (0x123, [1, 2, 3, 4, 5, 6, 7, 8]), (0x000, [0] * 8), 
           (0x0F0, [0xF0, 0x0F, 0xFF, 0x00])]
 
 
+class LagRival(K.Rival):
+    """can.Rival that starts at its own time, lam cycles after the winner's SOF on the bus, as a node whose
+    transceiver loop and synchronisation take that long; it still drops out when it loses arbitration."""
+
+    def see(self, c, lv):
+        self.p = lv
+        if self.t is not None and self.alive and not self.done:
+            k = int((c - self.t) / self.bit)
+            f = (c - self.t) / self.bit - k
+            if 0.7 < f < 0.75 and k < len(self.bits) and self.bits[k] == 1 and lv == 0:
+                self.alive = False
+
+
+def third_node(lam, b=B):
+    """The chip as a third node: two other nodes arbitrate, the loser starting lam cycles after the winner's SOF,
+    so every dominant bit of the arbitration field is lam cycles longer at RXD (its falling edge from the winner,
+    its rising edge from the loser). True if the chip reports the winner's frame and ACKs it, and the reference
+    decoder (which resynchronizes on recessive-to-dominant edges only) reads it clean."""
+    t0 = 4000
+    win, lose = (0x244, [9]), (0x246, [1, 2])
+    bw = C.frame_bits(*win)
+    riv = LagRival(C.frame_bits(*lose), float(b), start=t0 + lam)
+    r, img, w, bus = run([K.Sender([(t0, bw)], float(b)), riv], cycles=t0 + len(bw) * b + 3000, b=b)
+    fr = decode(r, b=b)
+    return (parse(w) == [want_rx(*win)] and not r.health() and len(fr) == 1 and fr[0]['id'] == win[0] and
+            fr[0]['crc_ok'] and fr[0]['ack'] and not riv.alive)
+
+
+def flag_start(ident, data, b=B):
+    """A sender puts the run's value once more after five equal bits past bit 20 (a stuff error, Bosch 5) and then
+    releases the bus, so the next dominant edge is the chip's error flag. Returns (where it starts, in bit times
+    after the violating bit ends; the reports)."""
+    st = C.stuff(C.with_crc(ident, data)[0])
+    for k in range(5, len(st)):
+        if st[k - 5:k] in ([0] * 5, [1] * 5) and k > 20:
+            break
+    t0 = 4000
+    bad = st[:k] + [st[k - 1]] + [1] * 40
+    r, img, w, bus = run([K.Sender([(t0, bad)], float(b))], cycles=t0 + len(bad) * b + 2000, b=b)
+    e = [t for t, v in r.wave('io', 0).edges(t0) if v == 0]
+    return ((e[0] - (t0 + (k + 1) * b)) / b if e else None), parse(w)
+
+
 def crc_tail_stuffed():
     """Frames whose CRC sequence ends in five equal bits, so a stuff bit follows it (Bosch 5)."""
     out = []
@@ -254,7 +297,7 @@ def main(log):
                 good += parse(w) == want[:3] and acks(decode(r)) == [True] * 3 and not r.health()
     log.check('RX on every thread and alignment at 2 sender phases', good == runs, '%d of %d' % (good, runs))
 
-    for e in (0.005, -0.005, 0.01, -0.01, 0.015, -0.015):
+    for e in (0.005, -0.005, 0.01, -0.01, 0.015, -0.015, 0.02, -0.02, 0.03, -0.03):
         s, t = sender(FRAMES, err=e)
         r, img, w, bus = run([s], cycles=t + 3000)
         fr = decode(r, err=e)
@@ -278,13 +321,39 @@ def main(log):
             log.check('RX %s back to back at the shortest interframe space, %d kbit/s' % (name, 50000 // bit),
                       parse(w) == [want_rx(i, d) for i, d in frames] and acks(decode(r, b=bit)) == [True] * len(frames)
                       and not r.health(), (parse(w)[:1], r.health()))
+    for a in (26, 50, 70):
+        s, t = sender(FRAMES)
+        r, img, w, bus = run([s], cycles=t + 3000, asym=a)
+        log.check('RX dominant bits stretched by %d cycles on the RXD path: only falling edges resynchronize (RACQ), '
+                  'so the stretch moves no sample' % a, parse(w) == want and acks(decode(r)) == [True] * 6,
+                  (parse(w)[:1], acks(decode(r))))
     ok = []
-    for a in (24, 26):
+    for a in (72, 76):
         s, t = sender(FRAMES)
         r, img, w, bus = run([s], cycles=t + 3000, asym=a)
         ok.append(parse(w) == want and acks(decode(r)) == [True] * 6)
-    log.check('limit: a dominant bit stretched by 24 cycles on the RXD path is clean, by 26 not (B - SPU = 25: '
-              'RESYNC pulls the sample on rising edges too)', ok == [True, False], ok)
+    log.check('limit: a dominant bit stretched by 72 cycles on the RXD path is clean, by 76 not (SPU = 75: the '
+              'next sample lands in the stretch)', ok == [True, False], ok)
+    for bit, lams in ((100, (0, 25, 50, 70)), (50, (0, 13, 25, 35))):
+        res = {lam: third_node(lam, bit) for lam in lams}
+        log.check('the chip as a third node at %d kbit/s: two other nodes arbitrate, the loser %s cycles after the '
+                  'winner on the bus, every dominant bit of the arbitration field that much longer at RXD; the '
+                  'winner\'s frame reported and ACKed at each' % (50000 // bit, ', '.join(map(str, lams))),
+                  all(res.values()), res)
+    lim = {}
+    for bit, lams in ((100, range(66, 90, 3)), (50, range(30, 46, 2))):
+        last = None
+        for lam in lams:
+            if not third_node(lam, bit):
+                break
+            last = lam
+        lim[50000 // bit] = (last, lam)
+    log.info('third node, the last lag clean and the first that fails, in cycles: %s (kbit/s: (clean, fails))' % lim)
+    res = [flag_start(i, d) for i, d in ((0x123, [1, 2]), (0x7EF, [0xFF] * 8), (0x000, [0] * 8))]
+    log.check('a stuff error: the reception ends at the violating bit (SMODE 2), reported with end flag 1, and the '
+              'error flag starts within the next bit (Bosch CAN 2.0, part A, error signalling)',
+              all(x is not None and 0 <= x < 1 and rep and rep[-1][:2] == ('rx', 2) for x, rep in res),
+              [(x, rep[-1][:2] if rep else None) for x, rep in res])
 
     s, t = sender(FRAMES[:3], flip=1)
     r, img, w, bus = run([s], cycles=t + 3000)

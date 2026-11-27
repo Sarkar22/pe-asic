@@ -59,45 +59,26 @@ cd tt_um_sarkar22_pe
 # which the layout keeps. Every other buffer, the layout's included, keeps its liberty function X = A.
 select -assert-count 44 c:core.mem.*pinbuf*
 chtype -set pe_sram_pinbuf c:core.mem.*pinbuf*
-# The reset-to-1 bits of each unit's window points (pwq_q[7:6], pwh_q[7]; section 8: 192 and 128) and of RKIND
-# 3's p and its window points (p3_q[9], wq3_q[8:7], wh3_q[8]; 512, 384 and 256) are held inverted in reset-to-0
-# flops that have no name, the library's only kind. Each cell sits in its register's numbering (_60561_ is
-# pwh_q[6], _60562_ this bit, _60563_ pwh_q[8]; _60576_ pwq_q[5], _60579_ pwq_q[8]; _60519_ p3[8], _60521_
-# p3[10]; _60993_ pq3[6], _60996_ pq3[9]; _60982_ ph3w[7], _60984_ ph3w[9]; each unit's cells 568 further on),
-# and the mux for pw = wide ? pwh_q : pwq_q takes _60562_'s output on A1 and _60578_'s on A0. The synthesis kept
-# the names p3, pq3 and ph3w, pe_shift.sv's copies of p3_q, wq3_q and wh3_q, on the other bits of those three
-# registers, so these bits take the same names. inv_flops.v puts two inverters after each cell, and the net between
-# them, the RTL's value, gets the RTL's name.
-techmap -map @ROOT@/formal/inv_flops.v c:_60562_ c:_60577_ c:_60578_ c:_60520_ c:_60994_ c:_60995_ c:_60983_ c:_61130_ c:_61145_ c:_61146_ c:_61088_ c:_61562_ c:_61563_ c:_61551_ c:_61698_ c:_61713_ c:_61714_ c:_61656_ c:_62130_ c:_62131_ c:_62119_ c:_62266_ c:_62281_ c:_62282_ c:_62224_ c:_62698_ c:_62699_ c:_62687_
+# The reset-to-1 bits of each unit's window points (pwq_q[7:6], pwh_q[7]; section 8: 192 and 128) are held
+# inverted in reset-to-0 flops that have no name, the library's only kind. Each cell sits in its register's
+# numbering (_62887_ is pwh_q[6], _62888_ this bit, _62889_ pwh_q[8]; _62902_ pwq_q[5], _62905_ pwq_q[8]; each
+# unit's cells 571 further on), and the mux for pw = wide ? pwh_q : pwq_q takes _62888_'s output on A1 and
+# _62904_'s on A0. inv_flops.v puts two inverters after each cell, and the net between them, the RTL's value, gets
+# the RTL's name. (RKIND 3's p and window points, and RXRG and RXRA, reset to 0 and keep their names.)
+techmap -map @ROOT@/formal/inv_flops.v c:_62888_ c:_62903_ c:_62904_ c:_63459_ c:_63474_ c:_63475_ c:_64030_ c:_64045_ c:_64046_ c:_64601_ c:_64616_ c:_64617_
 chtype -map $__pe_dfrbpq_1 sg13cmos5l_dfrbpq_1
-rename _60562_.rtl \core.gen_shift[0].shift.pwh_q[7]
-rename _60577_.rtl \core.gen_shift[0].shift.pwq_q[6]
-rename _60578_.rtl \core.gen_shift[0].shift.pwq_q[7]
-rename _60520_.rtl \core.gen_shift[0].shift.p3[9]
-rename _60994_.rtl \core.gen_shift[0].shift.pq3[7]
-rename _60995_.rtl \core.gen_shift[0].shift.pq3[8]
-rename _60983_.rtl \core.gen_shift[0].shift.ph3w[8]
-rename _61130_.rtl \core.gen_shift[1].shift.pwh_q[7]
-rename _61145_.rtl \core.gen_shift[1].shift.pwq_q[6]
-rename _61146_.rtl \core.gen_shift[1].shift.pwq_q[7]
-rename _61088_.rtl \core.gen_shift[1].shift.p3[9]
-rename _61562_.rtl \core.gen_shift[1].shift.pq3[7]
-rename _61563_.rtl \core.gen_shift[1].shift.pq3[8]
-rename _61551_.rtl \core.gen_shift[1].shift.ph3w[8]
-rename _61698_.rtl \core.gen_shift[2].shift.pwh_q[7]
-rename _61713_.rtl \core.gen_shift[2].shift.pwq_q[6]
-rename _61714_.rtl \core.gen_shift[2].shift.pwq_q[7]
-rename _61656_.rtl \core.gen_shift[2].shift.p3[9]
-rename _62130_.rtl \core.gen_shift[2].shift.pq3[7]
-rename _62131_.rtl \core.gen_shift[2].shift.pq3[8]
-rename _62119_.rtl \core.gen_shift[2].shift.ph3w[8]
-rename _62266_.rtl \core.gen_shift[3].shift.pwh_q[7]
-rename _62281_.rtl \core.gen_shift[3].shift.pwq_q[6]
-rename _62282_.rtl \core.gen_shift[3].shift.pwq_q[7]
-rename _62224_.rtl \core.gen_shift[3].shift.p3[9]
-rename _62698_.rtl \core.gen_shift[3].shift.pq3[7]
-rename _62699_.rtl \core.gen_shift[3].shift.pq3[8]
-rename _62687_.rtl \core.gen_shift[3].shift.ph3w[8]
+rename _62888_.rtl \core.gen_shift[0].shift.pwh_q[7]
+rename _62903_.rtl \core.gen_shift[0].shift.pwq_q[6]
+rename _62904_.rtl \core.gen_shift[0].shift.pwq_q[7]
+rename _63459_.rtl \core.gen_shift[1].shift.pwh_q[7]
+rename _63474_.rtl \core.gen_shift[1].shift.pwq_q[6]
+rename _63475_.rtl \core.gen_shift[1].shift.pwq_q[7]
+rename _64030_.rtl \core.gen_shift[2].shift.pwh_q[7]
+rename _64045_.rtl \core.gen_shift[2].shift.pwq_q[6]
+rename _64046_.rtl \core.gen_shift[2].shift.pwq_q[7]
+rename _64601_.rtl \core.gen_shift[3].shift.pwh_q[7]
+rename _64616_.rtl \core.gen_shift[3].shift.pwq_q[6]
+rename _64617_.rtl \core.gen_shift[3].shift.pwq_q[7]
 # Pin flop bits the synthesis found constant and removed (its log: "Setting constant 0-bit at position ..."
 # for pins.shsel_q, sel_q, shbyp_q, byp_q, shd_q and out_q; no legal word sets them): a net of each name, tied
 # to 0, stands for the missing flop, so the RTL's flop is compared with 0 in its piece. Only that piece reads

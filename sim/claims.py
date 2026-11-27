@@ -1648,7 +1648,7 @@ def random_chip(rng, depth):
 # 5.9.2: widths of the unit's sequencing state that is wider than a bit; RXPH is signed
 UNIT_WIDTH = dict(TXSR=16, TXN=5, TXBUF=16, TXBN=5, TXSYM=2, TXCD=17, TXACC=8, TXK=2, TXBK=2, TXAN=6, TXRL=3,
                   RXSR=16, RXN=5, RXTOT=11, RXKIND=2, RXG=5, RXIC=16, RXBUF=16, RXBN=5, RXPN=5, RXRL=3, RXEF=3,
-                  RXBE=3, CRC=32, RXPE=3, RXSR8=16, RXN8=5, RXC8=32)
+                  RXBE=3, CRC=32, RXPE=3, RXSR8=16, RXN8=5, RXC8=32, RXP3=12, RXRG=2)
 
 
 def random_unit(rng, chip):
@@ -1660,7 +1660,7 @@ def random_unit(rng, chip):
             if n == 'RXPH':
                 t.u.RXPH = rng.randrange(-32768, 1 << 24)
             elif n == 'RXCE':
-                t.u.RXCE = rng.randrange(-2048, 0)
+                t.u.RXCE = rng.randrange(-3840, 0)
             elif n != 'CMT':
                 t.u.__dict__[n] = rng.getrandbits(UNIT_WIDTH.get(n, 1))
     chip.SEL = [0 if p == 3 else rng.randrange(3) for p in range(16)]
@@ -1791,7 +1791,31 @@ def _rk3_run(cfg, levels, cycles, watch=('RXPH', 'RXSR', 'RXN', 'RXTOT', 'RXOPEN
             ph.append(u.RXPH)
             if u.RXOPEN and u.RXCAND:
                 ce.append(u.RXCE)
+            JSTATES.append((u.RXP3, u.RXRG, u.RXG, u.RXOPEN, u.RXCAND, u.RXPH, u.RXCE))
     return trace, chip, ph, ce
+
+
+JSTATES = []    # every RKIND 3 state _rk3_run saw, for J' (chk_rkind3)
+
+
+def _j_prime(st):
+    """5.9.6 Period bullet: the bounds an RKIND 3 reception keeps (J'), for a state after a cycle. Returns the
+    names of the bounds it breaks."""
+    p, rg, g, op, cd, ph, ce = st
+    bad = []
+    if not 1 <= g <= 16:
+        bad.append('RXG')
+    if cd and not op:
+        bad.append('RXCAND without RXOPEN')
+    if ph < (256 - p if op else 128 - p):
+        bad.append('RXPH low')
+    if ph >= (p + 128 if rg else 7 * p // 4 - 128):
+        bad.append('RXPH high')
+    if cd and not 256 - p <= ce <= -1:
+        bad.append('RXCE')
+    if p < 512:
+        bad.append('p')
+    return bad
 
 
 def _eth_frame(octets, extra, bad=False):
@@ -1820,9 +1844,11 @@ def chk_rkind3(log):
     same = {r: _rk3_run({4: 0x0063, 5: r, 10: 0x0277}, lv, 400)[0] == ref for r in (0, 1)}
     log.check('5.9.3 RKIND 3 takes RPER 0 and 1 as 2 with no RFRAC: both decode as RPER 2, RFRAC 0, every cycle',
               all(same.values()) and ref[-1][3] > 40, 'same as 2: %s' % same)
-    # 5.9.6 Period bullet and 5.9.2: RXPH between -2048 and 4223, RXCE below 0 and at least -p/2
+    # 5.9.6 Period bullet: J', RXPH from 128 - p (window closed) or 256 - p (open) to below p + 128 (7p/4 - 128 with
+    # RGAIN 0), and with a candidate RXCE from 256 - p to -1
     lo = hi = 0
     ce_lo, ce_hi, n_ce = 0, -1 << 30, 0
+    del JSTATES[:]
     for trial in range(60):
         rper = rng.choice((0, 1, 2, 3, 5, 8, 15, 16, 40))
         rfrac = rng.getrandbits(8)
@@ -1839,11 +1865,34 @@ def chk_rkind3(log):
             lo, hi = min(lo, min(ph)), max(hi, max(ph))
         for x in ce:
             ce_lo, ce_hi, n_ce = min(ce_lo, x * 1.0 / (p // 2)), max(ce_hi, x), n_ce + 1
-    log.check('5.9.6 Period: RXPH of an RKIND 3 reception stays between -2048 and 4223 (60 receptions, RPER 0 to 40)',
-              -2048 <= lo and hi <= 4223 and hi > 3000, 'RXPH %d to %d' % (lo, hi))
-    log.check('5.9.2 RXCE is below 0, and no lower than -p/2 (RKIND 3, the same receptions)',
-              n_ce > 100 and ce_hi < 0 and ce_lo >= -1.0, '%d candidates, RXCE / (p/2) from %.3f, RXCE up to %d' % (
-                  n_ce, ce_lo, ce_hi))
+    # and receptions that reach the bounds: lines with the period well off, steps and pulses of half a cycle
+    for trial in range(80):
+        rper = rng.choice((2, 2, 3, 5, 8, 15, 16))
+        rfrac = rng.getrandbits(8)
+        p = (0xF00 | rfrac) if rper > 15 else (rper << 8) | rfrac
+        bt = p / 256 * rng.choice((0.9, 0.93, 1.07, 1.1, 1.0))
+        bb = [1, 0] * rng.randrange(4, 12) + [rng.getrandbits(1) for _ in range(rng.randrange(20, 60))]
+        cyc = min(2500, int(60 + len(bb) * bt + 8 * bt))
+        a = rng.uniform(0.1, 0.45) * bt / 2
+        lv = _manch_levels(bb, 30.0 + rng.random(), bt, 2 * cyc + 2, lambda i: rng.uniform(-a, a))
+        for q in range(rng.randrange(0, 6)):
+            k = rng.randrange(2, len(lv) - 2)
+            if lv[k - 1] == lv[k] == lv[k + 1]:
+                lv[k] ^= 1
+        _rk3_run({4: 0x0063 | int(rng.random() < 0.2) << 4, 5: rper,
+                  10: rfrac | rng.randrange(4) << 9 | rng.getrandbits(1) << 11}, lv, cyc)
+    broken = [(st, b) for st in JSTATES for b in [_j_prime(st)] if b]
+    marg = dict(lo_open=min((st[5] - (256 - st[0]) for st in JSTATES if st[3]), default=None),
+                lo_closed=min((st[5] - (128 - st[0]) for st in JSTATES if not st[3]), default=None),
+                hi=min(((st[0] + 128 if st[1] else 7 * st[0] // 4 - 128) - st[5] for st in JSTATES), default=None),
+                ce_lo=min((st[6] - (256 - st[0]) for st in JSTATES if st[4]), default=None),
+                ce_hi=min((-1 - st[6] for st in JSTATES if st[4]), default=None))
+    log.check('5.9.6 Period (J\'): every RKIND 3 state keeps RXPH at or above 128 - p with the window closed and 256 - '
+              'p with it open, below p + 128 (7p/4 - 128 with RGAIN 0), RXCE from 256 - p to -1 with a candidate, RXG '
+              '1 to 16, RXCAND only with RXOPEN, p at least 512 (140 receptions)',
+              not broken and len(JSTATES) > 50000 and n_ce > 100,
+              '%d states, %d broken %s; closest to each bound (units): %s; RXPH %d to %d' % (
+                  len(JSTATES), len(broken), broken[:2], marg, lo, hi))
     # 5.9.7, the byte end of a Manchester frame: 802.3 frames of whole octets and 0 to 7 bits more, RKIND 3 at 5
     # cycles a bit, CRC-32 checked with its residue, REOP 1 and 0
     frames = []
@@ -1878,7 +1927,171 @@ def chk_rkind3(log):
               r1[0] == r1[1] and r1[0][-1][3] > 500, '%d bits received' % r1[0][-1][3])
 
 
-ALL = [chk_halfcycle_text, chk_rkind3, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
+def _timed_run(cfg, levels, cycles, writes=None):
+    """Thread 0 receives ui0 (one level per cycle) with the slots in cfg, taking every word. writes: {cycle: (slot,
+    value)} slot writes between cycles, as an scfg's. Returns (sample cycles, unit states each cycle, chip)."""
+    img = assemble('        sgo   rx\n        now\ntop:    rxw   R2\n        goto  top\n', depth=128)
+    chip = Chip(128, seed=1)
+    for a, w in img.words.items():
+        chip.mem[a] = w
+    t = chip.th[0]
+    for k, v in cfg.items():
+        chip.set_cfg(t, k, v)
+    chip.host_setpc(0, 0)
+    chip.host_run(0, 1)
+    samples, states, tot = [], [], 0
+    for c in range(cycles):
+        if writes and c in writes:
+            for k, v in writes[c]:
+                chip.set_cfg(t, k, v)
+        chip.cycle(levels[c], 0, levels[c], 0)
+        u = t.u
+        if u.RXTOT != tot:
+            samples.append(c)
+            tot = u.RXTOT
+        states.append({n: getattr(u, n) for n in UNIT_STATE if n not in ('CFG', 'CMT')})
+    return samples, states, chip
+
+
+def _nrz_levels(runs, b, n, lag=0):
+    """n levels of ui0 (bit 0): high, then runs of alternating levels from low, each runs[i] bits of b cycles, with
+    every rise lag cycles late, then high."""
+    lv, c, v, edges = [1] * n, 40, 0, []
+    for r in runs:
+        edges.append((c + (lag if v else 0), v))
+        c += r * b
+        v ^= 1
+    if v:                                               # the last run is low: the line rises after it
+        edges.append((c + lag, 1))
+    for x, w in edges:
+        for q in range(max(0, x), n):
+            lv[q] = w
+    return lv, [x for x, w in edges]
+
+
+def chk_a3(log):
+    rng = random.Random(20261123)
+    # 7.3 and 5.9.6: timed samples with RESYNC and RGAIN 0 fall FIRST cycles after the last edge, every RPER after
+    # it; with RACQ after the last edge to HLVL only (CAN's rule)
+    ok = {0: True, 1: True}
+    n = 0
+    for trial in range(40):
+        b = rng.choice((10, 16, 20, 25, 40, 100))
+        first = max(2, int(b * rng.uniform(0.5, 0.85)))
+        runs = [rng.randrange(1, 7) for _ in range(rng.randrange(8, 30))]
+        lag = rng.randrange(0, b - first) if rng.random() < 0.7 else 0
+        cyc = 40 + sum(runs) * b + 6 * b
+        lv, edges = _nrz_levels(runs, b, cyc + 2, lag)
+        for racq in (0, 1):
+            cfg = {4: 0x0020, 5: b, 6: first, 10: 0x0100 | racq << 11}   # timed, HUNT for a falling edge, RESYNC
+            got, _, _ = _timed_run(cfg, lv, cyc)
+            want, ref = [], None
+            for c in range(edges[0], cyc):
+                # an edge in cycle c: SYNC2 has the new level in cycle c + 2 (two flops, section 5.7)
+                e = [x for x in edges if x + 2 == c]
+                if e and (not racq or lv[c - 2] == 0):
+                    ref = c
+                if ref is not None and c >= ref + first and (c - ref - first) % b == 0:
+                    want.append(c)
+            ok[racq] &= got[:len(want)] == want[:len(got)] and len(got) > 8
+            n += 1
+    log.check('7.3 timed samples, RESYNC, RGAIN 0: each sample FIRST cycles after the last edge and every RPER after '
+              'it; with RACQ after the last edge to HLVL only (5.9.6, CAN\'s resynchronization), rising edges up to the '
+              'bit minus FIRST late', ok[0] and ok[1], '%d receptions; RESYNC alone %s, with RACQ %s' % (n, ok[0], ok[1]))
+    # with RACQ an edge away from HLVL pulls nothing: a reception whose only edge after the start goes away from HLVL
+    # is, every cycle, the reception with RESYNC off
+    same = True
+    for trial in range(20):
+        b = rng.choice((10, 20, 50))
+        first = max(2, int(b * rng.uniform(0.5, 0.85)))
+        lv = [1] * 40 + [0] * rng.randrange(b, 9 * b) + [1] * (20 * b)
+        cyc = len(lv) - 2
+        on = _timed_run({4: 0x0020, 5: b, 6: first, 10: 0x0900 | rng.randrange(4) << 9}, lv, cyc)[1]
+        off = _timed_run({4: 0x0020, 5: b, 6: first, 10: 0x0000}, lv, cyc)[1]
+        strip = lambda ss: [{k: v for k, v in x.items() if k not in ('RXG', 'RXRG', 'RXRA')} for x in ss]
+        same &= strip(on) == strip(off)
+    log.check('5.9.3 RACQ with timed samples and RESYNC: an edge away from HLVL pulls nothing, so a reception whose '
+              'only later edge goes away from HLVL equals, every cycle, the one with RESYNC off', same)
+    # 5.9.6 (Start) and section 10 item 8: a reception of RKIND 3 keeps its p, RGAIN and RACQ; RKIND 0 reads them as they are
+    bits = [1, 0] * 8 + [rng.getrandbits(1) for _ in range(80)]
+    lv = _manch_levels(bits, 40.3, 5.0, 2 * 700 + 2, lambda i: rng.uniform(-0.6, 0.6))
+    base = {4: 0x0063, 5: 5, 10: 0x0A00}
+    ref = _rk3_run(base, lv, 700)[0]
+    keep = True
+    for c in (50, 60, 75, 100, 160, 230, 400):     # the reception begins in cycle 45; RXG is below 16 to about 120
+        for k, v in ((5, rng.choice((2, 3, 8, 15))), (10, rng.getrandbits(16) & 0x0FFF)):
+            chip_states = []
+            img = assemble('        sgo   rx\n        now\ntop:    rxw   R2\n        goto  top\n', depth=128)
+            chip = Chip(128, seed=1)
+            for a, w in img.words.items():
+                chip.mem[a] = w
+            t = chip.th[0]
+            for kk, vv in base.items():
+                chip.set_cfg(t, kk, vv)
+            chip.host_setpc(0, 0)
+            chip.host_run(0, 1)
+            for cc in range(700):
+                if cc == c:
+                    chip.set_cfg(t, k, v)
+                chip.cycle(lv[2 * cc + 1], 0, lv[2 * cc], 0)
+                u = t.u
+                chip_states.append(tuple(getattr(u, nm) for nm in ('RXPH', 'RXSR', 'RXN', 'RXTOT', 'RXOPEN', 'RXCAND',
+                                                                  'RXCE', 'RXG', 'CRC', 'RXRUN', 'RXEP', 'RXBUF',
+                                                                  'RXBN', 'RXPN', 'RXPE')))
+            keep &= chip_states == ref
+    log.check('10 item 8: an scfg of RXPER or RXOPT during an RKIND 3 reception changes nothing in it, every cycle '
+              '(RXP3, RXRG and RXRA keep the values it began with)', keep and ref[-1][3] > 80, '%d bits' % ref[-1][3])
+    b, first = 20, 14
+    runs = [rng.randrange(1, 6) for _ in range(30)]
+    lv, _ = _nrz_levels(runs, b, 40 + sum(runs) * b + 200, 4)
+    cyc = len(lv) - 2
+    a = _timed_run({4: 0x0020, 5: b, 6: first, 10: 0x0100}, lv, cyc)[1]
+    w = _timed_run({4: 0x0020, 5: b, 6: first, 10: 0x0100}, lv, cyc, writes={300: [(10, 0x0900)]})[1]
+    d = [i for i in range(cyc) if a[i] != w[i]]
+    log.check('5.9.6 timed samples read RACQ as it is: RACQ written during a reception changes its pulls from the '
+              'next cycle on', d and d[0] >= 300, 'first different cycle %s' % (d[:1],))
+    # 5.9.7: with SMODE 2 the violating bit ends the reception; with SMODE 1 the next bit does
+    res = {}
+    for smode, sn, run in ((2, 5, 6), (1, 6, 7), (1, 5, 6)):
+        for after in (0, 1):
+            v = 1 if smode == 1 else rng.getrandbits(1)
+            data = [rng.getrandbits(1) for _ in range(rng.randrange(3, 30))]
+            if data and data[-1] == v:
+                data[-1] ^= 1
+            line = [0] + data + [v] * run + [after] + [1 - after] * 3     # SOF, data, a violation, then more
+            # stuff the data part as a sender would, so the only violation is the run
+            st, rl, last = [], 0, None
+            for x in line[:1 + len(data)]:
+                st.append(x)
+                rl = rl + 1 if x == last else 1
+                last = x
+                if rl == sn:
+                    st.append(1 - x if smode == 2 else 0)
+                    rl, last = (1, 1 - x) if smode == 2 else (0, 0)
+            line = st + line[1 + len(data):]
+            bb = 16
+            lvl = [1] * 30 + [x for x in line for _ in range(bb)] + [1] * 200
+            lvl = [lvl[0]] + lvl[:-1]
+            cyc = len(lvl) - 2
+            cfg = {4: 0x0020, 5: bb, 6: bb // 2, 15: smode << 10 | sn << 12}
+            samples, states, chip = _timed_run(cfg, lvl, cyc)
+            ends = [i for i in range(1, cyc) if states[i - 1]['RXRUN'] and not states[i]['RXRUN']]
+            # the violating bit, from the line alone: the first bit that makes N + 1 equal bits in a row (SMODE 2),
+            # or N + 1 ones (SMODE 1), stuff bits included, as the destuffer counts the run (5.9.7)
+            viol_bit = next(i for i in range(sn, len(line)) if len(set(line[i - sn:i + 1])) == 1 and
+                            (smode == 2 or line[i] == 1))
+            # the cycle in which bit j is sampled: the first sample is FIRST after the start's SYNC2 cycle
+            start = [i for i in range(cyc) if states[i]['RXRUN']][0]
+            want_end = start + bb // 2 + viol_bit * bb + (bb if smode == 1 else 0)
+            u = chip.th[0].u
+            res[smode, sn, after] = (ends[:1] == [want_end], u.RXPE if not u.RXFULL else None, ends[:1], want_end)
+    ok2 = all(res[2, 5, a][0] for a in (0, 1))
+    ok1 = all(res[1, s, a][0] for s in (5, 6) for a in (0, 1))
+    log.check('5.9.7 SMODE 2: a stuff violation ends the reception at the violating bit, so a CAN node can flag it '
+              'from the next bit; SMODE 1 still ends it one bit later', ok2 and ok1, str(res))
+
+
+ALL = [chk_halfcycle_text, chk_rkind3, chk_a3, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
        chk_pins, chk_spacing, chk_host, chk_stop_rules, chk_flags, chk_stop_timing, chk_slots, chk_asm]
 
 
