@@ -685,7 +685,9 @@ def can_crc15(bits):
 def can_image(rng, cycles):
     """Directed, for CAN on timed samples: thread k's receive half hunts for a falling edge on ui pin k and samples
     FIRST cycles after each edge it pulls on (RESYNC, mostly with RACQ, so only falling edges pull), destuffs runs
-    of equal bits (SMODE 2, mostly N 5) and checks CRC-15 to RCNT. Returns (words, starts, levels) as rk3_image."""
+    of equal bits (SMODE 2, mostly N 5) and checks CRC-15 to RCNT. About half of them invert the decoded bits
+    (RINV), where RACQ still takes an edge's direction from RPIN itself (5.9.6). Returns (words, starts, levels)
+    as rk3_image."""
     words, starts, levels = [], [], []
 
     def cfg(k, v):
@@ -701,7 +703,8 @@ def can_image(rng, cycles):
         ndata = rng.randrange(4, 40)
         sn = 5 if rng.random() < 0.85 else rng.randrange(8)
         smode = 2 if rng.random() < 0.85 else rng.choice((0, 1))
-        cfg(4, 1 << 2 | 1 << 5 | tid << 8 | rng.getrandbits(4) << 12)     # timed, RMSB, HUNT for a falling edge
+        # timed, RMSB, RINV about half the time, HUNT for a falling edge
+        cfg(4, 1 << 2 | rng.getrandbits(1) << 3 | 1 << 5 | tid << 8 | rng.getrandbits(4) << 12)
         cfg(5, b)
         cfg(6, first)
         cfg(10, (0 if rng.random() < 0.8 else rng.getrandbits(8)) | int(rng.random() < 0.9) << 8 |

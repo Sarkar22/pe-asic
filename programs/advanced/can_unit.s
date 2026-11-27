@@ -1,6 +1,6 @@
 ; CAN 2.0A node on the shift unit at 500 kbit/s and 50 MHz, one thread: the unit stuffs, destuffs, appends and
 ; checks the CRC-15 and times every bit; the firmware writes RXCNT once the DLC is in, monitors its own bits and
-; arbitrates, drives the ACK slot and sends error flags.  229 words, and the 512-word memory for the frame to send
+; arbitrates, drives the ACK slot and sends error flags.  251 words, and the 512-word memory for the frame to send
 ; at FRM.  References are to the Bosch CAN Specification 2.0, part A, by section name.
 ;
 ; Pins: TXD io0 in OD (released is recessive, so the transceiver's TXD pull-up keeps the bus recessive through
@@ -15,7 +15,8 @@
 ; - MOUT gets each received frame's words as they arrive, count of them, the last one right after its status.
 ;   They hold the frame's destuffed bits from SOF to the CRC delimiter, the first in bit 15; the last word holds n
 ;   bits.  flags are the end flags of section 5.9.7: 1 is a good frame (acknowledged); 0 a CRC or delimiter error,
-;   2 a stuff error (an error flag is sent for both).  A reception under 16 bits isn't reported.
+;   2 a stuff error (an error flag is sent for both).  A reception under 16 bits isn't reported: it is a stuff
+;   error in SOF to DLC bit 3, or another node's flag, and gets an error flag all the same.
 ;
 ; How each step holds (section numbers are docs/ISA.md):
 ; - Receive (5.9.6, 5.9.7): timed samples, SPU cycles after each falling edge of RXD (RESYNC and RACQ, RGAIN 0)
@@ -23,16 +24,29 @@
 ;   from SOF on (SYNCLEN 0, CSKIP 0), MSB first (RMSB).  RXCNT = 35 + 8 x min(DLC, 8), or 35 for a remote frame,
 ;   ends the reception at the CRC delimiter: a stuff bit after the CRC sequence is dropped inside it, and the ACK
 ;   slot is the next bit.  CHK is the good residue 0 fed the delimiter's 1, which is POLY, so a dominant delimiter
-;   fails the check too.  The DLC is whole only in the second word, at bit 32, so RXCNT is written within 3 bit
-;   times of it (at DLC 0): 56 to 60 cycles after that word's last sample here.  The receive half hunts again
-;   after every reception; the tail that an ACK or an error flag starts is a reception under 16 bits, dropped.
+;   fails the check too.  The first word holds RTR and DLC bit 3, so for a remote frame (35) and for 8 bytes or
+;   more (99) RXCNT is written before the second word.  Otherwise the DLC's bits 2 to 0 are the second word's top
+;   bits, whole at bit 32, and RXCNT is written 33 to 36 cycles after that word's last sample, within 3 bit times
+;   of it as DLC 0 needs, and the rxw for the next word waits from 41 to 44 cycles after it: a stuff error in the
+;   very next bit, 50 cycles later at 1 Mbit/s, finds it waiting.
+; - The receive half hunts again after a reception (HUNT).  After its ACK the node stops it and starts the hunt
+;   again one bit time after that commit, once its own dominant edge has come back through the transceiver loop
+;   (a loop of up to B - 4 cycles).  After an error flag it starts it 8 bit times after the flag's commit: the
+;   other nodes, on seeing the flag, start theirs by its seventh bit at the latest (error signalling), and those
+;   may begin after a short recessive gap, their own transceiver loop; a frame can't start before the 17th bit
+;   (flags, error delimiter, intermission).  So no reception starts on the node's own bits or on those flags.  A
+;   reception under 16 bits is then a stuff error in SOF to DLC bit 3, or another node's error or overload flag,
+;   and gets an error flag.  Only a spike that never sampled dominant, no SOF, is dropped: five 1s, the one such
+;   last word whose value plus bit count is 36.
 ; - Only recessive-to-dominant edges resynchronize (Bit Timing Requirements, synchronization rules): RACQ keeps
 ;   RESYNC to edges to HLVL, dominant (5.9.6).  So a dominant bit that a transceiver, or two other transmitters
 ;   out of step in arbitration, stretch at RXD moves no sample, as long as the stretch ends before SPU.
-; - ACK (data frame, ACK field): the ACK bit waits in the send half as a 1-bit word of no kind, armed.  After the
-;   last word, a good end flag starts it with a commit 21 cycles after the rxw, which is 1 to 4 cycles after the
-;   receiver's own start of the ACK slot (the last word reaches the buffer one cycle after the delimiter's
-;   sample, and the rxw takes it 1 to 4 cycles later).
+; - ACK (data frame, ACK field): a dominant bit waits in the send half as a 1-bit word of no kind, armed and not
+;   marked last.  Alone it is the ACK: the send then ends by underrun, which shows the idle level, recessive, from
+;   the ACK delimiter on (5.9.5).  After a stuff error it is the error flag's first bit.  After the last word, a
+;   good end flag starts it with a commit 21 cycles after the rxw, which is 1 to 4 cycles after the receiver's
+;   own start of the ACK slot (the last word reaches the buffer one cycle after the delimiter's sample, and the
+;   rxw takes it 1 to 4 cycles later).
 ; - Send (5.9.5, 5.9.7): TMSB, TPER B, words of kind crc and the last of kind fcs: the unit stuffs from SOF,
 ;   appends the CRC-15 and stuffs it, with the stuff bit after its last bit when due (coding), then shows the
 ;   idle level (recessive, TAIL 0) from the CRC delimiter on.  A send starts at a commit only (5.9.1).
@@ -49,12 +63,18 @@
 ;   comes before the receive half samples that bit (SPF + 16 < SPU - 1 when we follow the winner's SOF by 3
 ;   cycles), so the receive half goes on from the CRC of the bus bits before it (section 10 item 17), checks the
 ;   frame, and the node acknowledges it like any other.
-; - Error flags (error frame; error signalling): six dominant bits, a 6-bit word of no kind, not stuffed.  After
-;   a stuff error at once: with SMODE 2 the reception ends at the violating bit (5.9.7), so the flag starts in
-;   the next bit, as error signalling asks, 0.3 bit times into it; after a CRC error at the bit after the ACK
-;   delimiter; after a bit error or a missing ACK at the next bit.
+; - Error flags (error frame; error signalling): six dominant bits, of no kind, so not stuffed.  After
+;   a stuff error at once: with SMODE 2 the reception ends at the violating bit (5.9.7).  From the rxw that takes
+;   the last word, whichever word it is, 7 slots lead to the commit that starts the armed dominant bit, and a 5-bit
+;   word follows it before it ends.  So the flag's first cycle at TXD comes 32 to 35 cycles after the violating
+;   bit's sample, and it starts in the next bit, as error signalling asks: with 100 ns each way through the
+;   transceiver, 0.15 to 0.18 bit times after the violating bit ends at 500 kbit/s, 0.54 to 0.60 at 1 Mbit/s.
+;   That path is fixed in cycles, so it starts the flag in the next bit for 40 to 140 cycles a bit (SPU three
+;   quarters); a slower node starts its flag before the violating bit has ended at RXD.  After a CRC error at
+;   the bit after the ACK delimiter; after a bit error or a missing ACK at the next bit.
 ; - Not done: extended frames (IDE 1) are taken for errors; no error counters or error-passive state, no overload
-;   frames.
+;   frames, and no form check of the end of frame: a dominant bit there starts a reception, and gets an error
+;   flag only after the stuff error that the recessive bits after it make, at its seventh bit.
 .equ TXP io0
 .equ RXP ui6
 .equ NRX 6
@@ -126,59 +146,81 @@ bidle:  until RXP, 0, inbox     ; a SOF, or a send request in this thread's mail
         jf    tx
 ; ---------------------------------------------------------------- receive a frame
 rxf:    ldi   R2, 0
-        txw   R2, 1, last       ; the ACK bit waits in the send half, armed: no commit comes before the ACK's
-        sgo   tx
+        txw   R2, 1             ; a dominant bit waits in the send half, armed and not last: alone it is the ACK,
+        sgo   tx                ; and the send ends by underrun after it; after a stuff error, the flag's first bit
 rx0:    rxw   R0                ; the first word, or the last word of a reception under 16 bits
         jf    rx1
-        sstat R5                ; that one isn't a frame: drop it
-        bt    R5, 8
-        jt    rx0               ; a reception runs: take its first word
-        sstop tx
+        sstat R5                ; a stuff error in SOF to DLC bit 3, or another node's error flag: the flag, unless
+        andi  R5, 31            ; the reception never sampled dominant, five 1s from a spike that was no SOF, the
+        add   R5, R0            ; one last word whose value plus bit count is 36
+        cmpi  R5, 36
+        jt    rx0x
+        now                     ; the armed bit: the flag's first, 7 slots after the rxw, as on every path
+        ldi   R2, 0
+        txw   R2, 5, last       ; and its other five, before the first ends
+        sstop rx                ; not reported; the hunt again 8 bit times after the flag's commit, as at rxb2
+        sgo   rx
+        tick  8 * B
+        goto  wbus
+rx0x:   sstop tx                ; disarm the dominant bit
         goto  wbus
 rx1:    send  R0, MOUT          ; each word goes to the host as it arrives
-        ldi   R4, 1             ; words of this frame
+        ldi   R4, 2             ; words sent before the last: this one and the second, unless the second is it
+        bt    R0, 3             ; RTR: a remote frame has no data field
+        bo    R0, 0             ; or DLC bit 3, 8 bytes: RXCNT is known now
+        jt    rxk
         rxw   R1                ; the second word: the DLC's bits 2 to 0 are its top bits
         jt    rxe1
-        cp    R2, R1
+        cp    R2, R1            ; T is 0: rxw cleared it for a word that isn't the last
         swap  R2
         andi  R2, 0xE0
-        clrt
         shr8  R2, -, -
         shr8  R2, -, -          ; 8 x DLC bits 2..0
-        bt    R0, 0             ; DLC bit 3: 8 bytes
-        jf    rx2
-        ldi   R2, 64
-rx2:    bt    R0, 3             ; RTR: a remote frame has no data field
-        jf    rx3
-        ldi   R2, 0
-rx3:    addi  R2, 35            ; SOF to the CRC delimiter, destuffed
+        addi  R2, 35            ; SOF to the CRC delimiter, destuffed
         scfg  R2, RXCNT
-        cp    R0, R1
-rx4:    send  R0, MOUT
+rxs:    send  R1, MOUT
+rx4:    rxw   R0                ; waiting already for a stuff error in the bit after the second word
+        jt    rxend
+        send  R0, MOUT
         addi  R4, 1
-        rxw   R0
-        jf    rx4
+        goto  rx4
+rxk:    ldi   R2, 35            ; a remote frame: 35, whatever its DLC
+        bn    R0, 3
+        ba    R0, 0
+        bs    R2, 6             ; 8 bytes or more: 99
+        scfg  R2, RXCNT         ; 16 bits are in, under either
+        rxw   R1
+        jt    rxe1
+        goto  rxs
 rxend:  srd   R3, end           ; the last word's end flags
         cmpi  R3, 1             ; ended by RXCNT, CRC and delimiter good, no stuff violation
         jf    rxbad
         now                     ; the ACK bit, for one bit time from the start of the ACK slot
+        sstop rx                ; the hunt again one bit time after the ACK's commit, when the node's own
+        sgo   rx                ; dominant edge has come back through the transceiver loop
+        tick  B
         call  report
         goto  wbus
 rxe1:   cp    R0, R1            ; a frame that ended between bits 17 and 32
         srd   R3, end
-rxbad:  sstop tx                ; no ACK: disarm and drop the ACK bit
+        subi  R4, 1             ; only the first word was sent
+rxbad:  bt    R3, 1             ; a stuff violation: the flag at once
+        jf    rxcrc
+        now                     ; the armed bit: the flag's first, 7 slots after the rxw
+        ldi   R2, 0
+        txw   R2, 5, last       ; and its other five, before the first ends
+        goto  rxb2
+rxcrc:  sstop tx                ; no ACK: disarm and drop the dominant bit
         ldi   R2, 0
         txw   R2, 6, last       ; an error flag: six dominant bits, not stuffed
-        bt    R3, 1             ; a stuff violation: the flag at once
-        jt    rxb1
         now                     ; a CRC or delimiter error: D 41 cycles after the rxw, before the arm, since
         sgo   tx                ; any commit starts an armed half
         li    R2, KCRC
         tick  R2                ; the flag from the bit after the ACK delimiter
-        goto  rxb2
-rxb1:   sgo   tx
-        now
-rxb2:   call  report
+rxb2:   sstop rx                ; the hunt again 8 bit times after the flag's commit: past the flags that other
+        sgo   rx                ; nodes start by its seventh bit on seeing it, so that no reception starts on them
+        tick  8 * B             ; (error signalling, error delimiter); a frame can't start before its 17th
+        call  report
         goto  wbus
 ; the status to MEND (count << 8 | flags << 5 | the last word's bits, bit 15 set), then the last word to MOUT
 report: sstat R5

@@ -240,6 +240,254 @@ def crc_tail_stuffed():
     return out
 
 
+def destuffed(st, k):
+    """The bits a receiver keeps of the stuffed bits st[:k]: a bit after five equal ones is a stuff bit, dropped,
+    and it starts the next run (Bosch 5)."""
+    out, run, last = [], 0, None
+    for x in st[:k]:
+        if run == 5:
+            last, run = x, 1
+            continue
+        run = run + 1 if x == last else 1
+        last = x
+        out.append(x)
+    return out
+
+
+def stuff_error_words(st, k):
+    """What a receiver that keeps SOF on, destuffed, MSB first in 16-bit words, has when a stuff error at stuffed
+    bit k ends the frame: None under 16 bits, else (bits in the last word, words), the last word holding the 0 to 15
+    bits after the last full one."""
+    b = destuffed(st, k)
+    if len(b) < 16:
+        return None
+    m = len(b) - len(b) % 16
+    words = [sum(x << (15 - j) for j, x in enumerate(b[i:i + 16])) for i in range(0, m, 16)]
+    words.append(sum(x << (len(b) - m - 1 - j) for j, x in enumerate(b[m:])))
+    return len(b) - m, words
+
+
+def remote_stuffed(ident, dlc):
+    """A remote frame's stuffed bits, SOF to the CRC sequence: RTR 1, no data field, the DLC as given."""
+    bits = C.unstuffed(ident, [], 1)
+    bits[15:19] = [(dlc >> (3 - i)) & 1 for i in range(4)]
+    c = crc15_can(bits)
+    return C.stuff(bits + [(c >> (14 - i)) & 1 for i in range(15)])
+
+
+def stuff_positions(st):
+    """The stuffed positions k at which a stuff violation can come: five equal bits before k (Bosch 5)."""
+    return [k for k in range(5, len(st)) if st[k - 5:k] in ([0] * 5, [1] * 5)]
+
+
+# Eight-byte frames stuffed close to the most that CAN's stuffing allows, whose stuffed bits hold the positions 112 to
+# 119 that the fixed search below doesn't reach. 119, the stuff bit after the CRC sequence of the last frame, is the
+# latest position at which any frame of 0 to 8 bytes can hold a stuff violation.
+MOST_STUFFED = [(0x07C, [0x20, 0xF0, 0x07, 0xFC, 0x3C, 0x3C, 0x00, 0x00]),
+                (0x7FE, [0x01, 0xE1, 0xFF, 0x0F, 0x00, 0x00, 0x00, 0x00]),
+                (0x41E, [0x3C, 0x3C, 0x01, 0x07, 0x87, 0x87, 0x87, 0x80]),
+                (0x7FE, [0x3C, 0x3E, 0xF8, 0x03, 0xC3, 0xFE, 0x1E, 0x1E]),
+                (0x7FE, [0x20, 0xFF, 0xFC, 0x3C, 0x01, 0xE1, 0xE1, 0xE0]),
+                (0x7FE, [0x3F, 0xE7, 0xFE, 0x1E, 0x1E, 0x1E, 0x1E, 0x00]),
+                (0x7FE, [0x01, 0xE1, 0xE1, 0xE1, 0xE7, 0xC3, 0xC0, 0x1E])]
+
+
+def stuff_cover():
+    """One frame for every stuffed position that can hold a stuff violation, over frames of 0 to 8 bytes, found by
+    a fixed search and then MOST_STUFFED: (k, stuffed bits SOF to the CRC sequence), k from 5 to 119."""
+    cover = {}
+    for dlc in range(9):
+        for fill in (0x00, 0xFF, 0x0F, 0xF0, 0x55, 0x33, 0x07, 0xE0):
+            for ident in range(0, 0x7F0, 0x41):
+                st = C.stuff(C.with_crc(ident, [fill] * dlc)[0])
+                for k in stuff_positions(st):
+                    cover.setdefault(k, st)
+    for ident, data in MOST_STUFFED:
+        st = C.stuff(C.with_crc(ident, data)[0])
+        for k in stuff_positions(st):
+            cover.setdefault(k, st)
+    return sorted(cover.items())
+
+
+def after_dlc_cover():
+    """For data frames of 0 to 8 bytes and remote frames of DLC 0, 3 and 8: a frame whose stuffed bits can hold a
+    stuff violation right after its 32nd bit, the end of the 16 bits that carry the DLC's bits 2 to 0, where the
+    receiver learns the frame's length: (label, stuffed bits, k)."""
+    out = []
+    kinds = [('%d bytes' % n, n, 0) for n in range(9)] + [('remote, DLC %d' % n, n, 1) for n in (0, 3, 8)]
+    for label, n, rtr in kinds:
+        for seed in range(4096):
+            ident = (seed * 0x29) % 0x700
+            data = [(seed * 0x9D + j * 0x3B) & 0xFF for j in range(n)]
+            st = remote_stuffed(ident, n) if rtr else C.stuff(C.with_crc(ident, data)[0])
+            ks = [k for k in stuff_positions(st) if len(destuffed(st, k)) == 32]
+            if ks:
+                out.append((label, st, ks[0]))
+                break
+    return out
+
+
+class Pulse:
+    """Another node that pulls the bus dominant for n cycles from cycle t: a spike, or a dominant bit."""
+
+    def __init__(self, t, n):
+        self.t, self.n = t, n
+
+    def drive(self, c, bus):
+        return 0 if self.t <= c < self.t + self.n else 1
+
+    def see(self, c, lv):
+        pass
+
+
+class Responder:
+    """Another node's error handling, from Bosch CAN 2.0 part A (bit timing, error signalling, error delimiter),
+    seeing the bus through its own receive path d2 and driving it through its transmit path d1: it hard-syncs on a
+    falling edge of an idle bus, resynchronizes on recessive-to-dominant edges, samples at three quarters of the
+    bit, and on six equal bits (a stuff error, or another node's flag) sends a flag of six dominant bits from its
+    next bit; then it sends recessive bits, waits for a recessive sample and seven more, and is idle again."""
+
+    def __init__(self, bit, d1=5, d2=5):
+        self.b = bit
+        self.rx = deque([1] * (d2 + 1), maxlen=d2 + 1)
+        self.tx = deque([1] * (d1 + 1), maxlen=d1 + 1)
+        self.state, self.prev = 'idle', 1
+        self.flags = []                  # cycles where its flags start on its transmit pin
+
+    def drive(self, c, bus):
+        return self.tx[0]
+
+    def see(self, c, lv):
+        self.rx.append(lv)
+        v, b, out = self.rx[0], self.b, 1
+        fall = self.prev == 1 and v == 0
+        if self.state == 'idle':
+            if fall:
+                self.state, self.bs, self.run, self.last = 'frame', c, 0, None
+        elif self.state == 'frame':
+            if fall:
+                self.bs = c
+            if c == self.bs + (3 * b) // 4:
+                self.run = self.run + 1 if v == self.last else 1
+                self.last = v
+                if self.run == 6:
+                    self.state, self.fs = 'flag', self.bs + b
+                    self.flags.append(self.fs)
+            if c >= self.bs + b:
+                self.bs += b
+        if self.state == 'flag':
+            if self.fs <= c < self.fs + 6 * b:
+                out = 0
+            elif c >= self.fs + 6 * b:
+                self.state, self.bs, self.rec = 'delim', c, 0
+        elif self.state == 'delim':
+            if fall:
+                self.bs = c
+            if c == self.bs + (3 * b) // 4:
+                self.rec = self.rec + 1 if v else 0
+                if self.rec >= 8:
+                    self.state = 'idle'
+            if c >= self.bs + b:
+                self.bs += b
+        self.prev = v
+        self.tx.append(out)
+
+
+class LocalBus(Bus):
+    """Bus whose RXD for the chip alone is forced to val over cycles [t, t + n): a disturbance at its receiver."""
+
+    def __init__(self, nodes, t, n, val, **kw):
+        super().__init__(nodes, **kw)
+        self.t, self.n, self.val = t, n, val
+
+    def step(self, c, uo, io):
+        super().step(c, uo, io)
+        if self.t <= c < self.t + self.n:
+            self.ui_val = self.val << RXP
+
+
+def local_error(st, k, b=B, thread=0, rl=(5, 5)):
+    """A stuff error that only the chip sees: a sender puts the stuffed bits st up to bit k, which five equal bits
+    precede, then the stuff bit there and releases the bus, while the chip's RXD alone carries the run's value at
+    bit k. A Responder with transceiver paths rl answers the chip's flag. Returns (the chip's flags, its first
+    flag's length in bit times, the Responder's flags), counted until the bus has been idle long after."""
+    t0 = 4000
+    bits = st[:k] + [1 - st[k - 1]] + [1] * 40
+    resp = Responder(b, *rl)
+    bus = LocalBus([K.Sender([(t0, bits)], float(b)), resp], t0 + k * b + 5, b, st[k - 1])
+    r = Rig(devices=[bus], depth=512, pullups=0x01)
+    d = {'TID': thread, 'B': b}
+    if b != B:
+        d['SPU'], d['SPF'] = b * 3 // 4, b * 2 // 5
+    r.load(assemble(src('can_unit'), depth=512, defines=d), {thread: 'start'})
+    ends, words = [], []
+
+    def taker():                         # the host takes every report, so the program never waits on a mailbox
+        while True:
+            yield from r.host.take(MOUT, words, tries=1)
+            yield from r.host.take(MEND, ends, tries=1)
+    r.board.agent(taker())
+    r.start(thread)
+    r.run(t0 + len(bits) * b + 20 * b)
+    e = [(t, v) for t, v in r.wave('io', 0).edges(t0)]
+    falls = [t for t, v in e if v == 0]
+    ln = (e[1][0] - e[0][0]) / b if len(e) > 1 else None
+    return len(falls), ln, len(resp.flags)
+
+
+GOOD = (0x2A5, [])                       # the frame each stuff-error scenario sends afterwards
+
+
+def span(xs):
+    """'a to b bit times after the violating bit ends' for the flags that started, or 'no flag started'."""
+    xs = [x for x in xs if x is not None]
+    return 'flag starts %.2f to %.2f bit times after the violating bit ends' % (min(xs), max(xs)) if xs else \
+        'no flag started'
+
+
+# Where the flag starts, in cycles after the violating bit ends on the bus, with the rig's 100 ns each way through
+# the transceiver: the range the program states (its header, section 11.2), the same from every word of a frame.
+FLAG_AT = {100: (15, 18), 50: (27, 30)}
+
+
+def flag_at(st, k, b=B, thread=0, align=0, d1=5, d2=5, gap=None):
+    """A sender puts the stuffed bits st up to bit k, which five equal bits precede, then that run's value once
+    more, a stuff error at bit k (Bosch 5), releases the bus, and 40 bit times later sends GOOD, or with gap, puts
+    GOOD's SOF on the bus gap cycles after the violating bit ends there. Returns a dict: x, where the chip's first
+    dominant level at io0 starts, in bit times after the violating bit ends on the bus; its length in bit times;
+    flags, the number of dominant levels at io0 before GOOD starts; the reports; and whether GOOD was reported and
+    ACKed."""
+    t0 = 4000
+    bad = st[:k] + [st[k - 1]] + [1] * (40 if gap is None else gap // b)
+    gb = C.frame_bits(*GOOD)
+    t1 = t0 + len(bad) * b if gap is None else t0 + (k + 1) * b + gap
+    r, img, w, bus = run([K.Sender([(t0, bad), (t1, gb)], float(b))], cycles=t1 + len(gb) * b + 2000,
+                         thread=thread, align=align, d1=d1, d2=d2, b=b)
+    edges = [(t, v) for t, v in r.wave('io', 0).edges(t0) if t < t1]
+    falls = [t for t, v in edges if v == 0]
+    rises = [t for t, v in edges if v == 1 and falls and t > falls[0]]
+    x = (falls[0] - (t0 + (k + 1) * b)) / b if falls else None
+    ln = (rises[0] - falls[0]) / b if falls and rises else None
+    fr = [f for f in decode(r, b=b) if f['t'] >= t1]
+    rep = parse(w)
+    good = bool(rep) and rep[-1] == want_rx(*GOOD) and len(fr) == 1 and fr[0]['ack'] and fr[0]['crc_ok']
+    return dict(x=x, len=ln, flags=len(falls), rep=rep, good=good, health=r.health())
+
+
+def flag_ok(res, st, k, b, d2):
+    """flag_at's result as Bosch's error signalling asks: one error flag of 6 bit times, starting in the next bit
+    and not before the violating bit has ended at RXD (d2 later than on the bus); the reception reported as a stuff
+    error from 16 bits on (a reception under 16 bits isn't reported); GOOD after it received and ACKed."""
+    want = stuff_error_words(st, k)
+    rx = [x for x in res['rep'] if x[0] == 'rx']
+    if want is None:
+        rep_ok = len(rx) == 1 and len(res['rep']) == 1
+    else:
+        rep_ok = len(rx) == 2 and len(res['rep']) == 2 and rx[0][1] & 2 and (rx[0][2], rx[0][3]) == want
+    return (res['flags'] == 1 and res['x'] is not None and d2 / b <= res['x'] < 1 and res['len'] == 6 and rep_ok
+            and res['good'] and not res['health'])
+
+
 def main(log):
     log.group('advanced/can_unit.s', title='CAN 2.0A node on the shift unit')
     for name, v, want in anchors()[2:]:
@@ -385,6 +633,151 @@ def main(log):
               len(rep) == (0 if k < 17 else 1) and all(x[0] == 'rx' and x[1] & 2 for x in rep) and len(fl) == 1,
               (rep, fl))
 
+    log.info('stuff errors at every position')
+    cover = stuff_cover()
+    for bit in (100, 50):
+        xs, bad = [], []
+        lo, hi = FLAG_AT[bit]
+        for i, (k, st) in enumerate(cover):
+            res = flag_at(st, k, b=bit, thread=i % 4, align=(i // 4) % 4)
+            if res['x'] is not None:
+                xs.append(res['x'])
+            if not flag_ok(res, st, k, bit, 5) or not lo <= round(res['x'] * bit) <= hi:
+                bad.append((k, res['x'], res['len'], res['flags'], res['rep'][:1], res['good']))
+        log.check('a stuff error at each of the %d positions that can hold one, k %d to %d (frames of 0 to 8 bytes, '
+                  'every thread and alignment), %d kbit/s: one error flag of 6 bit times, starting in the next bit '
+                  '(Bosch CAN 2.0, part A, error signalling) and not before the violating bit has ended at RXD, %d to '
+                  '%d cycles after it ends at every position; reported as a stuff error from 16 bits on, not before; '
+                  'the frame after it received and ACKed' % (len(cover), cover[0][0], cover[-1][0], 50000 // bit, lo,
+                                                             hi),
+                  not bad and len(xs) == len(cover) and [k for k, _ in cover] == list(range(5, 120)),
+                  bad[:3] if bad else span(xs))
+    for bit in (100, 50):
+        xs, bad, n = [], [], 0
+        lo, hi = FLAG_AT[bit]
+        for label, st, k in after_dlc_cover():
+            for al in range(4):
+                res = flag_at(st, k, b=bit, thread=(al + 1) % 4, align=al)
+                n += 1
+                if res['x'] is not None:
+                    xs.append(res['x'])
+                if not flag_ok(res, st, k, bit, 5) or not lo <= round(res['x'] * bit) <= hi:
+                    bad.append((label, al, res['x'], res['len'], res['flags'], res['good']))
+        log.check('a stuff error in the bit right after the 32nd, as the receiver takes the 16 bits that carry the '
+                  'DLC\'s bits 2 to 0: frames of 0 to 8 bytes and remote frames of DLC 0, 3 and 8, every alignment, '
+                  '%d kbit/s: the error flag in the next bit, as at every other position' % (50000 // bit),
+                  not bad and len(xs) == n == 48, bad[:3] if bad else '%d runs, %s' % (n, span(xs)))
+    # A sender whose frame an error frame broke sends it again at its first chance: its SOF follows the 6 flag
+    # bits, the 8 of the error delimiter and the 3 of the intermission (error frame, interframe space). Here it
+    # comes 17 bit times after the latest flag start the program states, plus the 100 ns to the bus, so the hunt
+    # must have restarted by then.
+    for bit in (100, 50):
+        bad = []
+        gap = FLAG_AT[bit][1] + 5 + 17 * bit
+        for i, (k, st) in enumerate(cover):
+            res = flag_at(st, k, b=bit, thread=(i + 1) % 4, align=(i // 4 + 2) % 4, gap=gap)
+            if not flag_ok(res, st, k, bit, 5):
+                bad.append((k, res['x'], res['len'], res['flags'], res['rep'][:1], res['good']))
+        log.check('a stuff error at each of the %d positions, %d kbit/s, then the next frame at the earliest start '
+                  'the error frame allows, 17 bit times after the flag starts (6 flag bits, the error delimiter and '
+                  'the intermission), as a sender that sends again at once: one error flag of 6 bit times in the '
+                  'next bit, and the next frame received and ACKed' % (len(cover), 50000 // bit),
+                  not bad, bad[:3] if bad else '%d runs, the next frame %d cycles after the violating bit ends'
+                  % (len(cover), gap))
+    # The longest loop at each rate whose ACK still reaches the bus before the 72% sample: at 1 Mbit/s a 440 ns loop
+    # puts the ACK 37 cycles into its 50-cycle slot, 380 ns 35.
+    for bit, (d1, d2) in ((100, (11, 11)), (50, (9, 10))):
+        xs, bad = [], []
+        for i, (k, st) in enumerate(cover[::4]):
+            res = flag_at(st, k, b=bit, thread=(i + 2) % 4, align=i % 4, d1=d1, d2=d2)
+            if res['x'] is not None:
+                xs.append(res['x'])
+            if not flag_ok(res, st, k, bit, d2):
+                bad.append((k, res['x'], res['len'], res['flags'], res['good']))
+        log.check('a stuff error at every fourth position with a transceiver loop of %d ns, %d kbit/s: the error '
+                  'flag in the next bit and not before the violating bit has ended at RXD, no flag after it, the '
+                  'frame after it received and ACKed' % (20 * (d1 + d2), 50000 // bit), not bad and xs,
+                  bad[:3] if bad else span(xs))
+    # Far longer loops than a transceiver's, so that the node's own flag comes back late: the hunt restarts eight bit
+    # times after the flag's commit, which must still be after the flag's own edges. The frame after it isn't judged:
+    # its ACK comes too late in the slot at these loops.
+    for bit, (d1, d2) in ((100, (30, 30)), (50, (20, 20))):
+        bad, xs = [], []
+        early = [(k, st) for k, st in cover if len(destuffed(st, k)) < 16]
+        for i, (k, st) in enumerate(early):
+            res = flag_at(st, k, b=bit, thread=i % 4, align=(i + 1) % 4, d1=d1, d2=d2)
+            if res['x'] is not None:
+                xs.append(res['x'])
+            if not (res['flags'] == 1 and res['x'] is not None and d2 / bit <= res['x'] < 1 and res['len'] == 6):
+                bad.append((k, res['x'], res['len'], res['flags']))
+        log.check('a stuff error in SOF to DLC bit 3 (%d positions) with a transceiver loop of %d ns, %d kbit/s: one '
+                  'error flag of 6 bit times in the next bit, and no second one from the node\'s own edge coming '
+                  'back' % (len(early), 20 * (d1 + d2), 50000 // bit), not bad and len(xs) == len(early) == 13,
+                  bad[:3] if bad else span(xs))
+    # After its ACK the node restarts the hunt one bit time after the ACK's commit, which the program states holds
+    # for a transceiver loop of up to B - 4 cycles: at that loop its own ACK's edge must come back before the hunt.
+    for bit in (100, 50):
+        loop = bit - 4
+        d1, d2 = loop // 2, loop - loop // 2
+        fa, fb = (0x2A5, []), (0x123, [0x55])
+        ba, bb = C.frame_bits(*fa), C.frame_bits(*fb)
+        t0 = 4000
+        t1 = t0 + (len(ba) + 30) * bit
+        bad = []
+        for th in range(4):
+            r, img, w, bus = run([K.Sender([(t0, ba), (t1, bb)], float(bit))], cycles=t1 + len(bb) * bit + 3000,
+                                 thread=th, align=(th + 1) % 4, d1=d1, d2=d2, b=bit)
+            e = [(t, v) for t, v in r.wave('io', 0).edges(t0)]
+            lows = [e[i + 1][0] - e[i][0] for i in range(len(e) - 1) if e[i][1] == 0]
+            if lows != [bit, bit] or parse(w) != [want_rx(*fa), want_rx(*fb)] or r.health():
+                bad.append((th, lows, parse(w)[:2]))
+        log.check('two frames received with a transceiver loop of B - 4 cycles (%d ns), %d kbit/s, every thread: after '
+                  'each ACK the hunt starts past the ACK\'s own edge, so the node drives its two ACKs of one bit time '
+                  'and nothing else, and reports both frames' % (20 * loop, 50000 // bit), not bad,
+                  bad[:2] if bad else '4 runs, 2 ACKs each')
+    for bit in (100, 50):
+        res = []
+        for n, al in ((bit // 10, 0), (bit * 3 // 5, 1), (bit * 7 // 10, 2)):
+            gb = C.frame_bits(*GOOD)
+            t0, t1 = 4000, 4000 + 30 * bit
+            r, img, w, bus = run([Pulse(t0, n), K.Sender([(t1, gb)], float(bit))], cycles=t1 + len(gb) * bit + 2000,
+                                 align=al, b=bit)
+            fl = [t for t, v in r.wave('io', 0).edges(t0) if v == 0 and t < t1]
+            fr = [f for f in decode(r, b=bit) if f['t'] >= t1]
+            res.append((n, not fl, parse(w) == [want_rx(*GOOD)], len(fr) == 1 and fr[0]['ack']))
+        log.check('a spike of %s cycles on an idle bus, %d kbit/s: the receive half starts on its falling edge and '
+                  'samples recessive (the SOF is not sampled dominant, so it is no SOF), and the node sends no flag '
+                  'and reports nothing; the next frame is received and ACKed' % (
+                      ', '.join(str(x[0]) for x in res), 50000 // bit), all(all(x[1:]) for x in res), res)
+    for bit in (100, 50):
+        t0, gb = 4000, C.frame_bits(*GOOD)
+        t1 = t0 + 30 * bit
+        r, img, w, bus = run([Pulse(t0, bit), K.Sender([(t1, gb)], float(bit))], cycles=t1 + len(gb) * bit + 2000,
+                             align=3, b=bit)
+        e = [(t, v) for t, v in r.wave('io', 0).edges(t0) if t < t1]
+        falls = [t for t, v in e if v == 0]
+        x = (falls[0] - (t0 + 7 * bit)) / bit if falls else None
+        ln = (e[1][0] - e[0][0]) / bit if len(e) > 1 else None
+        fr = [f for f in decode(r, b=bit) if f['t'] >= t1]
+        log.check('a dominant bit alone on an idle bus, %d kbit/s: a SOF and then recessive bits, so its seventh bit '
+                  'is a stuff error (Bosch 5); one error flag of 6 bit times from the next bit, nothing reported, '
+                  'the next frame received and ACKed' % (50000 // bit),
+                  len(falls) == 1 and x is not None and 5 / bit <= x < 1 and ln == 6 and
+                  parse(w) == [want_rx(*GOOD)] and len(fr) == 1 and fr[0]['ack'], (x, ln, len(falls), parse(w)))
+    for bit in (100, 50):
+        res, bad = [], []
+        for i, (k, st) in enumerate(cover[::3]):
+            rl = ((5, 5), (11, 11))[i % 2]
+            n, ln, nr = local_error(st, k, b=bit, thread=i % 4, rl=rl)
+            res.append(n)
+            if not (n == 1 and ln == 6 and nr == 1):
+                bad.append((k, rl, n, ln, nr))
+        log.check('a stuff error that only the chip sees, at every third position, with another node that answers '
+                  'error flags (Bosch CAN 2.0, part A, error signalling and error delimiter; its transceiver loop 200 '
+                  'or 440 ns), %d kbit/s: the chip sends one flag of 6 bit times and none for the other node\'s, '
+                  'which starts after it when the bus carried a recessive stuff bit there' % (50000 // bit),
+                  not bad and len(res) == len(cover[::3]), bad[:3] if bad else '%d runs, one flag each' % len(res))
+
     log.info('transmit')
     for ident, data in FRAMES:
         n = len(C.frame_bits(ident, data)) - 9
@@ -450,21 +843,25 @@ def main(log):
     log.info('arbitration')
     mine, theirs = (0x246, [1, 2]), (0x244, [9])
     lm, lt = len(C.frame_bits(*mine)) - 9, len(C.frame_bits(*theirs)) - 9
-    r, img, w, bus = run([K.Acker([lm], float(B))], sends=[mine])
-    sof = [t for t, v in r.wave('io', 0).edges(3000) if v == 0][0]
+    # Posted at 4000, so that a rival 1000 cycles ahead still starts after 2500, where the Acker begins to look
+    # for SOFs: a rival that started before that would have its SOF missed and its ACK put in the end of frame.
+    r, img, w, bus = run([K.Acker([lm], float(B))], sends=[mine], post_at=4000)
+    sof = [t for t, v in r.wave('io', 0).edges(4000) if v == 0][0]
     for early in (None, 1, 3, 8, 13, 20, 200, 1000):
         riv = K.Rival(C.frame_bits(*theirs), float(B), start=None if early is None else sof - early)
-        r, img, w, bus = run([riv, K.Acker([lt, lm], float(B))], sends=[mine], cycles=40000)
+        r, img, w, bus = run([riv, K.Acker([lt, lm], float(B))], sends=[mine], cycles=40000, post_at=4000)
         fr = decode(r)
         rep = parse(w)
-        seen = [(f['id'], f['crc_ok'], f['ack']) for f in fr]
+        seen = [(f['id'], f['crc_ok'], f['ack'], f['eof_ok']) for f in fr]
         lost = rep == [('tx', 2), want_rx(*theirs), ('tx', 0)]
         after = rep == [want_rx(*theirs), ('tx', 0)]
-        log.check('rival 0x244 %s: %s; its frame and then ours intact and ACKed on the bus' % (
-            'starts on our SOF' if early is None else 'starts %d cycles before our SOF' % early,
-            'we lose arbitration and receive its frame with a good CRC' if lost else 'we receive its frame first'),
-            (lost or (after and early is not None)) and seen[:2] == [(0x244, True, True), (0x246, True, True)],
-            (rep[:3], seen[:2]))
+        log.check('rival 0x244 %s: %s; its frame and then ours intact, ACKed and with a clean end of frame on the '
+                  'bus' % ('starts on our SOF' if early is None else 'starts %d cycles before our SOF' % early,
+                           'we lose arbitration and receive its frame with a good CRC' if lost else
+                           'we receive its frame first'),
+                  (lost or (after and early is not None)) and seen == [(0x244, True, True, True),
+                                                                       (0x246, True, True, True)],
+                  (rep[:3], seen[:3]))
     mine2, theirs2 = (0x244, [7, 8]), (0x246, [9])
     riv2 = K.Rival(C.frame_bits(*theirs2), float(B))
     b2 = C.frame_bits(*mine2)

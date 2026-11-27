@@ -4,10 +4,20 @@ follows the SD Physical Layer Simplified Specification and was written before th
 The host side here plays the RP2350: it posts each command's five words, takes the two status words, and reads the
 response and the block from memory with RDMEM (section 9.2). The judge compares what the chip reports with what the
 card says it received and sent: every command arrives with a good CRC7, transmitter bit and end bit; every response
-the card sends is stored bit for bit, with the chip's CRC7 check set exactly when the reference's own CRC7 of the
-token holds (R3 has none); every block arrives whole, with the chip's CRC16 check set exactly when the block on the
-wire is good. On the bus: the chip and the card never drive CMD or DAT0 at once, the power-up has 74 clocks with
-CMD high, every command comes at least 8 clocks after the last end bit on CMD, and LATE and ILL stay clear.
+the card sends is stored bit for bit after its start bit (the start bit is the receive half's sync pattern, so the
+47 bits from the transmission bit, or R2's 135), with the chip's CRC7 check set exactly when the reference's own CRC7
+of the token holds (R3 has none); every block arrives whole, with the chip's CRC16 check set exactly when the block
+on the wire is good. On the bus: the chip and the card never drive CMD or DAT0 at once, the power-up has 74 clocks
+with CMD high, every command comes at least 8 clocks after the last end bit on CMD, and LATE and ILL stay clear.
+
+The card's timing is swept over what the SD Physical Layer Simplified Specification allows and past it: NCR, the
+clocks from a command's end bit to its response's start bit, over every value from 2 to 64 (4.12, blank in the
+simplified text, gives 2 to 64 in the full specification); NAC, the clocks from a read command's end bit to the
+block's start bit, from 2 (the block starts during the response) to the 100 ms read time-out of 4.6.2.1, through the
+fixed 1 ms access time of a CSD version 2.0 card (5.3, TAAC) and NSAC's largest 25.5 k clocks; and the card's output
+delay d after the falling edge over every whole cycle of a clock period, 0 to 2H, where 6.6.6 allows 14 ns at
+default speed. The model reads a change in the first cycle at or after it, so whole cycles give every phase the chip
+can tell apart, the cycle of a rising edge among them (d in (H - 1, H]).
 """
 import random
 
@@ -130,10 +140,10 @@ def judge(r):
         else:
             nbits = len(resp)
             want_words = 9 if nbits == 136 else 3
-            stored = token_bits(got['words'], nbits)
+            stored = token_bits(got['words'], nbits - 1)
             if not st & 0x10 or st >> 8 != want_words:
                 bad.append('CMD%d: response status 0x%04X' % (index, st))
-            elif stored != resp:
+            elif resp[0] != 0 or stored != resp[1:]:
                 bad.append('CMD%d: response stored differs from the card\'s' % index)
             good = SD.value(resp[-8:-1]) == SD.crc7(resp[8:-8] if nbits == 136 else resp[:40]) and resp[-1] == 1
             if bool(st & 1) != good:
@@ -245,13 +255,14 @@ def check_unit(log):
               % (ta, tb, al), not e and r.card.first_cmd[1] >= 74,
               (e[0] if e else 'statuses %s; power-up clocks %d; CMD setup %d and hold %d cycles at the card' % (
                   ['%04X' % x for x in st], r.card.first_cmd[1], m['setup'], m['hold'])))
-    resp = token_bits(r.res[-1]['words'], 48)
-    check('CMD17\'s response is stored as 4.5\'s example gives it, 00 010001 0x00000900 0110011 1, with the chip\'s '
-          'CRC7 check set', resp == SD.response48(17, 0x900) and r.res[-1]['status'] & 1, resp)
+    resp = token_bits(r.res[-1]['words'], 47)
+    check('CMD17\'s response is stored as 4.5\'s example gives it after the start bit, 0 010001 0x00000900 0110011 1, '
+          'with the chip\'s CRC7 check set', resp == SD.response48(17, 0x900)[1:] and r.res[-1]['status'] & 1, resp)
     check('ACMD41\'s R3 has no CRC (4.9.4): stored whole, and the chip\'s CRC7 check is clear', not judge(r) and
           not r.res[3]['status'] & 1 and r.res[3]['status'] & 0x10, '0x%04X' % r.res[3]['status'])
-    check('CMD2\'s R2 (136 bits): 9 words, CSKIP 8 leaves the start, transmission and 111111 bits out, and the '
-          'check covers CID bits 127:1 and the end bit', r.res[4]['status'] == 0x0911, '0x%04X' % r.res[4]['status'])
+    check('CMD2\'s R2 (136 bits): 9 words; the start bit is the sync pattern and CSKIP 7 leaves the transmission and '
+          '111111 bits out, so the check covers CID bits 127:1 and the end bit', r.res[4]['status'] == 0x0911,
+          '0x%04X' % r.res[4]['status'])
     # Reads on every thread pair, at three clocks.
     bad, n = [], 0
     for k, (ta, tb) in enumerate(PAIRS):
@@ -271,8 +282,8 @@ def check_unit(log):
             b, k = sweep([read_cmd(3)], h, dict(state='tran', ncr=ncr, nac=80), aligns=(0, 1, 2, 3))
             bad += [(ncr,) + x for x in b]
             n += k
-        check('NCR 2, 3, 7, 16, 33 and 64 clocks at H %d, 4 alignments each: the hunt finds the response wherever '
-              'it starts' % h, not bad, fmt(bad, n))
+        check('NCR 2, 3, 7, 16, 33 and 64 clocks at H %d, 4 alignments each: the reception finds the response '
+              'wherever it starts' % h, not bad, fmt(bad, n))
     # NAC: a block that starts while the response is still on CMD, and long waits.
     bad, n = [], 0
     for nac in (2, 5, 20, 45, 200, 1000):
@@ -282,9 +293,9 @@ def check_unit(log):
             n += k
     check('NAC 2, 5, 20 and 45 (the block starts during the response) and 200 and 1000 clocks, with NCR 2 and 64, '
           'at H 3: both receive halves run at once on their own lines', not bad, fmt(bad, n))
-    # The card's output delay after the falling edge (SD 6.6.6: 14 ns at default speed, 50 ns in identification,
-    # plus the board): sampled at the next rising edge up to H - 1 cycles; past H the hunt starts a clock later and
-    # stays in step up to 2H. The window between is a limit, below.
+    # The card's output delay after the falling edge (SD 6.6.6: 14 ns at default speed, plus the board): sampled at
+    # the next rising edge up to H cycles, and a clock later past H, up to 2H. check_timing covers every whole cycle,
+    # the cycle of the rising edge (d in (H - 1, H]) included.
     for h in (3, 8):
         bad, n = [], 0
         for d in (0, 0.5, 1.25, h / 2, h - 1, h + 0.25, 1.5 * h, 2 * h):
@@ -336,13 +347,115 @@ def check_limits(log):
         b, k = sweep([read_cmd(2)], 4, dict(state='tran', ncr=5, nac=20, d=d), aligns=(0, 1, 2, 3))
         bad += b
         n += k
-    check('a card output delay in (H - 1, H] cycles fails on every alignment at H 4 (expected: the start bit then '
-          'reaches SYNC2 in the cycle of a rising CLK edge; the hunt starts the reception in that cycle and takes no '
-          'sample in it, 5.9.6 rx_step, so the start bit is lost and the token is read one bit late)',
-          len(bad) == n, '%d of %d runs fail' % (len(bad), n))
+    check('a card output delay in (H - 1, H] cycles at H 4, on every alignment: the start bits of the response and the '
+          'block reach SYNC2 in the cycle of a rising CLK edge, where a hunt would start its reception and take no '
+          'sample (5.9.6, Start); the receptions here started before them, so that edge samples each start bit',
+          not bad, fmt(bad, n))
+
+def start_edges(r, line):
+    """From the bus log, each start bit the card put on CMD or DAT0 ('cmd' or 'dat'): (cycles after the last falling
+    edge of CLK, cycles after the last rising edge), at the cycle the line fell while the chip wasn't driving it."""
+    out, fall, rise, lv = [], None, None, None
+    for c, name, v in r.bus.log:
+        if name == 'clk':
+            if v:
+                rise = c
+            else:
+                fall = c
+        elif name == line:
+            drv = 0
+            for t, on in r.bus.chip_cmd if line == 'cmd' else ():
+                if t > c:
+                    break
+                drv = on
+            if lv == 1 and v == 0 and not drv and fall is not None:
+                out.append((c - fall, c - rise if rise is not None else None))
+            lv = v
+    return out
+
+
+def grid(cmds, h, points, card_kw, cycles=None, line='cmd'):
+    """One run per point (ncr, nac, d), with the thread pairs and alignments in turn; returns (failures, runs, the
+    offsets seen). Each run also measures where the card's first start bit on `line` fell: the cycle after the last
+    falling edge must be the first whole cycle at or after d (the model's rule), and a d in (H - 1, H] must put it in
+    a rising edge's own cycle. So the sweep is shown to reach every phase it names."""
+    bad, seen = [], set()
+    for k, (ncr, nac, d) in enumerate(points):
+        ta, tb = PAIRS[k % len(PAIRS)]
+        kw = dict(card_kw, ncr=ncr, nac=nac, d=d)
+        r = run(cmds, card=SD.Card(**kw), h0=h, h=h, ta=ta, tb=tb, align=k % 4, cycles=cycles)
+        e = judge(r)
+        edges = start_edges(r, line)
+        want = -int(-d // 1) % (2 * h)
+        if edges:
+            seen.add(edges[0][0])
+        if not edges:
+            e = e + ['no start bit found on %s' % line]
+        elif edges[0][0] != want or ((h - 1 < d <= h) != (edges[0][1] == 0)):
+            e = e + ['the start bit on %s came %s cycles after a falling edge and %s after a rising one, for d %s' % (
+                line, edges[0][0], edges[0][1], d)]
+        if e:
+            bad.append(((ncr, nac, d), (ta, tb), k % 4, e[0]))
+    return bad, len(points), seen
+
+
+def every_phase(res, h):
+    """A grid result, its failures and runs, and whether its start bits fell at all 2H cycle offsets of a period."""
+    bad, n, seen = res
+    missing = sorted(set(range(2 * h)) - seen)
+    return not bad and not missing, fmt(bad, n) + ('; offsets never reached: %s' % missing if missing else
+                                                  '; start bits at all %d cycle offsets' % (2 * h))
+
+
+def check_timing(log):
+    log.group(PROG, title='the card\'s timing over the specification\'s range and every phase: NCR, NAC and the output '
+              'delay')
+    r1 = [(55, 0, R48, 0)]                      # CMD55 in transfer state: an R1 and no block
+    for h in (3, 4, 8):
+        pts = [(ncr, 8, d) for ncr in range(2, 65) for d in range(2 * h + 1)]
+        ok, text = every_phase(grid(r1, h, pts, dict(state='tran')), h)
+        check('every NCR from 2 to 64 clocks x every card output delay from 0 to 2H cycles at H %d (%.2f MHz), the '
+              'cycle of a rising edge included, thread pairs and alignments in turn: CMD55\'s R1 stored after its start '
+              'bit, its CRC7 check set, each start bit where the delay puts it' % (h, CLK / 2e6 / h), ok, text)
+    h = 63
+    ds = (0, 1, 2, 3, 31, 61, 62, 62.5, 63, 64, 94, 125, 126)
+    res = grid(r1, h, [(ncr, 8, d) for ncr in (2, 64) for d in ds], dict(state='tran'))
+    check('at H 63 (397 kHz, identification): NCR 2 and 64 x output delays 0, 1, 2 and 3 cycles (60 ns), H/2, H - 2, '
+          'H - 1, H - 0.5, H, H + 1, 3H/2, 2H - 1 and 2H: R1 right, each start bit where the delay puts it',
+          not res[0], fmt(res[0], res[1]))
+    # A CID of all 120 bits, MID 0x9F first (5.2): its bit 127 is 1, so a CRC that left it out, or took one bit of
+    # the 111111 before it, would differ. The card's default CID has fields only below bit 72.
+    cid = 0x9F << 112 | 0x5449 << 96 | 0x5344333247 << 56 | 0x61 << 48 | 0x12345678 << 16 | 0x153
+    for h in (3, 4):
+        ok, text = every_phase(grid([(2, 0, R136, 0)], h, [(ncr, 8, d) for ncr in (2, 5, 17, 64)
+                                                            for d in range(2 * h + 1)], dict(state='ready', cid=cid)), h)
+        check('CMD2\'s R2 (136 bits) at NCR 2, 5, 17 and 64 x every output delay from 0 to 2H at H %d, from a CID whose '
+              'bit 127 is 1: 9 words after the start bit, the CID\'s CRC7 and end bit checked' % h, ok, text)
+    for h, nacs in ((3, (2, 3, 5, 9, 33, 64, 1000)), (4, (2, 3, 5, 9, 33, 64, 1000)), (8, (2, 64))):
+        pts = [(2 if j % 2 else 64, nac, d) for j, nac in enumerate(nacs) for d in range(2 * h + 1)]
+        ok, text = every_phase(grid([read_cmd(7)], h, pts, dict(state='tran'), line='dat'), h)
+        check('NAC %s clocks (from 2, the block starting during the response, NCR 64 and 2 in turn) x every output '
+              'delay from 0 to 2H at H %d: response and block right, both start bits taken at every phase' % (
+                  ', '.join(map(str, nacs)), h), ok, text)
+    # The top of NAC's range: a CSD version 2.0 card's fixed 1 ms access time (5.3, TAAC 0Eh), NSAC's largest
+    # clock-dependent part (25.5 k clocks, 5.3), and the 100 ms read time-out (4.6.2.1) at the fastest clock, where it
+    # is the most clocks: 833,333 at H 3, inside the 16-bit time limit of 52,383 words of 16 clocks the host posts.
+    for nac, d, what in ((8_333, 1, '1 ms, a CSD 2.0 card\'s TAAC'), (25_500, 0, 'NSAC\'s largest 25.5 k clocks'),
+                         (833_333, 3, 'the 100 ms read time-out, output delay H')):
+        r = run([read_cmd(13)], card=SD.Card(state='tran', ncr=9, nac=nac, d=d), h0=3, h=3, cycles=6_000_000)
+        e = judge(r)
+        check('NAC %d clocks at H 3 (%s, SD 4.6.2.1 and 5.3): the clock keeps running and the block is right' % (
+            nac, what), not e and len(r.res) == 1, e[0] if e else '%d cycles' % r.cycles)
+    r = run([read_cmd(11), read_cmd(12)], card=SD.Card(state='tran', nac=9, d=4, bad_end=True), h0=4, h=4)
+    r2 = run([read_cmd(11), read_cmd(12)], card=SD.Card(state='tran', nac=9, d=8, bad_end=True), h0=4, h=4)
+    check('two reads back to back at H 4 with both blocks\' end bits sent as 0, at output delays H and 2H: thread B '
+          'starts its next reception once DAT0 is high, and both blocks arrive whole with their checks clear',
+          not judge(r) and not judge(r2) and len(r.res) == len(r2.res) == 2 and
+          not any(x['bstat'] & 1 for x in r.res + r2.res), judge(r) or judge(r2))
 
 
 def main(log):
     check_unit(log)
+    check_timing(log)
     check_faults(log)
     check_limits(log)

@@ -1,6 +1,6 @@
 ; SD card host in SD mode, 1-bit bus, on two shift units: CMD with its CRC7 and the clock from one unit, the response
 ; by that unit's receive half, the data block on DAT0 by a second thread's unit with its CRC16.  2 threads (any two),
-; 192 words, and the 512-word memory for the block buffer.  Thread A runs from `cmdth`, thread B from `datth`.
+; 194 words, and the 512-word memory for the block buffer.  Thread A runs from `cmdth`, thread B from `datth`.
 ;
 ; Pins: CLK io0 (push-pull, shift output B of thread A), CMD io1 (push-pull with a committed turnaround, shift output
 ; A of thread A), DAT0 io2 (input).  The bus has pull-ups on CMD and DAT0 (SD Physical Layer Simplified Specification
@@ -16,9 +16,11 @@
 ;   response came, bit 5 the clock stopped early, bit 0 the check: CRC7 and end bit), then the block status from
 ;   thread B, 0 when none came (bit 8
 ;   set, bits 7:3 the last word's bit count, bits 2:0 the end flags, bit 0 the CRC16 and end bit check).
-; - Memory: RBUF holds the response, most significant bit first (3 words, or 9 for R2); DBUF the block's 256 data
-;   words, first byte in bits 15:8, then its CRC16 word; DCNT the words thread B received.  The host reads them with
-;   RDMEM: two of the four threads run, so memory cycles are free.
+; - Memory: RBUF holds the response after its start bit, which is always 0, most significant bit first: the 47 bits
+;   from the transmission bit to the end bit in 3 words, the last holding 15 bits in bits 14:0, or for R2 135 bits in
+;   9 words, the last holding 7; DBUF the block's 256 data words, first byte in bits 15:8, then its CRC16 word; DCNT
+;   the words thread B received.  The host reads them with RDMEM: two of the four threads run, so memory cycles are
+;   free.
 ;
 ; How each step holds (section numbers are docs/ISA.md):
 ; - Clock and command (5.9.5): two symbols per bit at TPER H.  Output A takes the bit in both symbols, output B is
@@ -31,15 +33,22 @@
 ;   bit and 15 clocks.
 ; - Turnaround (5.2, 5.4): OE is firmware's.  The start commit sets OE with the start bit; a tick at E + 96H, the
 ;   end bit's last cycle, clears it, so CMD is released on the pads as the end bit ends (bit 48 is the bus's
-;   turnaround bit) and the card may answer from bit 49 on, NCR 2.  The same commit starts the response hunt.
-; - CTX (5.9.7, 11.5): the append ends at E + 1 + 94H; CODING is moved to CTX 0 right after the turnaround, by
-;   E + 96H + 5, before the earliest response start bit can reach SYNC2 at E + 98H + 3.
+;   turnaround bit) and the card may answer from bit 49 on, NCR 2.  The same commit starts the response's reception.
+; - CTX (5.9.7, 11.5): the append ends at E + 1 + 94H and leaves the register at its initial value, 0; CODING is
+;   moved to CTX 0 right after the turnaround, by E + 96H + 5, before the response's first covered bit, its
+;   transmission bit, can reach SYNC2 at E + 100H + 3.  The reception starts with CTX still 1, so it doesn't
+;   initialise the register (rx_cbegin), which already holds 0, CINIT's value.
 ; - Response (5.9.6): RKIND 2 with RCLK the CLK pad samples CMD at each rising edge, as the card's output after the
 ;   falling edge allows (SD 6.6.6), on the cycle the edge reaches SYNC2, with CMD through the same synchroniser.
-;   HUNT on a fall of CMD starts at the start bit; RCNT 48 (136 for R2) ends the reception after the end bit, so a
-;   48-bit token is three whole words.  The CRC covers every bit from the start bit (0 bits into a zero register
-;   change nothing), so a good token leaves the residue fed the end bit, CHK 0x12000000 = POLY.  For R2, CSKIP 8
-;   leaves out the start, transmission and 111111 bits, so the CRC covers CID bits 127:1 and the end bit.
+;   No hunt: the reception starts at the turnaround commit, with SYNCLEN 1 and SYNC 0, so from then on every rising
+;   edge takes a sample, CMD reads 1 (the end bit, then the pull-up) until the start bit, and the start bit
+;   completes the pattern, at whatever phase of the clock it arrives.  A hunt would start the reception in the
+;   cycle the start bit's edge reaches SYNC2 and take no sample in that cycle, so a card whose output, with pads
+;   and board, changes in the cycle of a rising edge would lose the start bit (5.9.6, Start; 11.5).  RCNT 47 (135
+;   for R2) ends the reception at the end bit.  The CRC covers every bit from the transmission bit, the same CRC7 as
+;   from the start bit, since a 0 into a zero register changes nothing, so a good token leaves the residue fed the
+;   end bit, CHK 0x12000000 = POLY.  For R2, CSKIP 7 leaves out the transmission and 111111 bits, so the CRC covers
+;   CID bits 127:1 and the end bit.
 ; - Clock loop: thread A keeps the send fed with words of ones, one per 16 clocks, and takes response words and
 ;   thread B's status meanwhile.  It never blocks: a pass reads the status and takes a response word if one waits
 ;   (RXFULL), then refills the send buffer only if TXFULL is clear, so the receive buffer is tested every 5 slots
@@ -47,16 +56,20 @@
 ;   Words), and the send buffer refilled within a word time, 32H cycles (5.9.5, Refill).  An underrun (TXUR) means
 ;   the clock stopped: it is reported, not waited out.  The clock stops after one more word of 16 clocks, at least
 ;   the 8 the card needs before the next command (SD 4.12, NRC and NCC).
-; - Data (thread B, 5.9.6, 5.9.7): RKIND 2 on DAT0, HUNT on a fall, SYNCLEN 1 with SYNC 0: the start bit is the
-;   sync pattern, so words start with the first data bit, two bytes each.  CRC16-CCITT (CW 15, POLYHI 0x1021, CINIT
-;   0, CXOR 0) covers the data and its CRC, and the end bit makes the residue POLY, CHK 0x10210000.  A block is 4113
-;   bits after the start bit, over RCNT's 2047: RCNT starts at 0 (no limit), and after word 130, when RXTOT has passed
-;   17 for the second time, the thread writes RCNT 17, which RXTOT next equals at bit 4113 = 2 x 2048 + 17 (section
-;   10, defined 22).  Each word is stored within 16 clocks, the buffer's limit (11.5).
-; - Not covered: the 4-bit bus, writes, and busy.  Thread B hunts on DAT0 from its start, so a card's busy signal on
-;   DAT0 after an R1b command (SD 4.9.2) would start a reception: a host that sends such commands waits for DAT0 high
-;   and restarts thread B.  A block that never ends leaves thread B in rxw; the host restarts it after a block's
-;   time limit.
+; - Data (thread B, 5.9.6, 5.9.7): RKIND 2 on DAT0, no hunt, SYNCLEN 1 with SYNC 0: the start bit is the sync
+;   pattern, so words start with the first data bit, two bytes each.  As on CMD, the reception starts before the
+;   block, at the commit of `until DAT0, 1`, so every rising edge takes a sample from a high DAT0 on and the start bit
+;   completes the pattern at any phase.  Thread B starts one at its start and the next after each block, once DAT0
+;   reads high again, before it hands the block's status to thread A, so before the host can send the next command.
+;   CRC16-CCITT (CW 15, POLYHI 0x1021, CINIT 0, CXOR 0) covers the data and its CRC, and the end bit makes the residue
+;   POLY, CHK 0x10210000.  A block is 4113 bits after the start bit, over RCNT's 2047: RCNT starts at 0 (no limit),
+;   and after word 130, when RXTOT has passed 17 for the second time, the thread writes RCNT 17, which RXTOT next
+;   equals at bit 4113 = 2 x 2048 + 17 (section 10, defined 22).  Each word is stored within 16 clocks, the buffer's
+;   limit (11.5).
+; - Not covered: the 4-bit bus, writes, and busy.  Thread B's reception waits on DAT0 from its start, so a card's
+;   busy signal on DAT0 after an R1b command (SD 4.9.2) would complete its pattern: a host that sends such commands
+;   waits for DAT0 high and restarts thread B.  A block that never ends leaves thread B in rxw; the host restarts it
+;   after a block's time limit.
 .equ CLK   io0
 .equ CMD   io1
 .equ DAT0  io2
@@ -89,7 +102,7 @@ cmdth:  sstop txrx              ; a unit isn't reset when its thread starts
         li    R0, 0x1200        ; CRC7: x^7 + x^3 + 1, left-aligned
         scfg  R0, POLYHI
         scfg  R0, CHKHI         ; a good token's residue fed its end bit is POLY
-        li    R0, 0x0026 | (NCMD << 8) | (NCLK << 12)       ; RKIND 2, RMSB, HUNT for a fall, rising edges of CLK
+        li    R0, 0x0006 | (NCMD << 8) | (NCLK << 12)       ; RKIND 2, RMSB, no hunt, rising edges of CLK
         scfg  R0, RXMODE
         smap  CLK, B
         smap  CMD, A
@@ -139,13 +152,14 @@ next:   sstat R0                ; wait for the clock to stop: the send half is i
         or    R5, R6
         txw   R5, 16, crc
         recv  R4, MCFG          ; the time limit, in words of clock after the end bit
-        ldi   R6, 48            ; a 48-bit response: RCNT 48, CSKIP 0
+        ldi   R6, 47            ; a 48-bit response: 47 bits after the start bit, CSKIP 0
         ldi   R1, 0
         bt    R0, 7
         jf    r48
-        ldi   R6, 136           ; R2: 136 bits, CSKIP 8
-        li    R1, 0x8000
-r48:    scfg  R6, RXCNT
+        ldi   R6, 135           ; R2: 135 bits after the start bit, CSKIP 7
+        lui   R1, 0x70
+r48:    lui   R6, 0x08          ; SYNCLEN 1: the start bit is the sync pattern
+        scfg  R6, RXCNT
         scfg  R1, RXOPT
         li    R6, 0x0286        ; CODING: CRC7, CMODE 1, CTX 1: the send half appends it
         scfg  R6, CODING
@@ -166,7 +180,7 @@ r48:    scfg  R6, RXCNT
         oe    CMD, 0
         bt    R3, 0
         jf    nor
-        sgo   rx                ; the response hunt starts at the turnaround
+        sgo   rx                ; the response's reception starts at the turnaround
 nor:    tick  R7                ; E + 96H: CMD released as the end bit ends
         ldi   R1, 0x86          ; CODING: CTX 0, the receive half checks the response
         scfg  R1, CODING
@@ -208,7 +222,7 @@ fin:    sstop rx
         goto  next
 datth:  sstop txrx
         pcfg  DAT0, IN
-        li    R0, 0x0026 | (NDAT << 8) | (NCLK << 12)       ; RKIND 2, RMSB, HUNT for a fall, rising edges of CLK
+        li    R0, 0x0006 | (NDAT << 8) | (NCLK << 12)       ; RKIND 2, RMSB, no hunt, rising edges of CLK
         scfg  R0, RXMODE
         li    R0, 0x0800        ; SYNCLEN 1, RCNT 0
         scfg  R0, RXCNT
@@ -224,7 +238,7 @@ datth:  sstop txrx
         scfg  R0, CODING
         li    R6, DCNT
         sgo   rx
-        now                     ; the hunt starts
+        until DAT0, 1           ; the reception starts with DAT0 high: every rising edge samples it
 blk:    li    R5, DBUF
         ldi   R4, 0
 wl:     rxw   R1
@@ -247,5 +261,7 @@ blast:  srd   R2, end
         add   R1, R1
         or    R2, R1
         lui   R2, 1             ; bit 8: a block came
+        sgo   rx                ; the next reception starts once DAT0 is high again
+        until DAT0, 1
         send  R2, MBLK
         goto  blk

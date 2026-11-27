@@ -2975,7 +2975,11 @@ def g_sd_unit(runner, log):
             ('CMD17 at 8.33 MHz, the response 64 clocks after the command',
              [SU.read_cmd(3), SU.read_cmd(4)], 3, dict(state='tran', ncr=64, nac=30), ((1, 0), (3, 2))),
             ('CMD17 at 8.33 MHz, the block starting 2 clocks after the command, during the response',
-             [SU.read_cmd(3)], 3, dict(state='tran', ncr=2, nac=2), ((0, 3), (2, 1)))):
+             [SU.read_cmd(3)], 3, dict(state='tran', ncr=2, nac=2), ((0, 3), (2, 1))),
+            ('CMD17 at 6.25 MHz, the card\'s output delay H: its start bits change in the cycle of a rising edge',
+             [SU.read_cmd(5)], 4, dict(state='tran', ncr=5, nac=20, d=4), ((0, 1), (2, 3))),
+            ('CMD2 (R2) and CMD3 (R6) at 8.33 MHz, the card\'s output delay H',
+             [(2, 0, SU.R136, 0), (3, 0, SU.R48, 0)], 3, dict(state='ready', ncr=9, d=3), ((1, 2),))):
         b = Batch(runner, title, 'tokens')
         for ta, tb in pairs:
             ctx = b.run('sd_unit_%s_t%d%d' % ('init' if len(cmds) > 2 else 'rd', ta, tb), sd_unit_run, cmds, kw,
