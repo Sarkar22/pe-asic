@@ -10,7 +10,7 @@ protocol documents. Python 3 standard library, plus `sigrok-cli`.
 From the repository root:
 
 ```
-python3 programs/sigrok/check.py            # every check on sim/sim.py: about 3 minutes on one core
+python3 programs/sigrok/check.py            # every check on sim/sim.py: about 4 minutes on one core
 python3 programs/sigrok/check.py can usb    # only the groups whose names contain one of the words
 python3 programs/sigrok/check.py --list     # the groups
 python3 programs/sigrok/check.py --rtl      # on the RTL through verif/rtl_chip.py, checked against sim/sim.py
@@ -52,7 +52,7 @@ python3 programs/sigrok/check.py --rtl      # on the RTL through verif/rtl_chip.
    so on. Where the stimulus plants a fault (a glitch, a low stop bit, a corrupted CRC, a wrong parity, an absent
    device), the fault must show, in its place.
 7. **The bench's own decoder**, where the bench has one for that bus (UART, SPI, I2C, WS2812, 1-Wire, DMX512, MDIO,
-   JTAG, SWD, USB, CAN), runs on the same record and must agree with sigrok.
+   JTAG, SWD, USB, CAN, I2S, SD), runs on the same record and must agree with sigrok.
 8. **Under `--rtl`** each scenario runs on the simulator first, then on the RTL, and the RTL's record, every pad and
    board level of every cycle, must equal the simulator's. The decode is of the RTL's record.
 9. **HDMI CEC's signal free time** (HDMI CEC 1.4, CEC 9.1) is measured on the record at every start bit that sigrok
@@ -65,13 +65,13 @@ with its VCD file, and does not fail. Any other difference fails.
 
 ## Results
 
-One run with `--rtl`, on the RTL of `src/` at commit 0d6769e: **365 checks, 365 PASS**. 791 scenario runs (743 with
-sigrok, 36 of the CRC programs, 12 teeth) and 867 decodes by sigrok, one VCD file each (a run may decode several
-buses, or one window per packet). Of the 855 decodes of scenarios, 833 are as the stimulus wants and 22 are known
-differences, listed below, on the simulator and on the RTL alike; the other 12 are the teeth, all caught. In all 791
-runs the RTL's record equals the simulator's, every pad and board level of every cycle: 250,413 changes over 84.9
-million cycles in the runs with sigrok alone. The simulator pass alone is 220 checks in 205 s; the `--rtl` run, which
-runs every scenario on both, takes 740 s, on one core. The CEC runs take 394 s of that: a CEC bit is 2.4 ms,
+One run with `--rtl`, on the RTL of `src/` at commit `ca6a4b9`: **404 checks, 404 PASS**. 848 scenario runs (800
+with sigrok, 36 of the CRC programs, 12 teeth) and 972 decodes by sigrok, one VCD file each (a run may decode several
+buses, or one window per packet). Of the 960 decodes of scenarios, 938 are as the stimulus wants and 22 are known
+differences, listed below, on the simulator and on the RTL alike; the other 12 are the teeth, all caught. In all 848
+runs the RTL's record equals the simulator's, every pad and board level of every cycle: 294,542 changes over 85.8
+million cycles in the runs with sigrok alone. The simulator pass alone is 243 checks in 233 s; the `--rtl` run, which
+runs every scenario on both, takes 1,052 s, on one core. The CEC runs take 500 s of that: a CEC bit is 2.4 ms,
 120,000 cycles.
 
 Per program: a run of an image with several programs counts for each program of its group, and each decode for the
@@ -81,61 +81,63 @@ program appears in (bytes, events, frames).
 
 | Program | sigrok decoders and options | Scenarios | Decoded | Simulator | RTL | Time |
 |---|---|---|---|---|---|---|
-| `basic/i2c_write.s` | i2c | 34 | 388 items | 34 of 34 | 34 of 34 | 5 s |
+| `basic/i2c_write.s` | i2c | 34 | 388 items | 34 of 34 | 34 of 34 | 8 s |
 | `basic/memhog.s` | uart (baudrate=115200); i2c; onewire_link > onewire_network | 1 | 23 items | 3 of 3 | 3 of 3 | 0 s |
-| `basic/onewire.s` | onewire_link > onewire_network | 24 | 66 items | 24 of 24 | 24 of 24 | 13 s |
-| `basic/spi.s` | spi (cpol=0/1 cpha=0/1) | 99 | 804 items | 99 of 99 | 99 of 99 | 7 s |
-| `basic/uart_rx.s` | uart (baudrate=115200/1000000) | 22 | 394 items | 22 of 22 | 22 of 22 | 5 s |
-| `basic/uart_tx.s` | uart (baudrate=115200/1000000/4166667/9600/1526) | 39 | 217 items | 39 of 39 | 39 of 39 | 8 s |
-| `basic/ws2812.s` | rgb_led_ws281x | 10 | 850 items | 10 of 10 | 10 of 10 | 2 s |
-| `standard/cec.s` | cec | 6 | 183 frames | 21 of 21 | 21 of 21 | 394 s |
+| `basic/onewire.s` | onewire_link > onewire_network | 24 | 66 items | 24 of 24 | 24 of 24 | 22 s |
+| `basic/spi.s` | spi (cpol=0/1 cpha=0/1) | 99 | 804 items | 99 of 99 | 99 of 99 | 11 s |
+| `basic/uart_rx.s` | uart (baudrate=115200/1000000) | 22 | 394 items | 22 of 22 | 22 of 22 | 9 s |
+| `basic/uart_tx.s` | uart (baudrate=115200/1000000/4166667/9600/1526) | 39 | 217 items | 39 of 39 | 39 of 39 | 13 s |
+| `basic/ws2812.s` | rgb_led_ws281x | 10 | 850 items | 10 of 10 | 10 of 10 | 3 s |
+| `standard/cec.s` | cec | 6 | 183 frames | 21 of 21 | 21 of 21 | 500 s |
 | `standard/crc16.s` | no decoder: binascii.crc_hqx | 16 | - | 16 of 16 | 16 of 16 | 0 s |
 | `standard/crc32.s` | no decoder: zlib.crc32 | 16 | - | 16 of 16 | 16 of 16 | 1 s |
 | `standard/crc8.s` | no decoder: catalogue check value 0xA1 | 4 | - | 4 of 4 | 4 of 4 | 0 s |
 | `standard/hdlc_tx.s` | no decoder: libsigrokdecode has no HDLC | 0 | - | - | - | 0 s |
 | `standard/i2c.s` | i2c > eeprom24xx | 5 | 149 items | 5 of 5 | 5 of 5 | 1 s |
 | `standard/i2c_target.s` | i2c > eeprom24xx | 4 | 128 events | 4 of 4 | 4 of 4 | 1 s |
-| `standard/i2c_write.s` | i2c | 15 | 94 items | 15 of 15 | 15 of 15 | 1 s |
+| `standard/i2c_write.s` | i2c | 15 | 94 items | 15 of 15 | 15 of 15 | 2 s |
 | `standard/jtag.s` | jtag | 8 | 96 scans | 8 of 8 | 8 of 8 | 0 s |
 | `standard/manch_rx.s` | no decoder: no plain Manchester decoder | 0 | - | - | - | 0 s |
 | `standard/memstress.s` | uart (baudrate=115200) | 1 | 1 bytes | 1 of 1 | 1 of 1 | 0 s |
-| `standard/onewire.s` | onewire_link > onewire_network | 5 | 9 events | 5 of 5 | 5 of 5 | 3 s |
+| `standard/onewire.s` | onewire_link > onewire_network | 5 | 9 events | 5 of 5 | 5 of 5 | 4 s |
 | `standard/reflex.s` | no decoder: a reaction time, not a protocol | 0 | - | - | - | 0 s |
-| `standard/spi.s` | spi (cpol=0/1 cpha=0/1) | 51 | 108 items | 51 of 51 | 51 of 51 | 1 s |
-| `standard/uart_rx.s` | uart (baudrate=115200/1000000/500000) | 12 | 42 items | 12 of 12 | 12 of 12 | 1 s |
-| `standard/uart_tx.s` | uart (baudrate=115200/9600/4166667/3846154) | 19 | 45 items | 19 of 19 | 19 of 19 | 4 s |
+| `standard/spi.s` | spi (cpol=0/1 cpha=0/1) | 51 | 108 items | 51 of 51 | 51 of 51 | 2 s |
+| `standard/uart_rx.s` | uart (baudrate=115200/1000000/500000) | 12 | 42 items | 12 of 12 | 12 of 12 | 2 s |
+| `standard/uart_tx.s` | uart (baudrate=115200/9600/4166667/3846154) | 19 | 45 items | 19 of 19 | 19 of 19 | 5 s |
 | `standard/ws2812.s` | rgb_led_ws281x | 4 | 32 bits | 4 of 4 | 4 of 4 | 1 s |
-| `trimmed/i2c.s` | i2c > eeprom24xx | 12 | 234 items | 12 of 12 | 12 of 12 | 5 s |
+| `trimmed/i2c.s` | i2c > eeprom24xx | 12 | 234 items | 12 of 12 | 12 of 12 | 7 s |
 | `trimmed/uart_rx.s` | uart (baudrate=115200/1000000/500000) | 9 | 35 items | 9 of 9 | 9 of 9 | 1 s |
 | `trimmed/uart_tx.s` | uart (baudrate=115200/3846154) | 9 | 34 items | 9 of 9 | 9 of 9 | 1 s |
-| `extra/i2c.s` | i2c > eeprom24xx | 11 | 213 events | 11 of 11 | 11 of 11 | 5 s |
-| `extra/lin.s` | uart (baudrate=22327/19201/16843) > lin | 6 | 180 events | 6 of 6 | 6 of 6 | 44 s |
-| `extra/nec_tx.s` | ir_nec (polarity=active-high cd_freq=38000) | 2 | 10 fields | 2 of 2 | 2 of 2 | 45 s |
+| `extra/i2c.s` | i2c > eeprom24xx | 11 | 213 events | 11 of 11 | 11 of 11 | 7 s |
+| `extra/lin.s` | uart (baudrate=22327/19201/16843) > lin | 6 | 180 events | 6 of 6 | 6 of 6 | 65 s |
+| `extra/nec_tx.s` | ir_nec (polarity=active-high cd_freq=38000) | 2 | 10 fields | 2 of 2 | 2 of 2 | 71 s |
 | `extra/parallel.s` | parallel (clock_edge=rising) | 12 | 84 bytes | 12 of 12 | 12 of 12 | 1 s |
-| `extra/spi_target.s` | spi (cpol=0 cpha=0) | 36 | 432 bytes | 36 of 36 | 36 of 36 | 4 s |
-| `extra/swd.s` | swd | 12 | 48 events | 12 of 12 | 12 of 12 | 4 s |
-| `advanced/can.s` | can (nominal_bitrate=500000/497512/502513/495050/505051/490196/510204 sample_point=75.0) | 39 | 727 frames | 39 of 39 | 39 of 39 | 9 s |
-| `advanced/can_unit.s` | can (nominal_bitrate=500000/1000000 sample_point=75.0) | 23 | 427 frames | 23 of 23 | 23 of 23 | 7 s |
-| `advanced/dmx_rx.s` | dmx512 | 13 | 2172 slots | 33 of 33 | 33 of 33 | 34 s |
-| `advanced/dmx_tx.s` | dmx512 | 10 | 795 slots | 28 of 28 | 28 of 28 | 14 s |
-| `advanced/i2c_fp.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 1 s |
-| `advanced/i2c_tgt.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 3 s |
-| `advanced/jtag.s` | jtag | 13 | 208 scans | 13 of 13 | 13 of 13 | 1 s |
+| `extra/spi_target.s` | spi (cpol=0 cpha=0) | 36 | 432 bytes | 36 of 36 | 36 of 36 | 5 s |
+| `extra/swd.s` | swd | 12 | 48 events | 12 of 12 | 12 of 12 | 5 s |
+| `advanced/can.s` | can (nominal_bitrate=500000/497512/502513/495050/505051/490196/510204 sample_point=75.0) | 39 | 727 frames | 39 of 39 | 39 of 39 | 14 s |
+| `advanced/can_unit.s` | can (nominal_bitrate=500000/1000000 sample_point=75.0) | 28 | 447 frames | 28 of 28 | 28 of 28 | 11 s |
+| `advanced/dmx_rx.s` | dmx512 | 13 | 2172 slots | 33 of 33 | 33 of 33 | 55 s |
+| `advanced/dmx_tx.s` | dmx512 | 10 | 795 slots | 28 of 28 | 28 of 28 | 23 s |
+| `advanced/i2c_fp.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 2 s |
+| `advanced/i2c_tgt.s` | i2c | 15 | 525 events | 15 of 15 | 15 of 15 | 4 s |
+| `advanced/i2s_ctl.s` | i2s; tdm_audio (bps=16/32/8 channels=8/4/1 edge=rising) | 24 | 832 words | 48 of 48 | 48 of 48 | 5 s |
+| `advanced/i2s_tgt.s` | i2s; tdm_audio (bps=16/32/8 channels=4/2/1 edge=rising) | 24 | 944 words | 48 of 48 | 48 of 48 | 5 s |
+| `advanced/jtag.s` | jtag | 13 | 208 scans | 13 of 13 | 13 of 13 | 2 s |
 | `advanced/manch_rx.s` | no decoder: no plain Manchester decoder | 0 | - | - | - | 0 s |
-| `advanced/mdio_phy.s` | mdio | 11 | 55 frames | 11 of 11 | 11 of 11 | 3 s |
-| `advanced/mdio_sta.s` | mdio | 12 | 48 frames | 12 of 12 | 12 of 12 | 2 s |
-| `advanced/ow_unit.s` | onewire_link > onewire_network | 10 | 40 events | 10 of 10 | 10 of 10 | 37 s |
-| `advanced/ps2_dev.s` | ps2 | 15 | 64 frames | 32 of 32 | 32 of 32 | 25 s |
-| `advanced/sd_unit.s` | sdcard_sd | 8 | 272 tokens | 8 of 8 | 8 of 8 | 9 s |
+| `advanced/mdio_phy.s` | mdio | 11 | 55 frames | 11 of 11 | 11 of 11 | 5 s |
+| `advanced/mdio_sta.s` | mdio | 12 | 48 frames | 12 of 12 | 12 of 12 | 5 s |
+| `advanced/ow_unit.s` | onewire_link > onewire_network | 10 | 40 events | 10 of 10 | 10 of 10 | 53 s |
+| `advanced/ps2_dev.s` | ps2 | 15 | 64 frames | 32 of 32 | 32 of 32 | 43 s |
+| `advanced/sd_unit.s` | sdcard_sd | 11 | 302 tokens | 11 of 11 | 11 of 11 | 14 s |
 | `advanced/spi_unit.s` | spi (cpol=0/1 cpha=0/1) | 16 | 496 bytes | 16 of 16 | 16 of 16 | 1 s |
-| `advanced/swd.s` | swd | 16 | 420 events | 16 of 16 | 16 of 16 | 4 s |
-| `advanced/uart_bypass.s` | uart (baudrate=3125000/1000000/115207) | 22 | 276 bytes | 44 of 44 | 44 of 44 | 2 s |
-| `advanced/uart_par_unit.s` | uart (baudrate=1000000/115207/8333333 parity=even/odd) | 8 | 154 bytes | 8 of 8 | 8 of 8 | 2 s |
-| `advanced/usb_dev.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 73 packets | 9 of 9 | 9 of 9 | 1 s |
-| `advanced/usb_enum.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) > usb_request; usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 12 | 496 packets | 12 of 12 | 12 of 12 | 21 s |
+| `advanced/swd.s` | swd | 16 | 420 events | 16 of 16 | 16 of 16 | 7 s |
+| `advanced/uart_bypass.s` | uart (baudrate=3125000/1000000/115207) | 22 | 276 bytes | 44 of 44 | 44 of 44 | 3 s |
+| `advanced/uart_par_unit.s` | uart (baudrate=1000000/115207/8333333 parity=even/odd) | 8 | 154 bytes | 8 of 8 | 8 of 8 | 3 s |
+| `advanced/usb_dev.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 73 packets | 9 of 9 | 9 of 9 | 2 s |
+| `advanced/usb_enum.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) > usb_request; usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 13 | 564 packets | 13 of 13 | 13 of 13 | 35 s |
 | `advanced/usb_rx.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 9 | 51 packets | 9 of 9 | 9 of 9 | 1 s |
 | `advanced/usb_tx.s` | usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 15 | 15 packets | 15 of 15 | 15 of 15 | 1 s |
-| `advanced/ws2812_unit.s` | rgb_led_ws281x | 7 | 1050 LEDs | 7 of 7 | 7 of 7 | 4 s |
+| `advanced/ws2812_unit.s` | rgb_led_ws281x | 7 | 1050 LEDs | 7 of 7 | 7 of 7 | 5 s |
 | `test/test.py` | uart (baudrate=1250000); usb_signalling (signalling=low-speed) > usb_packet (signalling=low-speed) | 3 | 19 packets | 3 of 3 | 3 of 3 | 0 s |
 
 ## Teeth
@@ -178,7 +180,7 @@ here pass plainly.
   The program now takes the rest of the frame from MIN unsent and answers 1, and starts a frame only after the line
   has been high for 7 bit periods. `bench/standard.py` checks a block refused in the middle of a frame, another
   initiator's frame during the count, and the free time before every start bit; so does this checker, on the
-  record. A review found one more: the program read a broadcast's ACK bit like a direct frame's, where HDMI CEC 1.4
+  record. A later check found one more: the program read a broadcast's ACK bit like a direct frame's, where HDMI CEC 1.4
   inverts it (a follower pulls the slot low to reject a broadcast). It now judges each block by the frame's
   destination; sigrok's cec decoder does the same, and checks a broadcast that every follower accepts and one that
   a follower rejects in its second block.

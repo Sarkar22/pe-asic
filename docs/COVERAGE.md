@@ -1,9 +1,9 @@
 # Coverage
 
-Updated 2026-11-23: RKIND 3's decoder with its structural rule and keep test, and a reception of RKIND 3 that keeps
-the *p*, RGAIN and RACQ it started with (5.9.6); timed samples' RESYNC with RACQ (5.9.6); SMODE 2's end at the
-violating bit (5.9.7). Before that, 2026-11-21: the half cycles (THALF, RKIND 3, REOP's byte end) and the Manchester
-byte end.
+Updated 2026-11-27: a note on the SD and CAN benches (section 2.4). Before that, 2026-11-23: RKIND 3's decoder with
+its structural rule and keep test, and a reception of RKIND 3 that keeps the *p*, RGAIN and RACQ it started with
+(5.9.6); timed samples' RESYNC with RACQ (5.9.6); SMODE 2's end at the violating bit (5.9.7); and 2026-11-21: the
+half cycles (THALF, RKIND 3, REOP's byte end) and the Manchester byte end.
 
 Three measures of how much of the chip the tests reach, all from one set of runs:
 
@@ -16,11 +16,11 @@ Three measures of how much of the chip the tests reach, all from one set of runs
 
 ## 1. Running it
 
-| What | Command | Time, 8 threads |
+| What | Command | Time |
 |---|---|---|
 | The Verilator models (Verilator 5 and a C++ compiler) | `make -C verif JOBS=8` | |
-| One lockstep run, on those models | `python3 verif/lockstep.py --gen chips --images 200` | 10 s |
-| Everything in this page: coverage models, every run of section 2.4, the program benches on the RTL, the reports | `verif/coverage.sh [OUT]` | 20 min (66 min with 3 threads and the 24 benches of 2026-11-21; 91 min with the `rk3` images and the 10BASE-T bench's new rows, 46 of them that bench's; 115 min with the `fcs` and `can` images and the 10BASE-T bench's rows of 2026-11-23, 65 of them that bench's) |
+| One lockstep run, on those models | `python3 verif/lockstep.py --gen chips --images 200` | 10 s with its default of 8 jobs |
+| Everything in this page: coverage models, every run of section 2.4, the program benches on the RTL, the reports | `verif/coverage.sh [OUT]` | About 2 hours with 3 threads: 115 min on 2026-11-23, 65 of them in the 10BASE-T bench, with the `fcs` and `can` images (on 2026-11-11, 20 min with 8 threads; on 2026-11-21, 66 min with 3 threads and 24 benches, then 91 with the `rk3` images) |
 | The proof of section 3.3, with SymbiYosys and bitwuzla as in `formal/` | `sby -f tx_rl.sby prove` and `cover`, in `verif/unreachable/` | seconds |
 
 `verif/coverage.sh` writes `OUT/code.md` and `OUT/code_uncovered.txt` (code coverage per module, and every point
@@ -156,7 +156,7 @@ The runs of `verif/coverage.sh`, on the coverage models:
 Run 13 reaches the half cycles: 35,011 cycles in which a pad's two halves differ, 161,559 unit cycles of an
 RKIND 3 reception, and 822 receptions that REOP's byte end ended at a byte boundary.
 
-On the RTL with RKIND 3's decoder as 5.9.6 now gives it and the Manchester byte end (2026-11-21), the same runs with
+On the RTL of 2026-11-21, with RKIND 3's decoder as 5.9.6 gave it then and the Manchester byte end, the same runs with
 the same seeds, and the `rk3` images as run 15:
 
 | Run | Generator | Host | Images × cycles | Cycles compared | Differ |
@@ -186,14 +186,14 @@ the *p*, RGAIN and RACQ it started with, and the four images agree.
 
 Run 15 reaches RKIND 3's half steps: 3,785,403 unit cycles of an RKIND 3 reception, 12,458 with an edge in both
 halves, 184,286 bits given at a candidate's deadline, and 3,394 receptions that the Manchester byte end ended at a
-byte boundary. Run 13 now gives 35,015 cycles in which a pad's two halves differ and 821 receptions that REOP's byte
+byte boundary. Run 13 then gave 35,015 cycles in which a pad's two halves differ and 821 receptions that REOP's byte
 end ended at a byte boundary.
 
 The program benches on the RTL (`vlcov.py benches`, `programs/check.py` with the RTL in place of `sim/sim.py`):
 487 checks of 16 benches, 487 pass, the same 487 as on `sim/sim.py`. On 2026-11-21, with the benches added since
 (the bypass override, 10BASE-T, USB enumeration, and the unit benches of SPI, CAN, SD, the small protocols and I2S):
 838 checks of 24 benches, every bench but the self-tests of the two protocol checkers, all pass. With RKIND 3's
-decoder as 5.9.6 now gives it and the Manchester byte end: 869 checks of the same 24 benches, all pass, among them
+decoder of 2026-11-21 and the Manchester byte end: 869 checks of the same 24 benches, all pass, among them
 the 10BASE-T bench's 109, with frames at 802.3's jitter, the fixed patterns of 7.3, phase steps, a partner 0.01% off
 on full-size frames and frames that end in excess bits.
 
@@ -238,6 +238,9 @@ the mirror pattern on frames from a universally administered source, the partner
 unit bench's checks of the two receive rules (a third node behind two arbitrating ones, dominant bits stretched at
 RXD, the sender's clock, the stuff-error flag in the next bit).
 
+The SD and CAN benches gained 13 and 18 checks after these runs, with the firmware fixes of 2026-11-27 (SD's start
+bit, CAN's error flag), and have not run under `coverage.sh` since.
+
 ### 2.5 Planted bugs
 
 Each bug is a small edit to a copy of `src/`, built into new models and run until the first image that differs,
@@ -248,18 +251,18 @@ with the generators in turn, at most 40 images each.
 | Integration: the shift units wired into the core (`pe_core`, `pe_exec`, `pe_pins`, `pe_host`, `pe_decode`) | 31 | 31 | chips 31 |
 | Host replies and the memory path | 10 | 10 | chips 9, prog 1 |
 | The link: `pe_spi.sv`, and CS in `pe_host.sv` (host mode `pins`) | 8 | 6 | chips 6 |
-| An earlier review's list of bugs planted in the core, before the shift units: the 80 that still apply (one no longer does), and its control, which must survive | 80 | 79 | images 65 (stub modes and `pins`), corners 12, `pins` checks of MISO and early CS 2 |
+| An earlier list of bugs planted in the core, before the shift units: the 80 that still apply (one no longer does), and its control, which must survive | 80 | 79 | images 65 (stub modes and `pins`), corners 12, `pins` checks of MISO and early CS 2 |
 
 On the RTL with the half-cycle latches (2026-11-21) the four sets were planted again, each bug re-pointed where
-the batch moved its line: integration 31 of 31 (chips 31), host replies 10 of 10 (chips 9, prog 1), the link 6 of
-8, the same two missed, and the earlier review's list 79 of 80: 67 by the images (chips 43, rows 17, `pins` 5,
+its line had moved: integration 31 of 31 (chips 31), host replies 10 of 10 (chips 9, prog 1), the link 6 of
+8, the same two missed, and the earlier list 79 of 80: 67 by the images (chips 43, rows 17, `pins` 5,
 prog 1, wide 1) and 12 of the other 13 by the corners, the same one missed as before. The
 half-cycle paths have their own planted bugs, caught by the `half` generator, the program benches and the proofs
 of `formal/`.
 
 On the RTL of 2026-11-23, where `pe_shift.sv` is the only source file that changed, the integration, host and link
 sets were planted again with the same seeds: integration 31 of 31 (chips 31), host replies 10 of 10 (chips 9, prog
-1), the link 6 of 8, the same two missed. Of the earlier review's list, the control and the 13 bugs that only the
+1), the link 6 of 8, the same two missed. Of the earlier list, the control and the 13 bugs that only the
 corners caught before were planted again, the corners first: 12 of the 13 caught by the corners (`stale4`,
 `boundary` 3, `nowstale`, `steplate`, `world`, `stepld`, `ring` 2, `abortpin` 2), the same one missed (S07,
 equivalent within 9.1); its other 67 bugs, which the images caught before, were not run again. The control survives
@@ -309,7 +312,7 @@ program benches. "After": every run of section 2.4.
 | `pe_decode` | 89 of 91 (97.8%) | 91 of 91 (100.0%) | - | - | 62 of 62 (100.0%) | 62 of 62 (100.0%) |
 | all | 302 of 308 (98.1%) | 309 of 310 (99.7%) | 542 of 572 (94.8%) | 550 of 578 (95.2%) | 11022 of 11376 (96.9%) | 11285 of 11464 (98.4%) |
 
-On the RTL with the half cycles and RKIND 3's decoder as 5.9.6 now gives it, 2026-11-21: every run of section 2.4
+On the RTL of 2026-11-21, with the half cycles and RKIND 3's decoder of that day: every run of section 2.4
 (the `half` and `rk3` images included) and the 24 program benches of `programs/check.py` on the RTL. `pe_shift` has
 more points than on 2026-11-11: the RKIND 3 datapath, the byte ends, THALF and its pad stage (with RKIND 3 as first
 written, 472 branch and 6,602 toggle points; its decoder is smaller now). The points missed are those of sections
@@ -381,7 +384,7 @@ as of 2026-11-11.)
 
 The half cycles add no line or branch point that stays unhit: every arm of the RKIND 3 datapath, the byte end, THALF
 and the pad stage is reached, by the `half` images above all (section 2.4, run 13), and the points missed are the
-same 29 as on 2026-11-11, at the lines above. So does RKIND 3's decoder as now given: every arm of its block
+same 29 as on 2026-11-11, at the lines above. So did RKIND 3's decoder of 2026-11-21: every arm of its block
 `rk3n_f` and of the Manchester byte end's restore and check is reached, by the `rk3` images above all (run 15).
 On the RTL of 2026-11-23 the same 29 points are missed, three of them at lines that moved (`CUT_STUFF`'s 852 to 864,
 `CUT_CRC`'s 855 to 867 and 937 to 943; the table gives the new lines), and every arm of RKIND 3's block with its
@@ -425,8 +428,8 @@ and counts each point every time it happens. The lockstep shows the RTL did the 
 ### 4.2 Results
 
 "Before" and "after" are the runs of 2026-11-11, as in section 3.2; the last three columns are every run of section
-2.4 on the RTL of 2026-11-21, with RKIND 3's decoder as 5.9.6 now gives it: the unit group has the 32 points the half
-cycles added, less the 8 of RKIND 3's half steps as first written, and 27 more for its half steps as now given and
+2.4 on the RTL of 2026-11-21, with RKIND 3's decoder of that day: the unit group has the 32 points the half
+cycles added, less the 8 of RKIND 3's half steps as first written, and 27 more for its half steps of 2026-11-21 and
 the Manchester byte end, every one of them hit.
 
 | Group | Points | Hit, before | Hit, after | Points, 2026-11-21 | Hit, 2026-11-21 | Holes, 2026-11-21 |
@@ -497,7 +500,8 @@ Each point the "before" stimulus missed is credited to the first run, in this or
 ## 5. Limits
 
 1. Code coverage is of the RTL as Verilator simulates it. The netlist is checked by the gate-level tests of `test/`
-   and, in part, by `formal/chip.eqy`.
+   and by `formal/chip.eqy`, which proves it equal to the RTL piece by piece, with the SRAM, its pin buffers and the
+   latches as black boxes.
 2. A point hit is not a point checked: the lockstep compares the state after every cycle and the program benches
    check the pins, but a value can be wrong in a way neither sees. The planted bugs of section 2.5 measure that, and
    `formal/` proves the properties in its table for every reachable state.

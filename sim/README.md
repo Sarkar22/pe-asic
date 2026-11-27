@@ -12,7 +12,7 @@
 | `sim2.py` | A second simulator written by hand from the text. It takes the row semantics from `isatable.py` and compiles the code blocks of section 5.9. `docsim.py` builds on it |
 | `asm2.py` | A second assembler, on `isatable.py` |
 | `compare.py` | Runs `sim.py`, `sim2.py` and `docsim.py` side by side and compares them on every cycle |
-| `claims.py` | Checks 226 statements the document makes, on `sim.py`, `asm.py` and `asm2.py` |
+| `claims.py` | Checks 240 statements the document makes, on `sim.py`, `asm.py` and `asm2.py` |
 
 ## Compiled from the text
 
@@ -24,7 +24,7 @@ Section 3.4 makes the document's code blocks the normative definition, in the no
 - `next` is `(PC + 1) % DEPTH`, and `a` is the current cycle (section 3.4).
 - A call of another block function passes the chip, the thread and the cycle on.
 
-There are 65 such functions, in sections 3.4, 3.5, 3.6, 4.2, 5.3, 5.4, 5.9.4 to 5.9.7, 6.1 and 9.3. Nothing is written by hand for them. A capital name that the rules can't place stops the compile, so a name the text never defines can't slip through as a Python name.
+There are 70 such functions, in sections 3.4, 3.5, 3.6, 4.2, 5.3, 5.4, 5.9.4 to 5.9.7, 6.1 and 9.3. Nothing is written by hand for them. A capital name that the rules can't place stops the compile, so a name the text never defines can't slip through as a Python name.
 
 Each row of the instruction table runs its Semantics cell, which `isatable.py` compiles statement by statement under the rules of section 6.1, and is decoded by its Encoding and Fields cells. What remains by hand is what the text gives as prose and tables rather than as code blocks: the step order of section 3.2, with its rule for what step 3 sees of the unit, the pad equations of section 5.2 with V(p), step 5's `CMT := 0` and `SYNC3 := SYNC2`, the reset values of section 8, the mailbox and RDREG of section 9.2 (RDREG of the unit's registers runs the compiled `sstat` and `srd`), and the host's byte framing. So a change to a code block or to a row of the table changes what `docsim.py` does, with no other edit: `slot()` and `memory()` of sections 3.6 and 4.2, for example, run as written.
 
@@ -47,7 +47,7 @@ Each row of the instruction table runs its Semantics cell, which `isatable.py` c
 
 `python3 sim/compare.py` runs every program of `programs/` three ways, 300 random images, 100 with half cycles, 100 directed at RKIND 3, 100 more of those with real FCSs and 100 directed at CAN, and compares the three simulators after every cycle. It compares the pads in both halves of the cycle, every thread's registers and flags, every shift unit's state and slots, the pin flops and owners, the output switch, the mailbox, BUSY and the memory, and the reply to every host command. The images are drawn uniformly over the table's rows, or biased to the shift-unit rows with settings that make the units run. The half-cycle images set THALF, RKIND 3 and REOP's byte end going, and give every input its own level at each falling edge (section 3.1). The RKIND 3 images put 802.3 Manchester frames on each thread's own input, timed to the half cycle, with random jitter, the fixed patterns of section 7.3, phase steps, pulses of half a cycle and frames of 1 to 7 bits more than whole octets, so that edges come in both halves of a cycle, candidates give their bits at the deadline and the byte end of a Manchester frame runs (5.9.6, 5.9.7). In some of them two threads are set up as an 802.3 receiver, on frames that carry a real FCS, so that good frames pass the CRC check, frames with excess bits pass it only through the byte end, and a bad FCS fails it. The CAN images take timed samples with RESYNC, mostly with RACQ, and destuff runs of equal bits (SMODE 2), on stuffed frames with their CRC-15, dominant bits stretched, the sender's clock a few percent off and stuff violations (5.9.6, 5.9.7). It prints one line for each run that differs, naming the simulator that stands apart and the first thing in which it differs, with its value and the others', then a summary, and exits 1 if any run differs. That is about 5.7 million cycles, a few minutes on one core: `--jobs 4` runs it in 4 processes, and `--quick` is a shorter run. Its docstring lists the options.
 
-`python3 sim/claims.py` checks 226 statements, each named by the section it tests, and prints PASS or FAIL for each, then the count. It exits 1 if any fails.
+`python3 sim/claims.py` checks 240 statements, each named by the section it tests, and prints PASS or FAIL for each, then the count. It exits 1 if any fails.
 
 `compare.py --doc FILE` checks the comparison itself. `sim2.py` and `docsim.py` then read FILE, through `isatable.py`, while `sim.py` and `asm.py` go on reading `docs/ISA.md`, so the programs and the images don't change. Copy `docs/ISA.md`, change a code block or a row of the table, and see which simulator follows the change. Four such changes, one at a time, with `claims.py` run on a copy of the repository whose `docs/ISA.md` has the change:
 

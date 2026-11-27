@@ -1,7 +1,7 @@
 ; CAN 2.0A node on the shift unit at 500 kbit/s and 50 MHz, one thread: the unit stuffs, destuffs, appends and
-; checks the CRC-15 and times every bit; the firmware writes RXCNT once the DLC is in, monitors its own bits and
-; arbitrates, drives the ACK slot and sends error flags.  251 words, and the 512-word memory for the frame to send
-; at FRM.  References are to the Bosch CAN Specification 2.0, part A, by section name.
+; checks the CRC-15 and times every bit; the firmware writes RXCNT once it knows the data length, monitors its
+; own bits and arbitrates, drives the ACK slot and sends error flags.  251 words, and the 512-word memory for the
+; frame to send at FRM.  References are to the Bosch CAN Specification 2.0, part A, by section name.
 ;
 ; Pins: TXD io0 in OD (released is recessive, so the transceiver's TXD pull-up keeps the bus recessive through
 ; reset and until the program runs, section 11.5), RXD ui6.  Dominant is 0.

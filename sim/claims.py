@@ -1721,7 +1721,7 @@ def chk_world(log):
 
 
 def chk_halfcycle_text(log):
-    # 5.9.2 to 5.9.4 as batch A left them: every per-thread name of 5.9.2 is a name of sim.py's unit, THALF is
+    # 5.9.2 to 5.9.4 with the half cycles: every per-thread name of 5.9.2 is a name of sim.py's unit, THALF is
     # TXMODE bit 15, and with it every bit of every slot is a field, so scfg stores all 16 bits of each (KEEP).
     import asm as _asm
     with open(_asm.DOC) as fh:
@@ -1969,7 +1969,7 @@ def _nrz_levels(runs, b, n, lag=0):
     return lv, [x for x, w in edges]
 
 
-def chk_a3(log):
+def chk_receive_rules(log):
     rng = random.Random(20261123)
     # 7.3 and 5.9.6: timed samples with RESYNC and RGAIN 0 fall FIRST cycles after the last edge, every RPER after
     # it; with RACQ after the last edge to HLVL only (CAN's rule)
@@ -2091,7 +2091,7 @@ def chk_a3(log):
               'from the next bit; SMODE 1 still ends it one bit later', ok2 and ok1, str(res))
 
 
-ALL = [chk_halfcycle_text, chk_rkind3, chk_a3, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
+ALL = [chk_halfcycle_text, chk_rkind3, chk_receive_rules, chk_rows, chk_world, chk_reaction, chk_own_edge, chk_sampling, chk_late_stale, chk_wait_exits, chk_wait_priority, chk_untilm, chk_memory,
        chk_pins, chk_spacing, chk_host, chk_stop_rules, chk_flags, chk_stop_timing, chk_slots, chk_asm]
 
 
