@@ -1,6 +1,7 @@
 # Coverage
 
-Updated 2026-11-27: a note on the SD and CAN benches (section 2.4). Before that, 2026-11-23: RKIND 3's decoder with
+Updated 2026-11-27: a note on the SD and CAN benches (section 2.4), and the earlier list of planted bugs run again
+in full on this RTL (section 2.5). Before that, 2026-11-23: RKIND 3's decoder with
 its structural rule and keep test, and a reception of RKIND 3 that keeps the *p*, RGAIN and RACQ it started with
 (5.9.6); timed samples' RESYNC with RACQ (5.9.6); SMODE 2's end at the violating bit (5.9.7); and 2026-11-21: the
 half cycles (THALF, RKIND 3, REOP's byte end) and the Manchester byte end.
@@ -265,7 +266,9 @@ sets were planted again with the same seeds: integration 31 of 31 (chips 31), ho
 1), the link 6 of 8, the same two missed. Of the earlier list, the control and the 13 bugs that only the
 corners caught before were planted again, the corners first: 12 of the 13 caught by the corners (`stale4`,
 `boundary` 3, `nowstale`, `steplate`, `world`, `stepld`, `ring` 2, `abortpin` 2), the same one missed (S07,
-equivalent within 9.1); its other 67 bugs, which the images caught before, were not run again. The control survives
+equivalent within 9.1). Its other 67 bugs, which the images caught before, ran again on 2026-11-27 on the same RTL:
+all 67 caught, by the same generators as on 2026-11-21 (chips 43, rows 17, `pins` 5, prog 1, wide 1), so the earlier
+list gives 79 of 80 on this RTL too. The control survives
 every generator and seed range the runner uses. RKIND 3's structural rule and keep test, a reception's held *p*,
 RGAIN and RACQ, and the two receive rules for CAN have their own planted bugs, caught by the `rk3`, `fcs`, `can` and
 `half` generators, by `formal/`'s RKIND 3 proofs and by `test/test.py`'s tests at the pins.
