@@ -43,7 +43,7 @@ hdcp,HDCP over HDMI,out,1,Stacked on i2c
 i2c,Inter-Integrated Circuit,out,3,A starting protocol
 i2cdemux,I²C demultiplexer,out,1,Stacked on i2c
 i2cfilter,I²C filter,out,1,Stacked on i2c
-i2s,Integrated Interchip Sound,pool,,"3 lines. 256 kbit/s at 8 kHz, 2 channels, 16 bits"
+i2s,Integrated Interchip Sound,out,5,"Firmware exists, written while testing the shift units: programs/advanced/i2s_ctl.s and i2s_tgt.s"
 ieee488,IEEE-488 GPIB/HPIB/IEC,pool,,"3 lines in IEC serial form, 15 as listen-only or talk-only GPIB. The handshake sets the rate, with no minimum"
 ir_irmp,IR IRMP,out,2,"A front end for a library of many infrared formats, not one protocol"
 ir_nec,IR NEC,out,5,Firmware exists
@@ -99,14 +99,14 @@ rtc8564,Epson RTC-8564 JE/NB,out,1,Stacked on i2c
 sae_j1850_vpw,SAE J1850 VPW.,pool,,1 line. About 10.4 kbit/s
 sbus_futaba,Futaba SBUS (Serial bus),out,1,Stacked on uart
 sda2506,Siemens SDA 2506-5,pool,,3 lines. 133 kHz clock or lower
-sdcard_sd,Secure Digital card (SD mode),pool,,3 to 6 lines as host. 400 kHz clock
+sdcard_sd,Secure Digital card (SD mode),out,5,"Firmware exists, written while testing the shift units: programs/advanced/sd_unit.s"
 sdcard_spi,Secure Digital card (SPI mode),out,1,Stacked on spi
 sdq,Texas Instruments SDQ,out,5,"TI's form has the signalling of 1-Wire, for which firmware exists"
 seven_segment,7-segment display,out,2,A pin pattern with no framing
 signature,Signature analysis,out,2,sigrok tags it Util or Encoding
 sipi,NXP SIPI interface,out,1,Stacked on lfast
 sle44xx,SLE44xx memory card,pool,,3 lines. About 27 kHz clock in sigrok's sample capture
-spdif,Sony/Philips Digital Interface Format,pool,,"1 line. 1.41 Mbit/s at 22.05 kHz, the slowest rate found on real parts"
+spdif,Sony/Philips Digital Interface Format,pool,,"1 line. 1.41 Mbit/s at 22.05 kHz, the slowest rate found on real parts. Only its line code has run: biphase mark with random bits at 6.144 Mbit/s in test_unit_rdiff (test/test.py); none of its framing exists"
 spi,Serial Peripheral Interface,out,3,A starting protocol
 spiflash,SPI flash/EEPROM chips,out,1,Stacked on spi
 ssi32,Synchronous Serial Interface (32bit),out,1,Stacked on spi
@@ -117,7 +117,7 @@ swd,Serial Wire Debug,out,4,Named in the brief
 swim,STM8 SWIM bus,out,5,Firmware exists
 t55xx,RFID T55xx,pool,,2 lines through an RFID front end. About 2 to 8 kbit/s
 tca6408a,Texas Instruments TCA6408A,out,1,Stacked on i2c
-tdm_audio,Time division multiplex audio,pool,,"3 lines. From 64 kbit/s at 8 kHz, one 8-bit slot"
+tdm_audio,Time division multiplex audio,out,5,"Firmware exists, written while testing the shift units: programs/advanced/i2s_ctl.s and i2s_tgt.s run TDM too"
 timing,Timing calculation with frequency and averaging,out,2,sigrok tags it Util or Encoding
 tlc5620,Texas Instruments TLC5620,out,3,SPI plus a load pin
 uart,Universal Asynchronous Receiver/Transmitter,out,3,A starting protocol
@@ -128,5 +128,5 @@ usb_signalling,Universal Serial Bus (LS/FS) signalling,out,4,Named in the brief
 wiegand,Wiegand interface,pool,,2 lines. About 250 bit/s at a 4 ms bit
 x2444m,Xicor X2444M/P,out,1,Stacked on spi
 xfp,10 Gigabit Small Form Factor Pluggable Module (XFP),out,1,Stacked on i2c
-xy2-100,XY2-100(E) and XY-200(E) galvanometer protocol,pool,,5 lines. 2 Mbit/s on each data line
+xy2-100,XY2-100(E) and XY-200(E) galvanometer protocol,out,5,"Firmware exists, written while testing the shift units: programs/advanced/xy2_unit.s"
 z80,Zilog Z80 CPU,out,6,A full bus needs 29 lines

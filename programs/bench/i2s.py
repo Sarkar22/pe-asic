@@ -501,10 +501,10 @@ PAIRS = ((0, 1), (1, 2), (2, 3), (3, 0), (1, 0), (3, 2), (2, 0), (0, 3))
 CTL_RATES = (
     ('I2S, 48 kHz, 2 x 32 bits (64 fs, 3.072 MHz)', I2S, 2, 32, 4, 48000),
     ('I2S, 48 kHz, 2 x 16 bits (32 fs, 1.536 MHz)', I2S, 2, 16, 6, 48000),
-    ('I2S, 8 kHz, 2 x 16 bits (256 kbit/s, the rate the flexibility pool names)', I2S, 2, 16, 2, 8000),
+    ('I2S, 8 kHz, 2 x 16 bits (256 kbit/s)', I2S, 2, 16, 2, 8000),
     ('TDM, 48 kHz, 8 slots x 16 bits (128 fs, 6.144 MHz)', TDM, 8, 16, 2, 48000),
     ('TDM, 48 kHz, 4 slots x 32 bits (128 fs)', TDM, 4, 32, 2, 48000),
-    ('TDM, 8 kHz, one 8-bit slot (64 kbit/s, the rate the flexibility pool names)', TDM, 1, 8, 4, 8000),
+    ('TDM, 8 kHz, one 8-bit slot (64 kbit/s)', TDM, 1, 8, 4, 8000),
 )
 
 
