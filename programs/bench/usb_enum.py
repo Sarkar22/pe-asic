@@ -33,21 +33,28 @@ from report import Chip, assemble, src
 
 PROGRAMS = ('advanced/usb_enum.s',)
 PROG = 'advanced/usb_enum.s'
-WORDS = 504                     # section 11.2's count for the program
+WORDS = 493                     # section 11.2's count for the program
 BIT = 1e9 / 1.5e6               # ns, USB 2.0 7.1.11
 CYCLE = 20.0                    # ns at 50 MHz
 DP, DM = 0, 1                   # io0, io1
-MEM = dict(STAGE=0, ADDRV=13, NSETUP=14, NREQ=15, RSTN=11)
-CODE_FROM = 23                  # the descriptor and the code: never written by the program
+MEM = dict(STAGE=0, ADDRV=13, NSETUP=14, NREQ=15, RSTN=11, CFGV=3)
+CODE_FROM = 25                  # the descriptor and the code: never written by the program
 DESC = bytes([18, 1, 0x10, 0x01, 0, 0, 0, 8, 0x09, 0x12, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 1])
-DESC_AT = 23                    # where the image keeps it, two bytes a word
+DESC_AT = 25                    # where the image keeps it, two bytes a word
 J, K, SE0, SE1 = 'J', 'K', 'SE0', 'SE1'
 LEVELS = {J: (0, 1), K: (1, 0), SE0: (0, 0), SE1: (1, 1)}       # (D+, D-) at low speed (Table 7-2)
 PIDS = {0b0011: 'DATA0', 0b1011: 'DATA1', 0b0010: 'ACK', 0b1010: 'NAK', 0b1110: 'STALL'}
 GET_DEV = lambda n: [0x80, 6, 0, 1, 0, 0, n & 255, n >> 8]                  # GET_DESCRIPTOR(DEVICE), 9.4.3
 SET_ADDR = lambda a: [0, 5, a, 0, 0, 0, 0, 0]                                 # SET_ADDRESS, 9.4.6
 GET_CONF = lambda n: [0x80, 6, 0, 2, 0, 0, n & 255, n >> 8]                 # GET_DESCRIPTOR(CONFIGURATION), 9.4.3
-SET_CONF = lambda v: [0, 9, v, 0, 0, 0, 0, 0]                                 # SET_CONFIGURATION, 9.4.7
+SET_CONF = lambda v: [0, 9, v & 255, v >> 8, 0, 0, 0, 0]                      # SET_CONFIGURATION, 9.4.7
+GET_CFG = [0x80, 8, 0, 0, 0, 0, 1, 0]                                           # GET_CONFIGURATION, 9.4.2
+GET_STATUS = lambda bm, i: [bm, 0, 0, 0, i, 0, 2, 0]                            # GET_STATUS, 9.4.5: 0x80 the
+                                                                                # device, 0x81 an interface, 0x82
+                                                                                # an endpoint
+GET_IF = lambda i: [0x81, 10, 0, 0, i, 0, 1, 0]                                 # GET_INTERFACE, 9.4.4
+SET_IF = lambda i, alt: [1, 11, alt, 0, i, 0, 0, 0]                             # SET_INTERFACE, 9.4.10
+FEATURE = lambda op, bm, f, i: [bm, op, f, 0, i, 0, 0, 0]                       # CLEAR_FEATURE (1), SET_FEATURE (3)
 # the configuration descriptor (9.6.3, Table 9-10: wTotalLength 18, one interface, value 1, bus powered, 100 mA) and its
 # interface descriptor (9.6.5, Table 9-12: interface 0, no endpoints but endpoint 0, vendor-specific class), field by
 # field from the tables
@@ -500,7 +507,7 @@ def run(script, t_end, phase=0.0, align=0, threads=(0, 1, 2), seed=1, text=None,
     res.value = out.get('value')
     res.finished = gen is None
     res.desc = desc if desc is not None else DESC
-    res.rep = usb_check.check(res.rec, descriptor=res.desc) if check else None
+    res.rep = usb_check.check(res.rec, descriptor=res.desc, config=CONF) if check else None
     res.health = health(chip, img, threads)
     res.count = {k: chip.mem[a] for k, a in MEM.items()}
     return res
@@ -611,7 +618,7 @@ def faults(h):
     r['string'] = yield from h.setup(0, [0x80, 6, 0, 3, 0, 0, 9, 0])  # GET_DESCRIPTOR(STRING 0): unsupported, no strings
     r['string_in'] = (yield from h.in_(0))[0]
     r['string_out'] = yield from h.out(0, [], 'DATA1')
-    r['setconf'] = yield from h.setup(0, [0, 9, 1, 0, 0, 0, 0, 0])   # SET_CONFIGURATION: unsupported
+    r['setconf'] = yield from h.setup(0, SET_CONF(2))   # SET_CONFIGURATION(2): no such configuration (9.4.7)
     r['setconf_in'] = (yield from h.in_(0))[0]
     r['after'] = yield from h.control_read(0, GET_DEV(18))
     yield from h.wait(0.1e6)
@@ -808,8 +815,7 @@ LEN_DATA_WANT = dict(setup=True, **{'in': ('data', 'DATA1', DESC[:8])}, status_l
 def conf(h):
     """GET_DESCRIPTOR(CONFIGURATION) in the Default state with wLength 9, what a host asks first, then 255, which
     gives all of wTotalLength (9.4.3); SET_ADDRESS; the same request at the new address with wLength 18; a
-    SET_CONFIGURATION(1), which this device STALLs as it does every request it doesn't implement (9.2.7); and the
-    device descriptor after it."""
+    SET_CONFIGURATION(1), which a host sends next (9.1.2 step 8); and the device descriptor after it."""
     yield from start(h)
     r = {}
     r['c9'] = yield from h.control_read(0, GET_CONF(9))
@@ -823,7 +829,138 @@ def conf(h):
     return r
 
 
-CONF_WANT = dict(c9=CONF[:9], c255=CONF, set=True, c18=CONF, setconf=False, dev=DESC)
+CONF_WANT = dict(c9=CONF[:9], c255=CONF, set=True, c18=CONF, setconf=True, dev=DESC)
+
+
+def configure(h, addr=4):
+    """An enumeration to the Configured state as a host does it (9.1.2): GET_DESCRIPTOR(DEVICE, 64) at address 0,
+    SET_ADDRESS, the 2 ms recovery (9.2.6.3), the device descriptor, the configuration descriptor with wLength 9 and
+    then wTotalLength, GET_CONFIGURATION (0: the Address state, 9.4.2), SET_CONFIGURATION(1), GET_CONFIGURATION (1);
+    then SET_CONFIGURATION(0), back to the Address state (9.4.7), GET_CONFIGURATION (0), and values no
+    configuration has, 2 and 255, each a request error (9.2.7), with GET_CONFIGURATION after them (0), and
+    SET_CONFIGURATION(1) again."""
+    yield from start(h)
+    r = {}
+    r['d1'] = yield from h.control_read(0, GET_DEV(64))
+    r['set'] = yield from h.control_nodata(0, SET_ADDR(addr))
+    yield from h.wait(2.2e6)
+    r['d2'] = yield from h.control_read(addr, GET_DEV(18))
+    r['c9'] = yield from h.control_read(addr, GET_CONF(9))
+    r['c18'] = yield from h.control_read(addr, GET_CONF(18))
+    r['cfg0'] = yield from h.control_read(addr, GET_CFG)
+    r['setconf'] = yield from h.control_nodata(addr, SET_CONF(1))
+    r['cfg1'] = yield from h.control_read(addr, GET_CFG)
+    r['unconf'] = yield from h.control_nodata(addr, SET_CONF(0))
+    r['cfg2'] = yield from h.control_read(addr, GET_CFG)
+    r['bad2'] = yield from h.control_nodata(addr, SET_CONF(2))
+    r['bad255'] = yield from h.control_nodata(addr, SET_CONF(255))
+    r['cfg3'] = yield from h.control_read(addr, GET_CFG)
+    r['again'] = yield from h.control_nodata(addr, SET_CONF(1))
+    r['cfg4'] = yield from h.control_read(addr, GET_CFG)
+    yield from h.wait(0.1e6)
+    return r
+
+
+CONFIGURE_WANT = dict(d1=DESC, set=True, d2=DESC, c9=CONF[:9], c18=CONF, cfg0=b'\x00', setconf=True, cfg1=b'\x01',
+                      unconf=True, cfg2=b'\x00', bad2=False, bad255=False, cfg3=b'\x00', again=True, cfg4=b'\x01')
+CONFIGURE_COUNT = dict(NSETUP=15, NREQ=13)     # the counters after it: 15 SETUPs ACKed, 13 transfers completed
+
+
+def good_configure(r):
+    return not {k for k in CONFIGURE_WANT if (r.value or {}).get(k) != CONFIGURE_WANT[k]} and \
+        all(r.count[k] == n for k, n in CONFIGURE_COUNT.items())
+
+# requests to the device, endpoint 0 and the interface, with what this device answers in the Address and the
+# Configured state (9.4): bytes for a request to the host, True for one with no data stage that completes, None or
+# False for a STALL (a request error, 9.2.7)
+REQUESTS = (
+    ('cfg', GET_CFG, b'\x00', b'\x01'),
+    ('st_dev', GET_STATUS(0x80, 0), b'\x00\x00', b'\x00\x00'),        # bus powered, no remote wakeup (Figure 9-4)
+    ('st_ep0out', GET_STATUS(0x82, 0x00), b'\x00\x00', b'\x00\x00'),  # endpoint 0, not halted (Figure 9-6)
+    ('st_ep0in', GET_STATUS(0x82, 0x80), b'\x00\x00', b'\x00\x00'),
+    ('st_ep1', GET_STATUS(0x82, 0x01), None, None),                     # no such endpoint
+    ('st_ep81', GET_STATUS(0x82, 0x81), None, None),
+    ('st_ep0x10', GET_STATUS(0x82, 0x10), None, None),                  # a reserved bit of the endpoint field
+    ('st_if0', GET_STATUS(0x81, 0), None, b'\x00\x00'),                # interface 0: when configured (Figure 9-5)
+    ('st_if1', GET_STATUS(0x81, 1), None, None),
+    ('if0', GET_IF(0), None, b'\x00'),                                  # its alternate setting, 0 (9.4.4)
+    ('if1', GET_IF(1), None, None),
+    ('setif', SET_IF(0, 0), False, False),                              # the default setting alone: STALL (9.4.10)
+    ('setif1', SET_IF(0, 1), False, False),
+    ('wake', FEATURE(3, 0, 1, 0), False, False),                        # remote wakeup: not offered (Table 9-6)
+    ('unwake', FEATURE(1, 0, 1, 0), False, False),
+    ('halt0', FEATURE(3, 2, 0, 0x80), False, False),                    # endpoint 0's halt: not kept (9.4.5)
+    ('iffeat', FEATURE(3, 1, 0, 0), False, False),                      # no interface feature
+    ('c512', GET_CONF(0x200), CONF, CONF),                              # wLength 512: wTotalLength's 18 bytes
+    ('string', [0x80, 6, 0, 3, 0, 0, 255, 0], None, None),              # no strings (9.6.7)
+    ('conf1', [0x80, 6, 1, 2, 0, 0, 9, 0], None, None),                 # configuration index 1: none
+    ('qual', [0x80, 6, 0, 6, 0, 0, 10, 0], None, None),                 # DEVICE_QUALIFIER: bcdUSB 1.10 (9.2.6.6)
+    ('set3', SET_CONF(3), False, False))
+
+
+def requests(h, addr=7):
+    """Every request of REQUESTS in the Address state, then SET_CONFIGURATION(1) and every one again in the
+    Configured state, then SET_CONFIGURATION(1) once more (the Configured state takes it again, 9.4.7)."""
+    yield from start(h)
+    r = {}
+    r['set'] = yield from h.control_nodata(0, SET_ADDR(addr))
+    yield from h.wait(2.2e6)
+    for tag, phase in (('a_', 2), ('c_', 3)):
+        if tag == 'c_':
+            r['setconf'] = yield from h.control_nodata(addr, SET_CONF(1))
+        for name, req, *_ in REQUESTS:
+            if req[0] & 0x80:
+                r[tag + name] = yield from h.control_read(addr, req)
+            else:
+                r[tag + name] = yield from h.control_nodata(addr, req)
+    r['again'] = yield from h.control_nodata(addr, SET_CONF(1))
+    r['cfg'] = yield from h.control_read(addr, GET_CFG)
+    yield from h.wait(0.1e6)
+    return r
+
+
+REQUESTS_WANT = dict([('a_' + n, a) for n, _, a, _ in REQUESTS] + [('c_' + n, c) for n, _, _, c in REQUESTS] +
+                     [('set', True), ('setconf', True), ('again', True), ('cfg', b'\x01')])
+
+
+def states(h):
+    """The Default state: SET_CONFIGURATION(1) at address 0, which 9.4.7 leaves open (this device takes it), then
+    SET_ADDRESS, after which the device is in the Address state, not configured (9.4.6): GET_CONFIGURATION 0. Then
+    configured, a reset (7.1.7.5) returns it to the Default state, where this device answers GET_CONFIGURATION with 0
+    (9.4.2 leaves it open), and after SET_ADDRESS again GET_CONFIGURATION is 0 (9.4.2 asks it). A
+    SET_CONFIGURATION(1) whose status packet the host ACKs only the second time is taken once (8.5.3.1); one that a
+    new SETUP interrupts before its status stage (8.5.3) has taken effect all the same (9.2.6: the request is done
+    before its status stage), which 9.4 doesn't judge. After SET_CONFIGURATION(0) the device is in the Address
+    state again, where GET_STATUS(interface) and GET_INTERFACE are Request Errors (9.4.4, 9.4.5)."""
+    yield from start(h)
+    r = {}
+    r['d_setconf'] = yield from h.control_nodata(0, SET_CONF(1))
+    r['set'] = yield from h.control_nodata(0, SET_ADDR(8))
+    yield from h.wait(2.2e6)
+    r['cfg_a'] = yield from h.control_read(8, GET_CFG)
+    r['setconf'] = yield from h.control_nodata(8, SET_CONF(1), lose_status=1)
+    r['cfg_c'] = yield from h.control_read(8, GET_CFG)
+    yield from h.reset()
+    yield from h.wait(1.0e6)
+    r['d_cfg0'] = yield from h.control_read(0, GET_CFG)                 # the Default state: 9.4.2 leaves it open
+    r['set2'] = yield from h.control_nodata(0, SET_ADDR(9))
+    yield from h.wait(2.2e6)
+    r['cfg_r'] = yield from h.control_read(9, GET_CFG)
+    r['cut'] = yield from h.setup(9, SET_CONF(1))                       # no status stage: a new SETUP follows
+    r['cfg_cut'] = yield from h.control_read(9, GET_CFG)
+    r['unconf'] = yield from h.control_nodata(9, SET_CONF(0))
+    r['if_unconf'] = yield from h.control_read(9, GET_STATUS(0x81, 0))  # the Address state again: a Request Error
+    r['getif_unconf'] = yield from h.control_read(9, GET_IF(0))          # for both (9.4.4, 9.4.5)
+    yield from h.reset()
+    yield from h.wait(1.0e6)
+    r['d_cfg'] = yield from h.control_read(0, GET_CFG)                  # the Default state: 9.4.2 leaves it open
+    yield from h.wait(0.1e6)
+    return r
+
+
+STATES_WANT = dict(d_setconf=True, set=True, cfg_a=b'\x00', setconf=True, cfg_c=b'\x01', d_cfg0=b'\x00', set2=True,
+                   cfg_r=b'\x00', cut=True, cfg_cut=b'\x01', unconf=True, if_unconf=None, getif_unconf=None,
+                   d_cfg=b'\x00')
 
 
 def endpoints(h):
@@ -968,7 +1105,8 @@ def critical_path(text=None, host_kw=None):
     img = assemble(text if text is not None else src(PROG), depth=512)
     L = img.labels
     ref = L['rend']
-    ticks = {L['shs'] + 4: 'handshake', L['szlp'] + 6: 'zero-length', L['sdata'] + 7: 'data'}
+    kinds = {L['shs']: 'handshake', L['szlp']: 'zero-length', L['sdata']: 'data'}   # the senders' entries, which
+    tick = L['stick']                                                               # share the tick that starts
     loads = {L['vin']: 'IN', L['vtok']: 'SETUP/OUT'}
 
     class Logged(Chip):
@@ -976,7 +1114,7 @@ def critical_path(text=None, host_kw=None):
             Chip.__init__(self, *a, **k)
             self.log = []
     r = run(quick, 12e6, chip_cls=Logged, check=False, host_kw=host_kw)
-    worst, lead, at, st = {}, {}, None, None
+    worst, lead, at, st, kind = {}, {}, None, None, None
     for c, tid, pc, word in r.chip.log:
         if tid == 1 and pc == L['vst']:
             st = c
@@ -985,10 +1123,11 @@ def critical_path(text=None, host_kw=None):
         if pc in loads and st is not None:
             lead[loads[pc]] = min(lead.get(loads[pc], 1 << 30), c - st)
         if pc == ref:
-            at = c
-        elif pc in ticks and at is not None:
-            k = ticks[pc]
-            worst[k] = max(worst.get(k, 0), c - at)
+            at, kind = c, None
+        elif pc in kinds and at is not None and kind is None:
+            kind = kinds[pc]                    # the first entry: the zero-length packet goes on through shs
+        elif pc == tick and at is not None and kind is not None:
+            worst[kind] = max(worst.get(kind, 0), c - at)
             at = None
     return worst, lead
 
@@ -999,8 +1138,8 @@ def critical_path(text=None, host_kw=None):
 TEETH = [
     ('the toggle not flipped on the host\'s ACK', 'li    R4, WDATA0 ^ WDATA1', 'li    R4, 0'),
     ('the new address taken at the SETUP, before the status stage',
-     'ldi   R7, PADDR\n        st    R1, R7         ; taken when the host ACKs the status packet',
-     'ldi   R7, ADDRV\n        st    R1, R7\n        cp    R6, R1\n        swap  R6'),     # 2 words free: no ori
+     'ldi   R7, PADDR      ; the address, taken when the host ACKs the status packet\nsset:',
+     'cp    R6, R1\n        swap  R6\n        ori   R6, 0x69\n        ldi   R7, ADDRV\nsset:'),
     ('the answer 7 bit times after the EOP (NRSP 260)', '.equ NRSP 176', '.equ NRSP 260'),
     ('the host\'s data ACKed without its CRC-16 check', 'srd   R4, end\n        cmpi  R4, 1',
      'ldi   R4, 1\n        cmpi  R4, 1'),
@@ -1011,19 +1150,42 @@ TEETH = [
     ('an EOP of 50 cycles, 1.0 us', 'ldi   R0, 67\n        scfg  R0, TXTAIL', 'ldi   R0, 50\n        scfg  R0, TXTAIL'),
     ('J released 3 cycles after the EOP (NREL 0)', '.equ NREL 31', '.equ NREL 0'),
     ('resets not counted', 'st    R0, R4         ; a reset: S acts on it before the next packet', 'idle'),
-    ('min(wLength, 18) not applied', 'ldi   R0, 18         ; min(wLength, 18) bytes (9.4.3)', 'idle'),
-    ('the status packet sent as DATA0', 'li    R0, WDATA1     ; status packets are DATA1 (8.5.3)', 'li    R0, WDATA0'),
+    ('min(wLength, the answer\'s length) not applied', 'lt    R0, R4\n        jt    sg1', 'sett\n        jt    sg1'),
+    ('the status packet sent as DATA0', 'lui   R0, WDATA1 >> 8    ; status packets are DATA1 (8.5.3)',
+     'lui   R0, WDATA0 >> 8'),
     ('no stuffing on send (SMODE 0)', '.equ CODTX 0xE6EF', '.equ CODTX 0xE2EF'),
     ('IN: endpoint bit 3 unchecked', 'tsti  R0, 7          ; endpoint bits 3:1 clear',
      'tsti  R0, 3          ; endpoint bits 3:1 clear'),
-    ('SETUP and OUT: endpoint bit 3 unchecked', 'tsti  R0, 7\n        jt    tvno', 'tsti  R0, 3\n        jt    tvno'),
+    ('SETUP and OUT: endpoint bit 3 unchecked', 'tsti  R0, 7\n        jt    tbad', 'tsti  R0, 3\n        jt    tbad'),
     ('A: a token of any length taken (the bit count unchecked)', 'cmpi  R2, 8          ; 24 bits',
      'sett                 ; 24 bits'),
-    ('GET_DESCRIPTOR(CONFIGURATION) answered with the device descriptor', 'ldi   R1, CONF', 'ldi   R1, DESC'),
+    ('GET_DESCRIPTOR(CONFIGURATION) answered with the device descriptor', 'ldi   R7, CONF', 'ldi   R7, DESC'),
     ('GET_DESCRIPTOR(CONFIGURATION) STALLed', 'cmpi  R2, 2          ; or CONFIGURATION',
      'cmpi  R2, 7          ; or CONFIGURATION'),
     ('S: a data packet taken whatever its length (the whole-byte test never fires)',
      'tsti  R2, 7          ; whole bytes', 'tsti  R2, 0          ; whole bytes'),
+    # the configuration requests (9.4.2, 9.4.4, 9.4.5, 9.4.7) and the code reworked to make room for them
+    ('SET_CONFIGURATION takes any value', 'sconf:  tsti  R1, 254', 'sconf:  tsti  R1, 0'),
+    ('SET_CONFIGURATION completes but the value is not kept',
+     'ldi   R7, CFGV       ; taken now: the request is done before its status stage (9.2.6)\n        goto  sset',
+     'ldi   R0, 4\n        goto  snew'),
+    ('GET_CONFIGURATION answers from the zero word', 'ldi   R7, CFGV\n        cmpi  R1, 8',
+     'ldi   R7, ZERO\n        cmpi  R1, 8'),
+    ('the interface answers in the Address state', 'tsti  R7, 1          ; interface 0 exists when configured',
+     'sett                 ; interface 0 exists when configured'),
+    ('GET_STATUS takes endpoint 1 for endpoint 0', 'tsti  R2, 0x7F       ; wIndex low: endpoint 0',
+     'tsti  R2, 0x70       ; wIndex low: endpoint 0'),
+    ('GET_STATUS answers from the configuration word: self powered when configured',
+     'ldi   R4, 2\n        ldi   R7, ZERO', 'ldi   R4, 2\n        ldi   R7, CFGV'),
+    ('SET_ADDRESS leaves the configuration as it was', 'st    R2, R7         ; state the standard leaves it open)',
+     'idle                 ; state the standard leaves it open)'),
+    ('a reset leaves the configuration as it was', 'stp   R0, R2         ; CFGV: not configured', 'idle'),
+    ('wLength\'s high byte ignored', 'tsti  R2, 255        ; wLength 256 or more', 'tsti  R2, 0          ; wLength'),
+    ('a handshake goes on into the data loop (T 0 at the shared tail)', 'sett\nsgo1:', 'clrt\nsgo1:'),
+    ('a stalled transfer\'s OUT ACKed (STAGE 8 missed by the OUTW test)', 'tsti  R2, 12', 'tsti  R2, 4'),
+    ('the status stage of a control read never completed by its OUT (STAGE 2 missed)',
+     'tsti  R2, 3          ; the data stage (1) or the status stage (2)',
+     'tsti  R2, 1          ; the data stage (1) or the status stage (2)'),
 ]
 
 
@@ -1151,8 +1313,47 @@ def main(log):
     v = verdict(r)
     diff = {k: (r.value or {}).get(k) for k in CONF_WANT if (r.value or {}).get(k) != CONF_WANT[k]}
     log.check('GET_DESCRIPTOR(CONFIGURATION): wLength 9 gives the 9-byte configuration descriptor, 255 and 18 give it '
-              'with its interface descriptor, 18 bytes, at address 0 and after SET_ADDRESS; SET_CONFIGURATION is '
-              'STALLed (not implemented); every usb_check check passes', not v and not diff, v or diff or 'as wanted')
+              'with its interface descriptor, 18 bytes, at address 0 and after SET_ADDRESS; SET_CONFIGURATION(1) '
+              'completes; every usb_check check passes', not v and not diff, v or diff or 'as wanted')
+
+    # the requests of 9.4 in the Address and Configured states, judged by usb_check's request check
+    def request_checks(r):
+        c = r.rep.checks().get('request', (0, 0))
+        info = [f.text for f in r.rep.findings if f.check == 'request' and f.ok is None]
+        return c, info
+    r = run(configure, 30e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in CONFIGURE_WANT if (r.value or {}).get(k) != CONFIGURE_WANT[k]}
+    c, info = request_checks(r)
+    log.check('to the Configured state as a host goes there (9.1.2): the device and configuration descriptors, '
+              'GET_CONFIGURATION 0, SET_CONFIGURATION(1), GET_CONFIGURATION 1; SET_CONFIGURATION(0) back to the Address '
+              'state; the values 2 and 255 STALLed; every usb_check check passes, its request check on every '
+              'transfer; the counters show 15 SETUPs and 13 completed transfers', not v and good_configure(r) and
+              c == (15, 0) and not info and r.count['CFGV'] & 255 == 1,
+              v or diff or 'request check %s, %s; counters %s' % (c, info, r.count))
+    r = run(requests, 50e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in REQUESTS_WANT if (r.value or {}).get(k) != REQUESTS_WANT[k]}
+    c, info = request_checks(r)
+    log.check('%d requests in the Address state and again in the Configured state: GET_CONFIGURATION, GET_STATUS of '
+              'the device, endpoint 0 both ways, endpoints 1, 0x81 and a reserved bit, interfaces 0 and 1, '
+              'GET_INTERFACE, SET_INTERFACE, SET_FEATURE and CLEAR_FEATURE, wLength 512, strings, configuration 1, '
+              'the device qualifier, SET_CONFIGURATION(3); every usb_check check passes' % len(REQUESTS),
+              not v and not diff and c == (41, 0) and len(info) == 7,
+              v or diff or 'request check %s; open: %d' % (c, len(info)))
+    log.info('request check on that run: %d judged right, %d left open by 9.4 or not judged: %s' % (
+        c[0], len(info), '; '.join(sorted({x.split(' (')[1].rstrip(')') for x in info}))))
+    r = run(states, 50e6)
+    note(r)
+    v = verdict(r)
+    diff = {k: (r.value or {}).get(k) for k in STATES_WANT if (r.value or {}).get(k) != STATES_WANT[k]}
+    log.check('states (9.1.1): SET_CONFIGURATION(1) at address 0 then SET_ADDRESS leaves the device not configured; '
+              'a reset when configured returns it to the Default state; a lost status ACK; a SET_CONFIGURATION cut '
+              'short by a new SETUP has taken effect (9.2.6); after SET_CONFIGURATION(0) the interface is a Request Error '
+              'again (9.4.4, 9.4.5); every usb_check check passes', not v and not diff,
+              v or diff or 'request check %s' % (request_checks(r)[0],))
 
     # a dribble bit before the host's EOP (7.1.9.1). With REOP the units' end test drops 1 to 6 ones after the last
     # whole byte (section 5.9.7, the byte end), so a dribbled packet reaches the firmware as a clean one
@@ -1283,7 +1484,8 @@ def main(log):
                                                                          same(FAULTS_WANT)),
                ('lost', lost, 20e6, {}, lambda x: (x.value or {}).get('d2') == DESC),
                ('interrupted', interrupted, 30e6, {}, same(INTERRUPTED_WANT)),
-               ('conf', conf, 20e6, {}, same(CONF_WANT)),
+               ('conf', conf, 20e6, {}, same(CONF_WANT)), ('configure', configure, 30e6, {}, good_configure),
+               ('requests', requests, 50e6, {}, same(REQUESTS_WANT)), ('states', states, 50e6, {}, same(STATES_WANT)),
                ('enumerate_', enumerate_, 40e6, {}, good_enum))
     for what, old, new in TEETH:
         text = broken(old, new)

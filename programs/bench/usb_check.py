@@ -21,8 +21,11 @@ The input is the bus at the device's pins, as programs/bench/frontend.UsbLs reco
   t_end    optional end of the record, in ns
 
     import usb_check
-    rep = usb_check.check(rec, descriptor=bytes(18))
+    rep = usb_check.check(rec, descriptor=bytes(18), config=bytes(18))
     rep.ok, rep.failed(), rep.checks(), rep.packets, rep.transfers
+
+descriptor is the device descriptor the device must return; config, its configuration descriptor with the
+interface and endpoint descriptors after it, as GET_DESCRIPTOR(CONFIGURATION) returns them (9.4.3).
 
 Checks:
   bit_rate       device packets at 1.4775 to 1.5225 Mb/s (TLDRATE, 7.1.11, Table 7-10); host packets against
@@ -63,6 +66,27 @@ Checks:
   descriptor     GET_DESCRIPTOR(DEVICE) returns min(wLength, 18) bytes of a device descriptor: bLength 18,
                  bDescriptorType 1, bMaxPacketSize0 8, BCD bcdUSB, bNumConfigurations at least 1, or exactly the
                  descriptor given (9.4.3, 9.6.1, 5.5.3)
+  request        each standard request against 9.4 in the device state of its SETUP (9.1.1: Default at address 0,
+                 Address, Configured): whether it must complete, must be a Request Error (a STALL in its data or
+                 status stage, 9.2.7), or is left open by the standard, and what it returns. GET_DESCRIPTOR(DEVICE)
+                 and SET_ADDRESS(1 to 127) complete in the Default and Address states (9.4.3, 9.4.6);
+                 GET_DESCRIPTOR(CONFIGURATION) returns min(wLength, wTotalLength) bytes of the configuration given
+                 (9.4.3) and an index past bNumConfigurations is a Request Error; SET_CONFIGURATION takes 0 or a
+                 bConfigurationValue and refuses any other value (9.4.7); GET_CONFIGURATION returns 0 in the Address
+                 state and the value when configured (9.4.2); GET_STATUS of the device returns two bytes with the
+                 reserved bits 0, remote wakeup as last set, self powered 0 for a bus-powered configuration; of
+                 endpoint 0 the halt bit as last set; of another endpoint or of an interface, a Request Error in the
+                 Address state, and when configured two bytes for one the configuration has, a Request Error
+                 otherwise (9.4.5, Figures 9-4 to 9-6); GET_INTERFACE and SET_INTERFACE are Request Errors in the
+                 Address state, and when configured return or select an alternate setting the configuration has;
+                 SET_INTERFACE may be STALLed for an interface with the default setting alone (9.4.4, 9.4.10);
+                 CLEAR_FEATURE and SET_FEATURE of remote wakeup are Request Errors when bmAttributes doesn't offer
+                 it, of an interface always (Table 9-6), of endpoint 0's halt either way (9.4.5). The Default
+                 state leaves most of these open, and so do values the requests don't define: those are INFO. A
+                 reset returns the device to the Default state, not configured; SET_ADDRESS from the Default or
+                 Address state leaves it not configured (9.4.6). Needs config= for the rules that depend on the
+                 configuration. This check came later than the rest of the module: it was written from 9.4 after
+                 a first draft of these requests in advanced/usb_enum.s, none of which ran before it
   line_state     no SE1 longer than TLST (210 ns); no contention; SE0 shorter than TLST between J and K is a
                  transition, not an EOP (Table 7-2, 7.1.4.1)
 
@@ -124,7 +148,7 @@ class Finding:
 class Report:
     CHECKS = ('bit_rate', 'jitter', 'sync', 'stuffing', 'pid', 'crc', 'packet_format', 'eop', 'ipd',
               'response_time', 'keepalive', 'reset', 'sequence', 'toggle', 'retry', 'address', 'descriptor',
-              'line_state')
+              'request', 'line_state')
 
     def __init__(self):
         self.findings = []
@@ -399,13 +423,15 @@ def _level_at(changes, t, initial=0):
 # ---------------------------------------------------------------------------------------------------------------
 # the checker
 
-def check(rec, descriptor=None, **opts):
+def check(rec, descriptor=None, config=None, **opts):
     """Checks a record (a dict as described in the module's docstring). descriptor, if given, is the device
-    descriptor the device must return (18 bytes). opts override DEFAULTS."""
+    descriptor the device must return (18 bytes); config, its configuration descriptor with the interface and
+    endpoint descriptors that follow it (9.4.3). opts override DEFAULTS."""
     o = dict(DEFAULTS)
     o.update(opts)
     rep = Report()
     rep.expected = bytes(descriptor) if descriptor is not None else None
+    rep.config = bytes(config) if config is not None else None
     rep.descriptor = None
     states, short = _states(rec['dp'], rec['dm'], o['tlst'])
     pks, kas, rsts, odd = packets(states, o)
@@ -618,6 +644,10 @@ class _Dev:
         self.last_data = None       # (pid name, payload) of the device's last data packet not yet ACKed
         self.xfer = None
         self.new_seen = False
+        self.conf = 0               # the configuration value, 0 not configured; None where 9.4 leaves it open
+        self.alt = {}               # interface -> its alternate setting, when configured
+        self.rwake = False          # remote wakeup enabled (9.4.5, Figure 9-4)
+        self.halt0 = False          # endpoint 0's halt feature
 
 
 def _transactions(pks, o):
@@ -668,6 +698,7 @@ def _protocol(rep, pks, rsts, o):
         taken = {amb[i] for i in range(len(amb)) if mask >> i & 1}
         sub = Report()
         sub.expected = rep.expected
+        sub.config = rep.config
         sub.descriptor = None
         _protocol_run(sub, pks, rsts, o, taken)
         n_bad = sum(1 for f in sub.findings if f.ok is False)
@@ -695,6 +726,8 @@ def _protocol_run(rep, pks, rsts, o, taken):
                 if d.addr != 0:
                     d.reset_old = d.addr
                 d.addr, d.old, d.stage, d.stall, d.pending_addr = 0, None, 'idle', False, None
+                _close(rep, d, o)
+                d.conf, d.alt, d.rwake, d.halt0 = 0, {}, False, False     # 9.1.1.3, 9.1.2 step 4
             ri += 1
         if 'lone' in tr:
             pk = tr['lone']
@@ -702,6 +735,7 @@ def _protocol_run(rep, pks, rsts, o, taken):
                 rep.add(pk.sop, 'sequence', False, 'the device sends %s, which answers no host packet' % pk.name)
             continue
         _transaction(rep, d, tr, o)
+    _close(rep, d, o)
 
 
 def _addressed(d, tok, o):
@@ -770,12 +804,13 @@ def _setup(rep, d, tok, data, reply, o):
                 % data.name)
     if not ok:
         return
+    _close(rep, d, o)                   # an ACKed SETUP ends the transfer before it (8.5.3)
     p = data.payload
     if len(p) != 8:
         rep.add(t, 'sequence', None, 'setup data of %d bytes (9.3: always 8)' % len(p))
         return
     req = dict(bm=p[0], b=p[1], wv=p[2] | p[3] << 8, wi=p[4] | p[5] << 8, wl=p[6] | p[7] << 8, t=t, data=[],
-               first={}, sent=[])
+               first={}, sent=[], state=(d.addr, d.conf))
     d.req = req
     d.stall = False
     d.tx_toggle, d.rx_toggle = 1, 1
@@ -803,12 +838,15 @@ def _out(rep, d, tok, data, reply, o):
             _finish(rep, d, t, o)
         elif reply.name == 'STALL':
             d.stall = True
+            _stalled(d)
         return
     if d.stage == 'data_out':
         if reply is None:
             rep.add(t, 'sequence', False, 'no handshake to OUT data')
             return
         rep.add(t, 'sequence', reply.name in HANDSHAKES, 'OUT data answered %s' % reply.name)
+        if reply.name == 'STALL':
+            _stalled(d)
         if reply.name == 'ACK' and data.name == ('DATA1' if d.rx_toggle else 'DATA0'):
             d.rx_toggle ^= 1
         return
@@ -836,6 +874,7 @@ def _in(rep, d, tok, reply, hs, o):
         rep.add(t, 'sequence', True, 'IN in stage %s answered %s' % (d.stage, reply.name))
         if reply.name == 'STALL':
             d.stall = True
+            _stalled(d)
         return
     if reply.type not in (3, 11):
         rep.add(t, 'sequence', False, 'IN answered %s' % reply.name)
@@ -933,6 +972,236 @@ def _descriptor(rep, req, t, o):
             bad.append('bNumConfigurations 0 (9.4.3: at least one configuration)')
     rep.add(req['t'], 'descriptor', not bad, 'GET_DESCRIPTOR(DEVICE, %d): %s%s' % (
         req['wl'], got.hex(), ': ' + '; '.join(bad) if bad else ' (9.6.1, Table 9-8)'))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# standard requests (9.4) in the device's state (9.1.1)
+
+def _stalled(d):
+    """The device answered the open request's data or status stage with STALL: a Request Error (9.2.7)."""
+    if d.req is not None:
+        d.req['stalled'] = True
+
+
+def parse_config(cfg):
+    """A configuration descriptor and the descriptors after it (9.6.3, 9.6.5, 9.6.6): (bConfigurationValue,
+    bmAttributes, {bInterfaceNumber: {bAlternateSetting}}, {(interface, alternate setting): {bEndpointAddress}})."""
+    ifs, eps, cur = {}, {}, None
+    k = cfg[0]
+    while k + 1 < len(cfg) and cfg[k] >= 2:
+        if cfg[k + 1] == 4 and k + 3 < len(cfg):
+            cur = (cfg[k + 2], cfg[k + 3])
+            ifs.setdefault(cur[0], set()).add(cur[1])
+            eps.setdefault(cur, set())
+        elif cfg[k + 1] == 5 and cur is not None and k + 2 < len(cfg):
+            eps[cur].add(cfg[k + 2])
+        k += cfg[k]
+    return cfg[5], cfg[7], ifs, eps
+
+
+def _close(rep, d, o):
+    """The open request is over: a new SETUP was ACKed, a reset came, or the record ended. Judge it once."""
+    req = d.req
+    if req is None or req.get('closed') or 'state' not in req:
+        return
+    req['closed'] = True
+    _request(rep, d, req, 'done' if 'done' in req else 'stall' if req.get('stalled') else 'open', o)
+
+
+def _state_name(addr, conf):
+    if addr == 0:
+        return 'Default'
+    if conf is None:
+        return None                     # Address or Configured: a request 9.4 leaves open came before
+    return 'Configured' if conf else 'Address'
+
+
+def _request(rep, d, req, outcome, o):
+    """Judges a request against 9.4 for the state at its SETUP, and applies what it does to the configuration.
+    outcome: 'done' (its status stage completed), 'stall' (a STALL in its data or status stage) or 'open'."""
+    addr, conf = req['state']
+    st = _state_name(addr, conf)
+    bm, b, wv, wi, wl = req['bm'], req['b'], req['wv'], req['wi'], req['wl']
+    cfg = parse_config(rep.config) if rep.config else None
+    got = b''.join(req['first'][k] for k in sorted(req['first']))
+    want, data, why = None, None, ''
+    open_text = '9.4 leaves it open'
+
+    def need(kind, text, value=None):
+        return kind, value, text
+
+    if bm == 0x80 and b == 6:
+        kind, index = wv >> 8, wv & 255
+        name = 'GET_DESCRIPTOR(%s, %d)' % ({1: 'DEVICE', 2: 'CONFIGURATION', 3: 'STRING'}.get(kind, kind), index)
+        n_conf = rep.expected[17] if rep.expected is not None and len(rep.expected) >= 18 else None
+        if kind == 1 and index == 0:
+            want, data, why = need('done', '9.4.3: every device has a device descriptor, in every state')
+        elif kind == 2 and n_conf is not None and index >= n_conf:
+            want, data, why = need('stall', '9.4.3: no such descriptor, a Request Error (bNumConfigurations %d)'
+                                   % n_conf)
+        elif kind == 2 and index == 0 and cfg is not None:
+            total = rep.config[2] | rep.config[3] << 8
+            want, data, why = need('done', '9.4.3: the configuration with its interfaces, min(wLength, '
+                                   'wTotalLength %d) bytes' % total, rep.config[:min(wl, total)])
+        else:
+            why = 'not judged here'
+    elif bm == 0x80 and b == 8:
+        name = 'GET_CONFIGURATION'
+        if wv or wi or wl != 1:
+            why = '9.4.2: wValue, wIndex or wLength not as specified'
+        elif st is None or st == 'Default':
+            why = open_text if st else 'the state is not known'
+        else:
+            want, data, why = need('done', '9.4.2: %s state' % st, bytes([conf]))
+    elif b == 0 and bm in (0x80, 0x81, 0x82):
+        who = {0x80: 'device', 0x81: 'interface %d' % (wi & 255), 0x82: 'endpoint 0x%02X' % (wi & 255)}[bm]
+        name = 'GET_STATUS(%s)' % who
+        if wv or wl != 2 or (bm == 0x80 and wi) or wi >> 8:
+            why = '9.4.5: wValue, wIndex or wLength not as specified'
+        elif st == 'Default':
+            why = open_text
+        elif bm == 0x80:
+            bus_only = cfg is not None and not cfg[1] & 0x40
+
+            def data(x, rw=d.rwake, bus_only=bus_only):
+                v = x[0] | x[1] << 8 if len(x) == 2 else None
+                return v is not None and not v & 0xFFFC and (v >> 1 & 1) == rw and not (bus_only and v & 1)
+            want, why = 'done', '9.4.5, Figure 9-4: reserved bits 0, remote wakeup %d%s' % (
+                d.rwake, ', self powered 0: bmAttributes offers bus power only' if bus_only else '')
+        elif bm == 0x82 and not wi & 0x7F:
+            want, data, why = need('done', '9.4.5, Figure 9-6: endpoint 0, halt %d' % d.halt0, bytes([d.halt0, 0]))
+        elif st == 'Address':
+            want, data, why = need('stall', '9.4.5: Address state, a Request Error for an interface or an endpoint '
+                                   'other than endpoint 0')
+        elif st is None or cfg is None:
+            why = 'the state or the configuration is not known'
+        elif bm == 0x81:
+            have = (wi & 255) in cfg[2]
+            want, data, why = need('done' if have else 'stall', '9.4.5, Figure 9-5: %s' % (
+                'two bytes 0' if have else 'no such interface, a Request Error'), b'\x00\x00' if have else None)
+        else:
+            have = any((wi & 255) in e for (i, a), e in cfg[3].items() if d.alt.get(i, 0) == a)
+            want, data, why = need('done' if have else 'stall', '9.4.5: %s' % (
+                'an endpoint of the configuration' if have else 'no such endpoint, a Request Error'))
+    elif bm == 0x81 and b == 10:
+        name = 'GET_INTERFACE(%d)' % (wi & 255)
+        if wv or wl != 1:
+            why = '9.4.4: wValue or wLength not as specified'
+        elif st == 'Default' or st is None:
+            why = open_text if st else 'the state is not known'
+        elif st == 'Address':
+            want, data, why = need('stall', '9.4.4: Address state, a Request Error')
+        elif cfg is None:
+            why = 'the configuration is not known'
+        elif (wi & 255) in cfg[2]:
+            want, data, why = need('done', '9.4.4: the alternate setting', bytes([d.alt.get(wi & 255, 0)]))
+        else:
+            want, data, why = need('stall', '9.4.4: no such interface, a Request Error')
+    elif bm == 0x01 and b == 11:
+        i, alt = wi & 255, wv
+        name = 'SET_INTERFACE(%d, %d)' % (i, alt)
+        if wl:
+            why = '9.4.10: wLength not 0'
+        elif st == 'Default' or st is None:
+            why = open_text if st else 'the state is not known'
+        elif st == 'Address':
+            want, data, why = need('stall', '9.4.10: Address state, a Request Error')
+        elif cfg is None:
+            why = 'the configuration is not known'
+        elif alt not in cfg[2].get(i, ()):
+            want, data, why = need('stall', '9.4.10: no such interface or setting, a Request Error')
+        elif cfg[2][i] == {0}:
+            why = '9.4.10: the default setting alone, which a STALL may refuse'
+            if outcome == 'done':
+                d.alt[i] = alt
+        else:
+            want, data, why = need('done', '9.4.10: an alternate setting of the configuration')
+            if outcome == 'done':
+                d.alt[i] = alt
+    elif bm == 0x00 and b == 9:
+        v = wv & 255
+        name = 'SET_CONFIGURATION(%d)' % v
+        valid = v == 0 or (cfg is not None and v == cfg[0])
+        if wi or wl or wv >> 8:
+            why = '9.4.7: wIndex, wLength or wValue\'s upper byte not 0'
+        elif st == 'Default':
+            why = '9.4.7: Default state, ' + open_text
+        elif v and cfg is None:
+            why = 'the configuration is not known'
+        elif valid:
+            want, data, why = need('done', '9.4.7: %s' % ('0, not configured' if not v else
+                                                          'the configuration\'s bConfigurationValue'))
+        else:
+            want, data, why = need('stall', '9.4.7: no configuration has the value %d, a Request Error' % v)
+        # the value takes effect before the status stage completes (9.2.6), so a transfer cut short leaves either
+        if outcome == 'done' and valid and want == 'done':
+            d.conf, d.alt, d.halt0 = v, {}, False
+        elif outcome != 'stall' and d.conf != (v if valid else -1):
+            d.conf = None
+    elif bm == 0x00 and b == 5:
+        name = 'SET_ADDRESS(%d)' % wv
+        if wi or wl or not 0 < wv <= 127:
+            why = '9.4.6: address 0, above 127, or wIndex or wLength not 0'
+        elif st == 'Configured' or st is None:
+            why = ('9.4.6: Configured state, ' + open_text) if st else 'the state is not known'
+        else:
+            want, data, why = need('done', '9.4.6: %s state' % st)
+        if outcome == 'done' and st in ('Default', 'Address'):
+            d.conf = 0                  # 9.4.6: the device is then in the Address state, not configured
+        elif st == 'Configured':
+            d.conf = None
+    elif b in (1, 3) and bm in (0x00, 0x01, 0x02):
+        op = 'SET_FEATURE' if b == 3 else 'CLEAR_FEATURE'
+        name = '%s(%s, %d)' % (op, {0: 'device', 1: 'interface %d' % (wi & 255), 2: 'endpoint 0x%02X' % (
+            wi & 255)}[bm], wv)
+        if wl:
+            why = '9.4.1, 9.4.9: wLength not 0'
+        elif st == 'Default':
+            why = open_text
+        elif bm == 0x00 and wv == 1 and cfg is not None:
+            has = bool(cfg[1] & 0x20)
+            want, data, why = need('done' if has else 'stall', 'Table 9-6: remote wakeup, %s' % (
+                'which bmAttributes offers' if has else 'which bmAttributes does not offer: a Request Error'))
+            if outcome == 'done' and has:
+                d.rwake = b == 3
+        elif bm == 0x00 and wv == 2:
+            if b == 1:
+                want, data, why = need('stall', '9.4.1: TEST_MODE cannot be cleared, a Request Error')
+            else:
+                why = '9.4.9: TEST_MODE, a high-speed feature'
+        elif bm == 0x00 and wv != 1:
+            want, data, why = need('stall', 'Table 9-6: no such device feature, a Request Error')
+        elif bm == 0x01:
+            want, data, why = need('stall', 'Table 9-6: no interface feature, a Request Error')
+        elif bm == 0x02 and wv == 0 and not wi & 0x7F:
+            why = '9.4.5: the default pipe\'s halt is optional'
+            if outcome == 'done':
+                d.halt0 = b == 3
+        elif bm == 0x02 and wv != 0:
+            want, data, why = need('stall', 'Table 9-6: no such endpoint feature, a Request Error')
+        elif bm == 0x02 and st == 'Address':
+            want, data, why = need('stall', '9.4.1, 9.4.9: Address state, an endpoint other than endpoint 0')
+        else:
+            why = 'the state or the configuration is not known'
+    else:
+        return                          # class, vendor and the other standard requests: not judged here
+    text = '%s in the %s state: %s' % (name, st or 'Address or Configured', {
+        'done': 'completed', 'stall': 'STALLed', 'open': 'neither completed nor STALLed'}[outcome])
+    if outcome == 'done' and req['bm'] & 0x80:
+        text += ', %s' % (got.hex() or 'no data')
+    if want is None:
+        rep.add(req['t'], 'request', None, '%s (%s)' % (text, why))
+        return
+    if outcome == 'open':
+        rep.add(req['t'], 'request', None, '%s; wanted %s (%s): the transfer ended first' % (
+            text, 'completion' if want == 'done' else 'a STALL', why))
+        return
+    ok = outcome == want
+    if ok and want == 'done' and data is not None:
+        ok = data(got) if callable(data) else got == data
+        if not ok:
+            why += '; wanted %s' % (data.hex() if isinstance(data, bytes) else 'other bytes')
+    rep.add(req['t'], 'request', ok, '%s (%s)' % (text, why))
 
 
 # ---------------------------------------------------------------------------------------------------------------

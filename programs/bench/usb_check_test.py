@@ -335,6 +335,123 @@ def run(mod=None, desc=None):
     return usb_check.check(rec, descriptor=good), rec
 
 
+# The standard requests of 9.4 around SetConfiguration, for the request check. A configuration descriptor (9.6.3,
+# Table 9-10: wTotalLength 18, one interface, value 1, bus powered, no remote wakeup, 100 mA) and its interface
+# descriptor (9.6.5, Table 9-12: interface 0, setting 0, no endpoints but endpoint 0, vendor-specific class).
+CONF = bytes([9, 2, 18, 0, 1, 1, 0, 0x80, 50]) + bytes([9, 4, 0, 0, 0, 0xFF, 0, 0, 0])
+
+# one answer changed in each bad record: (mod, request number in req_scenario, the wrong answer)
+REQ_BAD = (('getconf_address', 1, b'\x01'),       # GET_CONFIGURATION in the Address state answers 1, not 0
+           ('status_device', 2, b'\x02\x00'),     # GET_STATUS(device): remote wakeup on, never enabled
+           ('status_power', 2, b'\x01\x00'),      # self powered, from a bus-powered configuration
+           ('status_ep0', 3, b'\x01\x00'),        # endpoint 0 halted, never set
+           ('status_if_address', 4, b'\x00\x00'),   # an interface in the Address state: must be a Request Error
+           ('getif_address', 5, b'\x00'),         # GET_INTERFACE in the Address state: the same
+           ('setconf_bad', 6, b''),               # SET_CONFIGURATION(2) completed: no such configuration
+           ('conf_desc', 7, CONF[:5] + b'\x02' + CONF[6:9]),   # bConfigurationValue 2 in the descriptor
+           ('setconf_stall', 9, 'STALL'),         # SET_CONFIGURATION(1) refused
+           ('getconf_configured', 10, b'\x00'),   # GET_CONFIGURATION when configured answers 0
+           ('status_if_stall', 11, 'STALL'),      # interface 0 exists when configured
+           ('status_ep1', 14, b'\x00\x00'),       # an endpoint the configuration doesn't have
+           ('wakeup', 15, b''),                   # SET_FEATURE(remote wakeup) completed, not offered
+           ('unconfigure', 17, 'STALL'),          # SET_CONFIGURATION(0) refused
+           ('conf_kept', 19, b'\x01'),           # still configured after a SET_ADDRESS from the Default state
+           ('setif_address', 20, b''))            # SET_INTERFACE(0, 0) completed in the Address state
+
+
+def req_scenario(mod=None):
+    """A device at address 5, then configured, answering the requests of 9.4 as a correct device does; mod
+    changes one answer (REQ_BAD). Returns the record."""
+    b = Bus()
+    bad = {n: a for m, n, a in REQ_BAD if m == mod}
+    count = [0]
+
+    def dev(bits):
+        return b.send('dev', bits)
+
+    def host(bits, gap=3.0):
+        return b.send('host', bits, gap=gap)
+
+    def frame_gap():
+        b.idle(0.2e6)
+        b.se0(2 * BIT)                    # keep-alive
+        b.idle(0.2e6)
+
+    def transfer(addr, req, answer):
+        """One control transfer (8.5.3): answer is the device's bytes for a request to the host, b'' for one
+        with no data stage that completes, or 'STALL' (9.2.7: in the next data stage, or in the status stage)."""
+        count[0] += 1
+        answer = bad.get(count[0], answer)
+        host(token('SETUP', addr, 0))
+        host(data('DATA0', req), gap=2.5)
+        dev(handshake('ACK'))
+        frame_gap()
+        host(token('IN', addr, 0))
+        if answer == 'STALL':
+            dev(handshake('STALL'))
+            frame_gap()
+            return
+        if not req[0] & 0x80:
+            dev(data('DATA1', []))        # the status stage of a request with no data stage
+            host(handshake('ACK'))
+            frame_gap()
+            return
+        n = min(req[6] | req[7] << 8, len(answer))
+        sent, tog = 0, 'DATA1'
+        while True:
+            chunk = answer[sent:sent + 8][:n - sent]
+            if sent:
+                host(token('IN', addr, 0))
+            dev(data(tog, chunk))
+            host(handshake('ACK'))
+            frame_gap()
+            sent += len(chunk)
+            tog = 'DATA0' if tog == 'DATA1' else 'DATA1'
+            if len(chunk) < 8 or sent >= n:
+                break
+        host(token('OUT', addr, 0))
+        host(data('DATA1', []), gap=2.5)
+        dev(handshake('ACK'))
+        frame_gap()
+
+    b.idle(100e3)
+    b.se0(10.2e6)                         # reset: the Default state
+    b.idle(0.5e6)
+    transfer(0, [0, 5, 5, 0, 0, 0, 0, 0], b'')                      # SET_ADDRESS(5): the Address state (9.4.6)
+    count[0] = 0
+    b.idle(2.2e6)                         # the SetAddress recovery (9.2.6.3)
+    frame_gap()
+    transfer(5, [0x80, 8, 0, 0, 0, 0, 1, 0], b'\x00')               # 1 GET_CONFIGURATION: 0 (9.4.2)
+    transfer(5, [0x80, 0, 0, 0, 0, 0, 2, 0], b'\x00\x00')           # 2 GET_STATUS(device) (Figure 9-4)
+    transfer(5, [0x82, 0, 0, 0, 0x80, 0, 2, 0], b'\x00\x00')        # 3 GET_STATUS(endpoint 0, IN) (Figure 9-6)
+    transfer(5, [0x81, 0, 0, 0, 0, 0, 2, 0], 'STALL')               # 4 GET_STATUS(interface 0): Address state
+    transfer(5, [0x81, 10, 0, 0, 0, 0, 1, 0], 'STALL')              # 5 GET_INTERFACE(0): Address state
+    transfer(5, [0, 9, 2, 0, 0, 0, 0, 0], 'STALL')                  # 6 SET_CONFIGURATION(2): no such value
+    transfer(5, [0x80, 6, 0, 2, 0, 0, 9, 0], CONF[:9])              # 7 GET_DESCRIPTOR(CONFIGURATION, 9)
+    transfer(5, [0x80, 6, 0, 2, 0, 0, 255, 0], CONF)                # 8 the same, 255: all 18
+    transfer(5, [0, 9, 1, 0, 0, 0, 0, 0], b'')                      # 9 SET_CONFIGURATION(1): configured
+    transfer(5, [0x80, 8, 0, 0, 0, 0, 1, 0], b'\x01')               # 10 GET_CONFIGURATION: 1
+    transfer(5, [0x81, 0, 0, 0, 0, 0, 2, 0], b'\x00\x00')           # 11 GET_STATUS(interface 0) (Figure 9-5)
+    transfer(5, [0x81, 10, 0, 0, 0, 0, 1, 0], b'\x00')              # 12 GET_INTERFACE(0): setting 0
+    transfer(5, [0x81, 0, 0, 0, 1, 0, 2, 0], 'STALL')               # 13 GET_STATUS(interface 1): none
+    transfer(5, [0x82, 0, 0, 0, 0x81, 0, 2, 0], 'STALL')            # 14 GET_STATUS(endpoint 1 IN): none
+    transfer(5, [0, 3, 1, 0, 0, 0, 0, 0], 'STALL')                  # 15 SET_FEATURE(remote wakeup): not offered
+    transfer(5, [1, 11, 0, 0, 0, 0, 0, 0], 'STALL')                 # 16 SET_INTERFACE(0, 0): may be STALLed
+    transfer(5, [0, 9, 0, 0, 0, 0, 0, 0], b'')                      # 17 SET_CONFIGURATION(0): the Address state
+    transfer(5, [0x80, 8, 0, 0, 0, 0, 1, 0], b'\x00')               # 18 GET_CONFIGURATION: 0
+    b.se0(10.2e6)                         # reset
+    b.idle(0.5e6)
+    count[0] = 100
+    transfer(0, [0, 9, 1, 0, 0, 0, 0, 0], b'')                      # the Default state: 9.4.7 leaves it open
+    transfer(0, [0, 5, 6, 0, 0, 0, 0, 0], b'')                      # SET_ADDRESS(6): the Address state
+    b.idle(2.2e6)
+    frame_gap()
+    count[0] = 18
+    transfer(6, [0x80, 8, 0, 0, 0, 0, 1, 0], b'\x00')               # 19 GET_CONFIGURATION: 0, not configured
+    transfer(6, [1, 11, 0, 0, 0, 0, 0, 0], 'STALL')                 # 20 SET_INTERFACE(0, 0): Address state (9.4.10)
+    return b.record()
+
+
 def main(log):
     log.group('bench/usb_check.py', title='USB low-speed checker self-test: synthetic records from USB 2.0')
     rep, rec = run()
@@ -361,6 +478,19 @@ def main(log):
         r, _ = run(mod)
         info = [f.text for f in r.findings if f.check == 'reset' and f.ok is None and 'TDETRST and TDRST' in f.text]
         log.check('an SE0 of 50 us %s; either passes' % what, r.ok, info or r.failed()[:2])
+    # the request check: the requests of 9.4 in the Address and the Configured state, and back
+    r = usb_check.check(req_scenario(), config=CONF)
+    c = r.checks()
+    info = [f.text for f in r.findings if f.check == 'request' and f.ok is None]
+    log.check('requests around SET_CONFIGURATION: every check passes, 21 requests judged right, 2 that 9.4 leaves '
+              'open noted', r.ok and c['request'] == (21, 0) and len(info) == 2 and len(r.transfers) == 23,
+              '%s; %d transfers; open: %s%s' % (c['request'], len(r.transfers), info,
+                                                 '' if r.ok else '; ' + repr(r.failed()[:3])))
+    for mod, n, _ in REQ_BAD:
+        r = usb_check.check(req_scenario(mod), config=CONF)
+        got = r.failing_checks()
+        log.check('bad record "%s" (request %d) fails exactly request' % (mod, n), got == ['request'],
+                  'fails %s: %s' % (got, r.failed()[:2]))
     # the bus model: the pull-up brings D- back in 674 ns at 450 pF; a short D- lag makes TLST-short SE0s
     u = frontend.UsbLs()
     u.device(0.0, 0, 0, 1, 1)

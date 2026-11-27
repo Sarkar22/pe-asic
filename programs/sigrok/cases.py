@@ -2132,6 +2132,12 @@ def ue_read(addr, req, desc, lose=(), cut=None):
     return out + ['OUT ADDR %d EP 0' % addr, 'DATA1 [ ]', 'ACK']
 
 
+def ue_stall(addr, req):
+    """A request the device refuses (USB 2.0 9.2.7): SETUP, DATA0, ACK, and a STALL for the IN of its data stage,
+    or of its status stage when it has none."""
+    return ue_setup(addr, req) + ['ACK', 'IN ADDR %d EP 0' % addr, 'STALL']
+
+
 def ue_nodata(addr, req, lose=0):
     """A request with no data stage: SETUP, DATA0, ACK; the status IN, a zero-length DATA1 (sent again after each
     lost ACK) and the host's ACK."""
@@ -2222,7 +2228,7 @@ def g_usb_enum(runner, log):
                                         'DATA1 [ ]', 'ACK'] +
             ue_setup(0, [0x80, 6, 0, 3, 0, 0, 9, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL', 'OUT ADDR 0 EP 0', 'DATA1 [ ]',
                                                          'STALL'] +
-            ue_setup(0, [0, 9, 1, 0, 0, 0, 0, 0]) + ['ACK', 'IN ADDR 0 EP 0', 'STALL'] + ue_read(0, req, D))
+            ue_setup(0, U.SET_CONF(2)) + ['ACK', 'IN ADDR 0 EP 0', 'STALL'] + ue_read(0, req, D))
     ctx = b.run('usb_enum_faults', usb_enum_run, U.faults, 30e6)
     b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, lambda got, errs: (
         got == want and len(errs) == 4 and errs[0].startswith('crc16-err') and
@@ -2236,12 +2242,38 @@ def g_usb_enum(runner, log):
     b.close()
     # the configuration descriptor (USB 2.0 9.4.3, 9.6.3, 9.6.5), the bytes the bench takes from the tables
     b = Batch(runner, 'GET_DESCRIPTOR(CONFIGURATION) with wLength 9, 255 and 18, around a SET_ADDRESS; '
-              'SET_CONFIGURATION STALLed', 'packets')
+              'SET_CONFIGURATION(1)', 'packets')
     want = (ue_read(0, U.GET_CONF(9), U.CONF[:9]) + ue_read(0, U.GET_CONF(255), U.CONF) + ue_nodata(0, U.SET_ADDR(3)) +
-            ue_read(3, U.GET_CONF(18), U.CONF) + ue_setup(3, U.SET_CONF(1)) + ['ACK', 'IN ADDR 3 EP 0', 'STALL'] +
-            ue_read(3, req, D))
+            ue_read(3, U.GET_CONF(18), U.CONF) + ue_nodata(3, U.SET_CONF(1)) + ue_read(3, req, D))
     ctx = b.run('usb_enum_conf', usb_enum_run, U.conf, 20e6)
     b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    b.close()
+    # the requests of USB 2.0 9.4 to the Configured state and back (bench/usb_enum.py's configure and requests): a
+    # request error is a STALL in the next data stage or in the status stage (9.2.7)
+    b = Batch(runner, 'to the Configured state and back: GET_CONFIGURATION, SET_CONFIGURATION(1), (0), (2) and (255); '
+              '22 requests in the Address and the Configured state', 'packets')
+    want = (ue_read(0, U.GET_DEV(64), D) + ue_nodata(0, U.SET_ADDR(4)) + ue_read(4, U.GET_DEV(18), D) +
+            ue_read(4, U.GET_CONF(9), U.CONF[:9]) + ue_read(4, U.GET_CONF(18), U.CONF) + ue_read(4, U.GET_CFG, b'\x00') +
+            ue_nodata(4, U.SET_CONF(1)) + ue_read(4, U.GET_CFG, b'\x01') + ue_nodata(4, U.SET_CONF(0)) +
+            ue_read(4, U.GET_CFG, b'\x00') + ue_stall(4, U.SET_CONF(2)) + ue_stall(4, U.SET_CONF(255)) +
+            ue_read(4, U.GET_CFG, b'\x00') + ue_nodata(4, U.SET_CONF(1)) + ue_read(4, U.GET_CFG, b'\x01'))
+    ctx = b.run('usb_enum_configure', usb_enum_run, U.configure, 30e6)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    if U.verdict(ctx.value) or not U.good_configure(ctx.value):
+        b.fail(ctx.name, 'bench: %s %s' % (U.verdict(ctx.value), ctx.value.value))
+    want = ue_nodata(0, U.SET_ADDR(7))
+    for k in (2, 3):
+        if k == 3:
+            want = want + ue_nodata(7, U.SET_CONF(1))
+        for name, rq, *ans in U.REQUESTS:
+            a = ans[k - 2]
+            want = want + (ue_stall(7, rq) if a in (None, False) else ue_nodata(7, rq) if a is True else
+                           ue_read(7, rq, a))
+    want = want + ue_nodata(7, U.SET_CONF(1)) + ue_read(7, U.GET_CFG, b'\x01')
+    ctx = b.run('usb_enum_requests', usb_enum_run, U.requests, 50e6, threads=(1, 0, 3), align=1, phase=5.0)
+    b.sigrok(ctx, usb_stack('uio0', 'uio1'), usb_packets, want, bench=bench_usb_enum(ctx.value))
+    if U.verdict(ctx.value) or (ctx.value.value or {}) != U.REQUESTS_WANT:
+        b.fail(ctx.name, 'bench: %s %s' % (U.verdict(ctx.value), ctx.value.value))
     b.close()
     # bit-stuff errors from the host (USB 2.0 7.1.9): usb_signalling reports each one and drops the packet, and the
     # device must not answer it

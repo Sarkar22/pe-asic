@@ -2075,6 +2075,88 @@ async def test_eth_excess_mirror(dut):
     assert (keep, bad) == (2, 2), f"counters: {keep} kept, {bad} dropped; want 2 and 2"
 
 
+# ---- half-duplex 10BASE-T: programs/advanced/eth_hd.s ---------------------------------------------------------------
+
+async def eth_hd_collide(partner, fe, G, plan, rx, rng):
+    """Starts a collided attempt of the partner's (56 preamble bits, the SFD, a 32-bit jam: 802.3 4.2.8) plan[k] bit
+    times into the chip's k-th transmission, as programs/bench/eth_hd.py's Partner does: a transmission is DE high for
+    8 cycles, longer than a link test pulse, and it starts on the pair when DE has risen and the transceiver's enable
+    delay has passed. The bursts' lines are added to rx."""
+    t_en = max(fe.p['t_zh'], fe.p['t_zl'])
+    k, idx, rise, de = 0, 0, None, 0
+    while True:
+        await FallingEdge(partner.dut.tick)
+        while idx < len(partner.rec):
+            h, pads = partner.rec[idx]
+            idx += 1
+            if pads >> 5 & 1 and not de:
+                rise = h                    # DE rose
+            elif not pads >> 5 & 1:
+                rise = None
+            de = pads >> 5 & 1
+        if rise is not None and 2 * partner.c - rise >= 16:
+            t_tx = rise * 10.0 + t_en
+            rise = None
+            if k < len(plan) and plan[k] is not None:
+                bits = G.preamble(56) + [rng.getrandbits(1) for _ in range(32)]
+                line, _ = G.manchester(bits, t_tx + plan[k] * 100.0)
+                rx.extend(line)
+                partner.drive(fe.ro(line))
+            k += 1
+
+
+@cocotb.test()
+async def test_eth_collision(dut):
+    """CSMA/CD (802.3 clause 4) end to end, through programs/advanced/eth_hd.s on threads 0 and 1: a partner sends an
+    ARP request, then collides with the chip's reply three times, 540 bit times in (late: the FCS on its way), 100 in
+    and 30 in (the preamble), and lets the fourth attempt through. programs/bench/eth_hd_check.py judges the
+    transmit pair against the receive pair: each attempt jammed (the header always, then 32 bits or more after the
+    collision, ending at most 62 bit times after it, or 34 after the SFD for a collision in the header, with no valid
+    FCS), each backoff r slot times with r from 0 to 2^n - 1, the gap before each attempt, the same frame each time,
+    then the reply whole and right. The counters read with RDMEM: one request kept, the three fragments dropped as
+    runts, three collisions, one of them late, none dropped."""
+    _, G, frontend = eth_modules()
+    import eth_hd_check
+    host = await start(dut)
+    host.other = 0x10                       # RO idles high: a silent pair reads 1 (FN6307's fail-safe receiver)
+    host.drive(1, 0, 0)
+    with open(os.path.join(PROGRAMS_DIR, 'advanced', 'eth_hd.s')) as fh:
+        img = assemble(fh.read())
+    await load_image(host, img)
+    await host.setpc(0, img.labels['rx'])
+    await host.setpc(1, img.labels['tx'])
+    partner = EthPartner(dut, host, 9.3)
+    cocotb.start_soon(partner.run())
+    await host.run(0, 3)
+    for k in range(0, 10, 2):
+        octs = G.MAC + G.IP
+        await post_wait(host, 4, octs[k] | octs[k + 1] << 8)
+    fe = frontend.Rs485Eth('typ')
+    t = (partner.c + 200) * 20.0
+    req = G.frame(b'\xff' * 6, G.PEER_MAC, 0x0806, G.arp(1, G.PEER_MAC, G.PEER_IP, bytes(6), G.IP))
+    rx, end = G.manchester(G.preamble() + req, t)
+    partner.drive(fe.ro(rx))
+    cocotb.start_soon(eth_hd_collide(partner, fe, G, [540, 100, 30], rx, random.Random(57)))
+    await partner.until(int((end + 1.4e6) / 20))
+
+    def changes(bit):
+        out = [(h * 10.0, (v >> bit) & 1) for h, v in partner.rec]
+        return [x for k, x in enumerate(out) if k == 0 or x[1] != out[k - 1][1]]
+    tx = fe.tx_line(changes(4), changes(5), di0=0, de0=0)
+    rep = eth_hd_check.check(tx, G.merge(rx), mac=G.MAC, ip=G.IP, t_start=0.0, t_end=partner.c * 20.0)
+    assert rep.ok, f"eth_hd_check: {rep.failed()[:4]}"
+    att = rep.attempts
+    assert [a.jammed for a in att] == [True, True, True, False], f"attempts {[(a.jammed, a.t_occ) for a in att]}"
+    assert [a.late for a in att[:3]] == [True, False, False], "the first collision is late, the others not"
+    assert rep.checks()['arp_reply'] == (1, 0) and len(rep.backoffs) == 3, f"checks {rep.checks()}"
+    keep, bad = await host.rdmem(7, 2)
+    ncoll, nlate, nxs = await host.rdmem(17, 3)
+    assert (keep, bad, ncoll, nlate, nxs) == (1, 3, 3, 1, 0), \
+        f"counters: {keep} kept, {bad} dropped, {ncoll} collisions, {nlate} late, {nxs} dropped after 16"
+    dut._log.info(f"eth_hd: {partner.c} cycles; jams end {[round((a.end - a.t_occ) / 100, 1) for a in att[:3]]} BT "
+                  f"after their collisions; r {[r for _, r, _ in rep.backoffs]}")
+
+
 # ---- RDIFF with RKIND 3: biphase mark and differential Manchester --------------------------------------------------
 
 # Thread 0's unit receives on ui5 with RKIND 3 and RDIFF. Mailbox 0 to 3: RXMODE, RXPER, RXOPT and the receptions to
@@ -2547,14 +2629,17 @@ async def test_usb_enumerate(dut):
     reset watcher): the host loads the program and starts the three; a USB host model at the pins (the bus and the
     host of programs/bench/frontend.py and usb_enum.py, packets built from USB 2.0 8.3 and 8.4 by
     programs/bench/usb_check_test.py) reads the 18-byte device descriptor at address 0 in packets of 8, sets address
-    12, reads the descriptor there again with one of its ACKs lost, gets a NAK for an IN with nothing due, drives a
-    50 us SE0 (longer than TDETRST, 2.5 us, so the device may take it as a reset: 7.1.7.5), then reads 8 bytes at
-    address 0 and finds address 12 silent. Every packet the host sends carries dribble bits before its EOP, 1 to 6
-    bit times in turn (7.1.9.1), which the units' byte end drops in hardware (5.9.7). The record of D+ and D- must
-    pass every check of programs/bench/usb_check.py, told to take that SE0 as a reset (a 10 ms one would be 500,000
-    cycles): bit rate, jitter, SYNC, stuffing, PIDs, CRC5 and CRC16, EOP and the J after it, inter-packet delay and
-    response time, the control transfers with toggles, the retry and the address change, the descriptor. The
-    counters read with RDMEM must show address 0, 4 SETUPs ACKed and 4 transfers completed."""
+    12, reads the descriptor there again with one of its ACKs lost, gets a NAK for an IN with nothing due, reads the
+    9-byte configuration descriptor, GET_CONFIGURATION (0), sets configuration 1 (USB 2.0 9.4.7), reads
+    GET_CONFIGURATION (1) and GET_STATUS of interface 0, which exists once configured (9.4.5), and has
+    SET_CONFIGURATION(2) STALLed (9.2.7). It then drives a 50 us SE0 (longer than TDETRST, 2.5 us, so the device may
+    take it as a reset: 7.1.7.5), reads 8 bytes at address 0 and finds address 12 silent. Every packet the host
+    sends carries dribble bits before its EOP, 1 to 6 bit times in turn (7.1.9.1), which the units' byte end drops in
+    hardware (5.9.7). The record of D+ and D- must pass every check of programs/bench/usb_check.py, told to take that
+    SE0 as a reset (a 10 ms one would be 500,000 cycles): bit rate, jitter, SYNC, stuffing, PIDs, CRC5 and CRC16, EOP
+    and the J after it, inter-packet delay and response time, the control transfers with toggles, the retry and the
+    address change, the descriptor, and each request against 9.4 in its device state. The counters read with RDMEM
+    must show address 0, 10 SETUPs ACKed, 9 transfers completed, and the configuration word 0 after the reset."""
     sys.path.insert(0, os.path.join(PROGRAMS_DIR, 'bench'))
     sys.dont_write_bytecode = True      # leave no cache in programs/ or sim/
     import usb_check
@@ -2576,12 +2661,18 @@ async def test_usb_enumerate(dut):
         ok = yield from h.control_nodata(0, U.SET_ADDR(12))
         d2 = yield from h.control_read(12, U.GET_DEV(18), lose=(1,))
         nak = (yield from h.in_(12))[0]
+        c9 = yield from h.control_read(12, U.GET_CONF(9))
+        cfg0 = yield from h.control_read(12, U.GET_CFG)
+        sc = yield from h.control_nodata(12, U.SET_CONF(1))
+        cfg1 = yield from h.control_read(12, U.GET_CFG)
+        st = yield from h.control_read(12, U.GET_STATUS(0x81, 0))
+        bad = yield from h.control_nodata(12, U.SET_CONF(2))
         yield from h.reset(50e3)
         yield from h.wait(0.1e6)
         d3 = yield from h.control_read(0, U.GET_DEV(8))
         old = yield from h.setup(12, U.GET_DEV(8), tries=1)
         yield from h.wait(50e3)
-        return dict(d1=d1, set=ok, d2=d2, nak=nak, d3=d3, old=old)
+        return dict(d1=d1, set=ok, d2=d2, nak=nak, c9=c9, cfg0=cfg0, sc=sc, cfg1=cfg1, st=st, bad=bad, d3=d3, old=old)
     partner = UsbPartner(dut, script, host_cls=dribble_host(U))
     await host.run(0, 7)
     cocotb.start_soon(partner.run())
@@ -2591,14 +2682,17 @@ async def test_usb_enumerate(dut):
         await host.wait(1000)
     assert partner.done, "the host model's script did not finish"
     v = partner.value
-    assert v == dict(d1=U.DESC, set=True, d2=U.DESC, nak='NAK', d3=U.DESC[:8], old=False), f"host's view: {v}"
-    rep = usb_check.check(partner.bus.record(partner.c * 20.0), descriptor=U.DESC, tdrst=40e3)
+    assert v == dict(d1=U.DESC, set=True, d2=U.DESC, nak='NAK', c9=U.CONF[:9], cfg0=b'\x00', sc=True, cfg1=b'\x01',
+                     st=b'\x00\x00', bad=False, d3=U.DESC[:8], old=False), f"host's view: {v}"
+    rep = usb_check.check(partner.bus.record(partner.c * 20.0), descriptor=U.DESC, config=U.CONF, tdrst=40e3)
     assert rep.ok, f"usb_check: {rep.failed()[:4]}"
     n = rep.checks()
-    assert n['descriptor'] == (3, 0) and n['retry'][0] >= 1 and n['reset'][0] >= 2 and n['address'][0] >= 1, \
-        f"checks {n}"
+    assert n['descriptor'] == (3, 0) and n['retry'][0] >= 1 and n['reset'][0] >= 2 and n['address'][0] >= 1 and \
+        n['request'] == (10, 0), f"checks {n}"
     addr, nsetup, nreq = await host.rdmem(13, 3)
-    assert (addr, nsetup, nreq) == (0, 4, 4), f"counters: address {addr}, {nsetup} SETUPs, {nreq} transfers"
+    cfgv, = await host.rdmem(3, 1)
+    assert (addr, nsetup, nreq, cfgv) == (0, 10, 9, 0), \
+        f"counters: address {addr}, {nsetup} SETUPs, {nreq} transfers, configuration word {cfgv:04X}"
     got = partner.host.dribbled
     assert all(got[1:]), f"host packets by dribble bit times 0 to 6: {got}"
     dut._log.info(f"usb: {partner.c} cycles; host packets by dribble bit times 0 to 6: {got}")

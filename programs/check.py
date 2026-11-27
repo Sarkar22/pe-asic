@@ -20,11 +20,13 @@ sys.dont_write_bytecode = True
 
 import report                                           # noqa: E402
 
-# Bench modules in programs/bench/, in the order they run. The last two are the self-tests of the 10BASE-T and
-# USB low-speed checkers (bench/eth_check.py, bench/usb_check.py), whose checks count for those files.
+# Bench modules in programs/bench/, in the order they run. The last three are the self-tests of the 10BASE-T,
+# half-duplex 10BASE-T and USB low-speed checkers (bench/eth_check.py, bench/eth_hd_check.py, bench/usb_check.py),
+# whose checks count for those files.
 BENCHES = ['words', 'basic', 'standard', 'trimmed', 'extra', 'manchester', 'dmx', 'ps2', 'mdio', 'jtag_chain',
-           'swd_host', 'i2c_target', 'usb_tx', 'usb_rx', 'usb_dev', 'can', 'bypass', 'eth', 'usb_enum', 'spi_unit',
-           'can_unit', 'sd_unit', 'unit_small', 'i2s', 'eth_check_test', 'usb_check_test']
+           'swd_host', 'i2c_target', 'usb_tx', 'usb_rx', 'usb_dev', 'can', 'bypass', 'eth', 'eth_hd', 'usb_enum',
+           'spi_unit', 'can_unit', 'sd_unit', 'unit_small', 'i2s', 'eth_check_test', 'eth_hd_check_test',
+           'usb_check_test']
 
 
 def main(argv):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the tool versions the online checks use, then runs the program checks and the RTL tests.
 #
-#   scripts/setup.sh                     install, then test: about 30 min the first time
+#   scripts/setup.sh                     install, then test: about 40 min the first time
 #   scripts/setup.sh --no-test           install only
 #   scripts/setup.sh --install-iverilog  also install Icarus Verilog 13.0 (Debian, Ubuntu; uses sudo).
 #                                        Gate level needs 13.0; the RTL tests also run on 12.0
@@ -238,9 +238,9 @@ EOF
 echo "written"
 
 if [ "$TEST" = 1 ]; then
-  step "Every program on the simulator (about 22 min)"
+  step "Every program on the simulator (about 30 min)"
   "$VENV/bin/python" programs/check.py
-  step "RTL tests at the pins (about 5 min)"
+  step "RTL tests at the pins (about 6 min)"
   (
     set +u
     . "$TTSETUP/env.sh"
