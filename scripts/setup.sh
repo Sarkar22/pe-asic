@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the tool versions the online checks use, then runs the program checks and the RTL tests.
 #
-#   scripts/setup.sh                     install, then test: about 6 min the first time
+#   scripts/setup.sh                     install, then test: about 30 min the first time
 #   scripts/setup.sh --no-test           install only
 #   scripts/setup.sh --install-iverilog  also install Icarus Verilog 13.0 (Debian, Ubuntu; uses sudo).
 #                                        Gate level needs 13.0; the RTL tests also run on 12.0
@@ -238,9 +238,9 @@ EOF
 echo "written"
 
 if [ "$TEST" = 1 ]; then
-  step "Every program on the simulator (about 2 to 3 min)"
+  step "Every program on the simulator (about 22 min)"
   "$VENV/bin/python" programs/check.py
-  step "RTL tests at the pins (about 2 min)"
+  step "RTL tests at the pins (about 5 min)"
   (
     set +u
     . "$TTSETUP/env.sh"
@@ -258,7 +258,7 @@ Then, from $REPO:
   python3 programs/check.py           every program on the simulator
   (cd test && make -B)                RTL tests at the pins
 A local build needs a git clone, whose commit tt_tool.py records, and setup.sh --harden first.
-It takes about 20 min and 3 GB of memory. Run it in a shell with env.sh: without PDK_ROOT,
+It takes about an hour with 8 threads and 5 GB of memory. Run it in a shell with env.sh: without PDK_ROOT,
 LibreLane downloads the PDK again, into ~/.ciel.
   ./tt/tt_tool.py --create-user-config --pdk ihp-sg13cmos5l
   ./tt/tt_tool.py --harden --pdk ihp-sg13cmos5l
