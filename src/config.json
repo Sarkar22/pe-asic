@@ -217,20 +217,20 @@
 
   "GRT_ALLOW_CONGESTION": 1,
 
-  "FP_IO_HLENGTH": 2,
-  "FP_IO_VLENGTH": 2,
+  "IO_PIN_H_LENGTH": 2,
+  "IO_PIN_V_LENGTH": 2,
 
   "//": "Stripes inside the SRAM's Metal4 power columns. src/pdn_cfg.tcl derives these numbers.",
-  "FP_PDN_VPITCH": 67.44,
-  "FP_PDN_VWIDTH": 2.1,
-  "FP_PDN_VSPACING": 3.52,
-  "FP_PDN_VOFFSET": 25.40,
+  "PDN_VPITCH": 67.44,
+  "PDN_VWIDTH": 2.1,
+  "PDN_VSPACING": 3.52,
+  "PDN_VOFFSET": 25.40,
 
   "//": "Clock",
   "RUN_CTS": 1,
 
   "//": "Don't generate power rings",
-  "FP_PDN_MULTILAYER": 0,
+  "PDN_MULTILAYER": 0,
 
   "//": "MAGIC_DEF_LABELS may cause issues with LVS",
   "MAGIC_DEF_LABELS": 0,
