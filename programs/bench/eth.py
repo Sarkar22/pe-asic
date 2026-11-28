@@ -265,6 +265,191 @@ def frames_only(n, seed, jitter=None, phase_seed=0, octets=46, src=None, **kw):
 UAA_MAC = bytes.fromhex('001b213a5c7e')          # a universally administered source (3.2.3 c): a real ARP's shape
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# partners for the link integrity test (802.3 14.2.1.7), judged by eth_link_check
+
+NLP = 16e6                      # ns: a partner's link test pulses, 16 ms apart (14.2.1.1)
+LINK_CASES = ('loss_pulses', 'one_pulse', 'fast_pulses', 'slow_pulses', 'frame_in_fail', 'keep_up', 'short_silence',
+              'mid_silence', 'flp_in_fail', 'hold', 'power_on', 'probe_loss', 'probe_count', 'close_after')
+
+
+def link_line(case, seed=1, silence=200e6):
+    """A partner for one case of the link integrity test. It starts healthy, link test pulses 16 ms apart and an ARP
+    request, then for most cases goes silent for `silence` ns (more than link_loss can be, 150 ms), then comes back
+    the case's way:
+      loss_pulses    12 pulses 16 ms apart, then a request: every MAU is back in Link Test Pass by then (lc_max is
+                     at most 10, and the first pulse after a silence may not count)
+      one_pulse      one pulse, a request 16 ms later (dropped: one pulse is under lc_max), then another (answered)
+      fast_pulses    30 pulses 1 ms apart, under link_test_min, so each resets the count; then two requests
+      slow_pulses    2 pulses 160 ms apart, past link_test_max, so the second doesn't follow the first; then
+                     two requests, the first 10 ms after the second pulse
+      frame_in_fail  a request at once (it ends Link Test Fail and is dropped), then another
+      keep_up        no silence: pulses alone for 300 ms keep the link up; then a request
+      short_silence  a request 45 ms into the silence (the link is up), one 100 ms after it (either), then one more
+      mid_silence    100 ms of silence, one pulse, a request 16 ms later (answered only by a MAU whose link_loss is
+                     over 100 ms), then another
+      flp_in_fail    six FLP bursts 16 ms apart: their pulses 62.5 us apart reset the count; then two requests
+      hold           the start, the silence and 12 pulses, with no request after: a station holding its reply to the
+                     first request sends it once the link is back
+      power_on       two requests from 0.4 ms with no pulse before: the first is dropped by a MAU that powers on in
+                     Link Test Fail Reset
+      probe_loss     a request 60 ms into the silence, one 70 ms after it, then one more: for a stated link_loss of
+                     64.2 to 65.6 ms, the first answered, the second dropped
+      probe_count    two pulses 16 ms apart, then a request: for a stated lc_max of 2 and the first pulse counted
+      close_after    a request at once (dropped), and the next 47 bit times after it ends, the shortest gap a
+                     receiver may see (4.4.2 note 1): answered, since EXTEND ends when RD goes idle (14.3.1.3.3)
+    Returns (line, plan, t_end); plan lists ('req', t0, bits, spa) and ('pulse', t0, width) in time order, each
+    request from PEER_MAC with its own sender IP."""
+    L = Line(seed)
+    plan = []
+    n = [0]
+
+    def req(t):
+        n[0] += 1
+        spa = bytes([192, 168, 7, n[0]])
+        bits = arp_req(spa=spa)
+        plan.append(('req', t, bits, spa))
+        return L.frame(bits, t)
+
+    def pulse(t, width=100.0):
+        L.pulse(t, width)
+        plan.append(('pulse', t, width))
+
+    def pulses(t, k, spacing):
+        for q in range(k):
+            pulse(t + q * spacing)
+        return t + (k - 1) * spacing
+
+    if case == 'power_on':
+        e = req(0.4e6)
+        e = req(e + 0.3e6)
+        last = pulses(e + 8e6, 3, NLP)
+        return L, plan, last + 10e6
+    if case == 'keep_up':
+        last = pulses(1e6, 20, NLP)
+        e = req(last + 8e6)
+        return L, plan, e + 10e6
+    pulses(1e6, 3, NLP)
+    end0 = req(40e6)                                    # last activity of the healthy start
+    if case == 'short_silence':
+        e = req(end0 + 45e6)
+        e = req(e + 100e6)
+        e = req(e + 0.3e6)
+        return L, plan, e + 10e6
+    if case == 'mid_silence':
+        pulse(end0 + 100e6)
+        e = req(end0 + 100e6 + NLP)
+        e = req(e + 0.3e6)
+        return L, plan, e + 10e6
+    if case == 'probe_loss':
+        e = req(end0 + 60e6)
+        e = req(e + 70e6)
+        e = req(e + 0.3e6)
+        return L, plan, e + 10e6
+    t = end0 + silence
+    if case in ('loss_pulses', 'hold'):
+        last = pulses(t, 12, NLP)
+        if case == 'hold':
+            return L, plan, last + 10e6
+        e = req(last + 8e6)
+        return L, plan, e + 10e6
+    if case == 'one_pulse':
+        pulse(t)
+        e = req(t + NLP)
+    elif case == 'fast_pulses':
+        last = pulses(t, 30, 1e6)
+        e = req(last + 2e6)
+    elif case == 'slow_pulses':
+        last = pulses(t, 2, 160e6)
+        e = req(last + 10e6)
+    elif case == 'frame_in_fail':
+        e = req(t)
+    elif case == 'flp_in_fail':
+        for q in range(6):
+            tq = t + q * NLP
+            for k in range(17):
+                pulse(tq + k * 125e3)
+                if k < 16 and (0x01E1 >> k) & 1:
+                    pulse(tq + k * 125e3 + 62.5e3)
+        e = req(t + 5 * NLP + 17 * 125e3 + 4e6)
+    elif case == 'probe_count':
+        last = pulses(t, 2, NLP)
+        e = req(last + 8e6)
+    elif case == 'close_after':
+        e = req(t)
+        e = req(e + 4.7e3)
+        return L, plan, e + 10e6
+    else:
+        raise ValueError(case)
+    e = req(e + 0.3e6)
+    return L, plan, e + 10e6
+
+
+def probe_line(kind, st, seed=1):
+    """A partner that puts its events just inside and just outside a station's stated values st (link_loss,
+    link_test_min, link_test_max as (low, high) ns), so that eth_link_check, held to those values, decides each
+    request: a healthy start (link test pulses, an ARP request), then
+      loss   a request st['link_loss'][0] - 1.5 ms into a silence (up), one st['link_loss'][1] + 1.5 ms after it
+             (down: the link failed, and this frame ends Link Test Fail), and one more (up)
+      min    a silence past link_loss, two pulses st['link_test_min'][0] - 0.8 ms apart (the second early: the count
+             restarts), a request (down); a silence again, two pulses st['link_test_min'][1] + 0.7 ms apart (both
+             counted), a request (up)
+      max    a silence, two pulses st['link_test_max'][0] - 1.5 ms apart (consecutive), a request (up); a silence,
+             two pulses st['link_test_max'][1] + 1.5 ms apart (not consecutive), a request (down), and one more (up)
+      early  a pulse st['link_test_min'][0] - 0.06 ms after the start's request, which LINK TEST PASS ignores, so
+             the link fails st['link_loss'] after the request, not after the pulse: a request st['link_loss'][1] +
+             1.5 ms after the first (down), and one more (up)
+    A silence is st['link_loss'][1] + 7 ms. Returns (line, plan, t_end) as link_line does."""
+    L = Line(seed)
+    plan = []
+    n = [0]
+
+    def req(t):
+        n[0] += 1
+        spa = bytes([192, 168, 8, n[0]])
+        bits = arp_req(spa=spa)
+        plan.append(('req', t, bits, spa))
+        return L.frame(bits, t)
+
+    def pulse(t):
+        L.pulse(t)
+        plan.append(('pulse', t, 100.0))
+        return t + 100.0
+
+    for q in range(3):
+        pulse(1e6 + q * NLP)
+    e = req(40e6)
+    quiet = st['link_loss'][1] + 7e6
+    if kind == 'loss':
+        e = req(e + st['link_loss'][0] - 1.5e6)
+        e = req(e + st['link_loss'][1] + 1.5e6)
+    elif kind == 'min':
+        p = pulse(e + quiet)
+        p = pulse(p + st['link_test_min'][0] - 0.8e6)
+        e = req(p + 10e6)
+        p = pulse(e + quiet)
+        p = pulse(p + st['link_test_min'][1] + 0.7e6)
+        e = req(p + 10e6)
+    elif kind == 'early':
+        pulse(e + st['link_test_min'][0] - 0.06e6)
+        e = req(e + st['link_loss'][1] + 1.5e6)
+    elif kind == 'max':
+        p = pulse(e + quiet)
+        p = pulse(p + st['link_test_max'][0] - 1.5e6)
+        e = req(p + 10e6)
+        p = pulse(e + quiet)
+        p = pulse(p + st['link_test_max'][1] + 1.5e6)
+        e = req(p + 10e6)
+    else:
+        raise ValueError(kind)
+    e = req(e + 0.3e6)
+    return L, plan, e + 10e6
+
+
+PROBE_EXPECT = dict(loss=['up', 'up', 'down', 'up'], min=['up', 'down', 'up', 'up'], max=['up', 'up', 'down', 'up'],
+                    early=['up', 'down', 'up'])
+
+
 PH8 = (1.9, 4.3, 6.1, 8.7, 11.3, 13.9, 16.6, 19.1)     # sampling phases (ns), none a multiple of 2.5
 CORNERS = ('typ', 'max', 'min')
 
@@ -316,8 +501,9 @@ def ro_schedule(ro, phase):
 
 
 def run(line, t_end, corner='typ', phase=0.0, align=0, threads=(0, 1), seed=1, text=None, chip_cls=None,
-        fe_over=None, check=True, half=HALF, duty=0.0):
-    """Runs the program against the line to t_end ns. Returns a Result with the checker's report."""
+        fe_over=None, check=True, half=HALF, duty=0.0, link=None, jabber=None):
+    """Runs the program against the line to t_end ns. Returns a Result with the checker's report. link and jabber
+    go to the checker (eth_link_check: the link integrity test and jabber, 802.3 14.2.1.6, 14.2.1.7)."""
     img = assemble(text if text is not None else src(PROG), depth=512)
     fe = frontend.Rs485Eth(corner, **(fe_over or {}))
     rx = line.line()
@@ -373,7 +559,8 @@ def run(line, t_end, corner='typ', phase=0.0, align=0, threads=(0, 1), seed=1, t
     res.de = frontend.pad(rec_t, rec_v, 'uo%d' % DE, half=half, duty_ns=duty)
     res.fe, res.rx, res.line, res.chip, res.img, res.t_end = fe, rx, line, chip, img, cycles * CYCLE
     res.tx = tx_pair(fe, res.di, res.de)
-    res.rep = eth_check.check(res.tx, rx, mac=MAC, ip=IP, t_start=0.0, t_end=res.t_end) if check else None
+    res.rep = eth_check.check(res.tx, rx, mac=MAC, ip=IP, t_start=0.0, t_end=res.t_end, link=link,
+                              jabber=jabber) if check else None
     res.health = health(chip, img, threads)
     res.count = {k: chip.mem[a] for k, a in MEM.items()}
     return res

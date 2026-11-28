@@ -10,8 +10,18 @@ makes the node drop the frame after attemptLimit attempts (4.4.2).
 eth_hd_check judges the record (deference, jam, retries, backoff, attempt limit) and eth_check's per-frame, pulse
 and reply checks; the firmware's counters must match what the line shows. The backoff's spread is measured over many
 trials: r for the first retransmission should be 0 or 1 with equal odds, for the second 0 to 3, and so on.
+
+The link integrity test and the jabber function (802.3 14.2.1.6, 14.2.1.7) are judged by eth_link_check, held to the
+values the program states (LINK_STATED, JAB_STATED, its PICS answers) and, for the link, also to 802.3's ranges: the
+checker's own partner cases (eth.link_line) with silences of 95 ms, past this program's link_loss; partners whose
+requests and pulses fall just inside and just outside each stated value (eth.probe_line); the end of LINK TEST FAIL
+EXTEND against the next frame and against link_test_max running out, and a request whose start T counts as the second
+link test pulse; and a broken copy whose feed loop never ends, which the jabber function must cut and hold. A frame
+received while the link is down must be taken unstored and counted in NBUSY. These runs are long (up to 1,150 ms of
+line), so they go 4 at a time.
 """
 import bisect
+import concurrent.futures
 import random
 
 import eth
@@ -22,15 +32,24 @@ from report import Chip, assemble, src
 
 PROGRAMS = ('advanced/eth_hd.s',)
 PROG = 'advanced/eth_hd.s'
-WORDS = 409                     # section 11.2's count for the program
+WORDS = 440                     # section 11.2's count for the program
 BT = 100.0
 CYCLE = 20.0
 MAC, IP = eth.MAC, eth.IP
 TWIN_MAC = MAC[:4] + bytes([0x5A, 0x3C])   # a second station's MAC: the same but for its last two octets
 DI, DE, RO = 4, 5, 4
 MCFG = 4
-MEM = dict(HANDED=5, RELEASED=6, NKEEP=7, NBAD=8, NOTHER=9, NBUSY=10, NCOLL=17, NLATE=18, NXS=19)
-VARIABLE = set(range(5, 23))    # counters and state words the program writes
+MEM = dict(HANDED=11, RELEASED=12, NKEEP=7, NBAD=8, NOTHER=9, NBUSY=10, NCOLL=17, NLATE=18, NXS=19, LST=13, LW=14)
+VARIABLE = set(range(5, 20))    # counters and state words the program writes
+MS = 1e6
+# the program's own values for the link integrity test and jabber (its header), as the checker takes them (the PICS
+# answers LF1, LF5 to LF7, LF16, JF2, JF4): a timer of k TB wraps runs out after (k - 1) to k wraps of 1.31072 ms, give
+# or take T's latency in seeing a wrap or a pulse, at most a slot of a backoff or of the unjab wait (2,560 cycles,
+# 51.2 us) where a timer can run out; T's longer gaps between samples of TB, up to 6,540 cycles, come in sends, which
+# follow a restart of the link timer by under 53 ms
+LINK_STATED = dict(link_loss=(86.4 * MS, 87.9 * MS), link_test_min=(3.86 * MS, 5.31 * MS),
+                   link_test_max=(86.4 * MS, 87.9 * MS), lc_max=(2, 2))
+JAB_STATED = dict(xmit_max=(52.0 * MS, 105.5 * MS), unjab=(499.0 * MS, 501.0 * MS))
 
 
 def frag_bits(rng):
@@ -83,9 +102,10 @@ class Result:
 
 
 def run(partner, t_end, corner='typ', phase=7.5, align=0, threads=(0, 1), seed=1, text=None, chip_cls=None,
-        duty=0.0, half=True, check=True, mac=None):
+        duty=0.0, half=True, check=True, mac=None, link=None, jabber=None):
     """Runs the program against a partner to t_end ns, both halves of every cycle (section 3.1). mac: the station's
-    MAC, which the host posts (MAC by default)."""
+    MAC, which the host posts (MAC by default). link and jabber go to the checker (eth_link_check, 802.3 14.2.1.6,
+    14.2.1.7)."""
     mac = MAC if mac is None else bytes(mac)
     img = assemble(text if text is not None else src(PROG), depth=512)
     fe = frontend.Rs485Eth(corner)
@@ -146,7 +166,8 @@ def run(partner, t_end, corner='typ', phase=7.5, align=0, threads=(0, 1), seed=1
     res.de = frontend.pad(rec_t, rec_v, 'uo%d' % DE, half=True, duty_ns=duty)
     res.rx, res.chip, res.img, res.t_end, res.partner = line, chip, img, cycles * CYCLE, partner
     res.tx = eth.tx_pair(fe, res.di, res.de)
-    res.rep = H.check(res.tx, line, mac=mac, ip=IP, t_start=0.0, t_end=res.t_end) if check else None
+    res.rep = H.check(res.tx, line, mac=mac, ip=IP, t_start=0.0, t_end=res.t_end, link=link,
+                      jabber=jabber) if check else None
     res.health = health(chip, img, threads)
     res.count = {k: chip.mem[a] for k, a in MEM.items()}
     return res
@@ -459,6 +480,50 @@ def main(log):
     log.check('two collisions, R and T on 4 thread pairs and alignments: jammed, backed off, sent', not bad,
               '; '.join(bad[:3]) or '8 runs')
 
+    # the link integrity test and the jabber function (802.3 14.2.1.6, 14.2.1.7), judged by eth_link_check held to the
+    # program's stated values, and broken copies that those rows must catch. Long runs, so up to 4 at a time
+    jobs = [('case', c) for c in eth.LINK_CASES] + [('probe', k) for k in eth.PROBE_EXPECT] + [('jab', None),
+                                                                                              ('jab_down', None)]
+    jobs += [('extend', k) for k in range(len(EXTEND_CFG))]
+    jobs += [('extend_timer', k) for k in range(len(EXTEND_TIMER_US))]
+    jobs += [('count_trap', k) for k in range(len(COUNT_TRAP_US))]
+    jobs += [('tooth', i) for i in range(len(LINK_TEETH))]
+    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as ex:
+        out = list(ex.map(link_job, jobs))
+    for (kind, arg), (ok, detail) in zip(jobs, out):
+        if kind == 'case':
+            log.check('link integrity, the checker\'s case %s with a silence of 95 ms: every check passes held to the '
+                      'program\'s values, and with 802.3\'s ranges; frames received while the link is down taken '
+                      'unstored (NBUSY), the rest counted as 4.2.4 says; threads healthy' % arg, ok, detail)
+        elif kind == 'probe':
+            log.check('link integrity at the edges of the program\'s values, %s (eth.probe_line): every request gets '
+                      'the status the values decide, %s, and every check passes' % (arg, eth.PROBE_EXPECT[arg]), ok,
+                      detail)
+        elif kind == 'jab':
+            log.check('jabber: a broken copy that never stops feeding its reply is cut after 65,536 words (at most '
+                      '105.5 ms), sends nothing for unjab (at least 499 ms) while its link test pulses go on, counts '
+                      'the frame in NXS, and sends the reply it held once the wait is over', ok, detail)
+        elif kind == 'extend':
+            log.check('the end of EXTEND: a request whose TP_IDL lasts 4.5 BT ends LINK TEST FAIL and is taken '
+                      'unstored, and the next, 47 BT after it (4.4.2 note 1), finds the link up and is answered, R and '
+                      'T on threads %s at alignment %d' % EXTEND_CFG[arg], ok, detail)
+        elif kind == 'extend_timer':
+            log.check('EXTEND has no timer (Figure 14-6): a request that arrives in LINK TEST FAIL as link_test_max '
+                      'runs out, with no 1, 0, 1 in its last 192 bits, ends it %.0f us after that and is taken '
+                      'unstored, and the next, 1 ms after it, finds the link up and is answered' %
+                      EXTEND_TIMER_US[arg], ok, detail)
+        elif kind == 'count_trap':
+            log.check('a request that T first sees as the start of a reception, before its pattern, counts as the '
+                      'second link test pulse at a count of 1 (the request %.2f us late, 16 ms after one pulse): it is '
+                      'still taken unstored, since the count goes through EXTEND, and the next is answered' %
+                      COUNT_TRAP_US[arg], ok, detail)
+        elif kind == 'jab_down':
+            log.check('jabber and the link together: the link fails during the unjab wait, so the held reply waits '
+                      'for it to come back (no transmission while it is down) and for the rest of the wait', ok,
+                      detail)
+        else:
+            log.check('a broken copy is caught: %s' % LINK_TEETH[arg][0], ok, detail)
+
     # broken copies: each must fail somewhere
     for what, old, new, how in TEETH:
         text = broken(old, new)
@@ -491,6 +556,272 @@ def broken(old, new):
     text = src(PROG)
     assert text.count(old) == 1, old
     return text.replace(old, new)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# the link integrity test and jabber (802.3 14.2.1.6, 14.2.1.7)
+
+LINK_SILENCE = 95 * MS          # the checker's cases with silences past this program's link_loss, 87.9 ms at most
+ENDLESS = ('djnz  R2, s3', 'goto  s3')         # a feed loop that never ends: the guard must cut the send
+
+
+def link_verdict(res):
+    """Every failing finding, the health and the counters for a run judged with link=: a frame that no allowed MAU
+    hands up is taken unstored (NBUSY), one that some do may be either way, the rest as rx_disposition says."""
+    rep = res.rep
+    out = ['%s @%.1f us: %s' % (c, t / 1e3, x) for t, c, x in rep.failed()][:3]
+    out += res.health
+    c = res.count
+    want, maybe, down = dict(keep=0, bad=0, other=0), dict(keep=0, bad=0, other=0), 0
+    for f in rep.rx_frames:
+        if f.octets is None:
+            continue
+        octs = f.octets
+        d = 'bad' if len(octs) < 64 or not H.fcs_valid(octs) else ('keep' if octs[:6] in (MAC, eth.BCAST) else 'other')
+        lk = getattr(f, 'link', 'up')
+        if lk == 'down':
+            down += 1
+        elif lk == 'either':
+            maybe[d] += 1
+        else:
+            want[d] += 1
+    got = dict(keep=c['NKEEP'], bad=c['NBAD'], other=c['NOTHER'])
+    ok = all(want[k] <= got[k] <= want[k] + maybe[k] for k in want) and \
+        sum(got.values()) + c['NBUSY'] == sum(want.values()) + sum(maybe.values()) + down and c['NBUSY'] >= down
+    if not ok or c['HANDED'] != c['RELEASED']:
+        out.append('counters %s, busy %d, handed %d, released %d; frames up %s, either %s, down %d' % (
+            got, c['NBUSY'], c['HANDED'], c['RELEASED'], want, maybe, down))
+    return '; '.join(out)
+
+
+def link_run(kind, arg, text=None):
+    """(result, statuses with 802.3's ranges, failures with 802.3's ranges) for a case of eth.link_line or a probe of
+    eth.probe_line, judged with the program's stated values (res.rep) and again with 802.3's ranges."""
+    L, plan, t_end = eth.link_line(arg, silence=LINK_SILENCE) if kind == 'case' else eth.probe_line(arg, LINK_STATED)
+    r = run(Partner(L.changes), t_end, text=text, link=dict(LINK_STATED, power_on='pass'), jabber={})
+    wide = H.check(r.tx, r.rx, mac=MAC, ip=IP, t_start=0.0, t_end=r.t_end, link=dict(power_on='pass'), jabber={})
+    return r, [f.link for f in wide.rx_frames if f.octets is not None], sorted({x for _, x, _ in wide.failed()})
+
+
+# the checks a cut transmission fails anyway: its frame's size and FCS, the reply it should have been, and
+# eth_hd_check's jam and retry, which read a send that ends early as an attempt cut short with no collision, and the
+# next frame as not its retry (802.3's MAC would retry the cut frame on the CS0 of 14.2.1.6 b, invisibly at the MDI,
+# until attemptLimit). The cut itself ends with TP_IDL, a start of idle (Figure 14-3: xmit=disable sends TD_idle;
+# 14.2.1.1), so the checks of a transmission's end are allowed to fail only for one still going when the record ends
+JAB_ALLOWED = ('frame_size', 'fcs', 'arp_reply', 'jam', 'retry')
+JAB_ALLOWED_OPEN = ('manchester', 'tp_idl', 'edge_timing')
+
+
+def jab_run(text):
+    """Two requests, at 0.4 and 300 ms, and the partner's link test pulses every 16 ms; to 650 ms."""
+    L = eth.Line(71)
+    L.frame(request(), 0.4e6)
+    L.frame(eth.arp_req(spa=bytes([192, 168, 0, 72])), 300e6)
+    for q in range(41):
+        L.pulse(1e6 + q * eth.NLP)
+    return run(Partner(L.changes), 650 * MS, text=text, link=dict(LINK_STATED, power_on='pass'), jabber=JAB_STATED)
+
+
+# thread pairs and alignments for the end of EXTEND, one per thread pair: over 16 configurations, LINK TEST PASS comes
+# 14.2 to 20.4 BT before the next frame
+EXTEND_CFG = (((0, 1), 0), ((2, 3), 3), ((1, 0), 2), ((3, 2), 1))
+
+
+def extend_run(k, text=None):
+    """The end of LINK TEST FAIL EXTEND against the next frame: after a silence, a request whose TP_IDL lasts 4.5 BT,
+    14.3.1.2.1's longest (it ends LINK TEST FAIL and is dropped), and the next 47 BT after its end, the shortest gap
+    a receiver may see (4.4.2 note 1), which must find the link up; on EXTEND_CFG[k]."""
+    th, al = EXTEND_CFG[k]
+    L = eth.Line(90 + al)
+    for q in range(2):
+        L.pulse(1e6 + q * eth.NLP)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 9, 1])), 20e6)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 9, 2])), e + LINK_SILENCE, tp_hi=4.5)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 9, 3])), e + 4.7e3)
+    return run(Partner(L.changes), e + 1 * MS, threads=th, align=al, text=text, link=dict(LINK_STATED, power_on='pass'),
+               jabber={})
+
+
+# EXTEND has no timer (Figure 14-6): request A ends this many us after link_test_max runs out in LINK TEST FAIL
+EXTEND_TIMER_US = (2.0, 6.0)
+WRAP = 65536 * CYCLE            # ns between TB wraps
+
+
+def extend_timer_run(k, text=None):
+    """LINK TEST FAIL EXTEND against the link timer: after a request at 20 ms and silence, link_loss runs out on the
+    program's LINKW-th TB wrap after that request and link_test_max on the LINKW-th wrap after that (in LINK TEST
+    FAIL the timer starts again on a wrap). Request A, whose last 192 bits hold no 1, 0, 1 (sender IP
+    192.168.255.237), so that T's receive half gives no word after them, ends EXTEND_TIMER_US[k] us after that second
+    expiry: it ends LINK TEST FAIL and is taken unstored. Request B, 1 ms after A, finds the link up (EXTEND ends when
+    RD goes idle) and is answered."""
+    t = text if text is not None else src(PROG)
+    linkw = int(t.split('.equ LINKW', 1)[1].split()[0])
+    L = eth.Line(31)
+    L.pulse(1e6)
+    L.pulse(17e6)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 9, 1])), 20e6)
+    w = int(e // WRAP) + 2 * linkw          # the first wrap after the request is int(e // WRAP) + 1
+    bits = eth.arp_req(spa=bytes([192, 168, 255, 237]))
+    e = L.frame(bits, w * WRAP + EXTEND_TIMER_US[k] * 1e3 - eth.Line(1).frame(bits, 0.0))
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 9, 3])), e + 1 * MS)
+    return run(Partner(L.changes), e + 1 * MS, text=text, link=dict(LINK_STATED, power_on='pass'), jabber={})
+
+
+# a frame whose start T's poll sees before its pattern (status bit 12 without bit 9) counts as a link test pulse; at a
+# count of 1 it is the second, and must still be taken unstored (the count goes through EXTEND, which waits for the
+# frame's end). T's poll lands in that window, about 0.3 us of its 2.4 us loop, at these offsets of the request
+COUNT_TRAP_US = (0.30, 0.45)
+
+
+def count_trap_run(k, text=None):
+    """LINK TEST FAIL with a count of 1 when a request arrives: after a request at 20 ms and 95 ms of silence, one link
+    test pulse, then a request 16 ms + COUNT_TRAP_US[k] us later (taken unstored) and another 0.3 ms after it
+    (answered)."""
+    L = eth.Line(51)
+    L.pulse(1e6)
+    L.pulse(17e6)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 13, 1])), 20e6)
+    p = e + LINK_SILENCE
+    L.pulse(p)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 13, 2])), p + eth.NLP + COUNT_TRAP_US[k] * 1e3)
+    e = L.frame(eth.arp_req(spa=bytes([192, 168, 13, 3])), e + 0.3 * MS)
+    return run(Partner(L.changes), e + 1 * MS, text=text, link=dict(LINK_STATED, power_on='pass'), jabber={})
+
+
+def jab_down_run(text):
+    """The jabber and the link together: a request at 0.4 ms whose reply is cut, the partner's link test pulses to
+    145 ms, a request at 160 ms (kept, its reply held by the unjab wait), then silence, so the link fails during the
+    wait; from 700 ms pulses again. The reply to the second request waits for the link to come back, then for the
+    rest of the wait, which counts only in LINK TEST PASS; to 1,150 ms."""
+    L = eth.Line(72)
+    L.frame(request(), 0.4e6)
+    for q in range(10):
+        L.pulse(1e6 + q * eth.NLP)
+    L.frame(eth.arp_req(spa=bytes([192, 168, 0, 73])), 160e6)
+    for q in range(29):
+        L.pulse(700e6 + q * eth.NLP)
+    return run(Partner(L.changes), 1150 * MS, text=text, link=dict(LINK_STATED, power_on='pass'), jabber=JAB_STATED)
+
+
+def jab_verdict(r):
+    """The jab row's judgment: the checker's failures but those a cut frame fails anyway, the health, NXS 1, and the
+    transmissions: one cut, then the next at least unjab later."""
+    tx = sorted(r.rep.tx_frames, key=lambda f: f.start)
+    open_from = min([f.start for f in tx if f.stop >= r.t_end - 2 * BT] or [float('inf')])
+    bad = ['%s: %s' % (c, x) for t, c, x in r.rep.failed()
+           if c not in JAB_ALLOWED and not (c in JAB_ALLOWED_OPEN and t >= open_from)][:3]
+    bad += r.health
+    cuts = [x for x in r.rep.findings if x.check == 'jabber' and 'after a cut' in x.text]
+    if not cuts:
+        bad.append('no cut and later transmission found')
+    if r.count['NXS'] != 1:
+        bad.append('NXS %d' % r.count['NXS'])
+    return '; '.join(bad), '%d transmissions, %s; NXS %d' % (len(tx), cuts[0].text if cuts else '-', r.count['NXS'])
+
+
+# broken copies for the link and jabber rows: (what, old, new, the row that must fail: a case, a probe or 'jab')
+LINK_TEETH = [
+    ('frames taken while the link is down (R ignores LST)', 'or    R4, R6', 'idle', ('case', 'frame_in_fail')),
+    ('lc_max 1: one link test pulse brings the link back', 'cmpi  R4, 4\n        jt    tx6',
+     'cmpi  R4, 3\n        jt    tx6', ('case', 'one_pulse')),
+    ('an early pulse counted in LINK TEST FAIL (no RESET)', 'ldi   R4, 1          ; LINK TEST FAIL RESET',
+     'idle                 ; LINK TEST FAIL RESET', ('probe', 'min')),
+    ('EXTEND left without waiting for RD idle', 'jt    t0r            ; RD active', 'idle                 ; RD active',
+     ('case', 'close_after')),
+    ('link_loss and link_test_max 30 wraps (39 ms, under the stated 86.4)', '.equ LINKW 67', '.equ LINKW 30',
+     ('probe', 'loss')),
+    ('no jabber guard: the endless feed loop runs on', 'djnz  R3, sp         ; the jabber\'s guard\n        goto  jab',
+     'goto  sp             ; the jabber\'s guard\n        idle', ('jab', None)),
+    ('an unjab wait of 1,000 slot times, 51 ms', '.equ UNJAB 9766', '.equ UNJAB 1000', ('jab', None)),
+    ('no send gate: a reply held through the unjab wait goes out while the link is down',
+     'cmpi  R4, 4\n        jf    tloop', 'cmpi  R4, 4\n        idle', ('jab_down', None)),
+    ('LINK TEST PASS takes an early pulse: link_test_min not applied there', 'bt    R4, 2\n        jt    t0e',
+     'bt    R4, 2\n        jt    tpa', ('probe', 'early')),
+    ('the timers not restarted by LINK TEST FAIL COUNT', 'jt    tx6            ; link_count = lc_max: EXTEND\n'
+     '        goto  t0r', 'jt    tx6            ; link_count = lc_max: EXTEND\n        goto  t0x', ('probe', 'max')),
+    ('EXTEND waits for 250 cycles of quiet RO, not 12, so a frame 47 BT after the one that ended LINK TEST FAIL finds '
+     'the link down', '.equ QUIET 12', '.equ QUIET 250', ('extend', 0)),
+    ('EXTEND left on the link timer: RD activity there doesn\'t start LW again, so link_test_max running out during '
+     'the frame that ends LINK TEST FAIL puts the node back in LINK TEST FAIL', 'jt    t0r            ; RD active',
+     'jt    t0x            ; RD active', ('extend_timer', 0)),
+    ('the jabber\'s cut by sstop tx: DE drops at once, so the cut send ends with no TP_IDL (start of idle)',
+     'jab:    li    R0, UNJAB', 'jab:    sstop tx\n        li    R0, UNJAB', ('jab', None)),
+    ('the pulse count reaches LINK TEST PASS without EXTEND, so a request whose start T counts as the second pulse is '
+     'handed up', 'cmpi  R4, 4\n        jt    tx6', 'cmpi  R4, 5\n        jt    tx6', ('count_trap', 0)),
+]
+
+
+def link_job(job):
+    """One of the link and jabber rows, run in a worker process: (ok, detail)."""
+    kind, arg = job
+    if kind in ('case', 'probe'):
+        r, sts, wide = link_run(kind, arg)
+        v = link_verdict(r)
+        mine = [f.link for f in r.rep.rx_frames if f.octets is not None]
+        if kind == 'probe' and mine != eth.PROBE_EXPECT[arg]:
+            v = (v + '; ' if v else '') + 'statuses %s' % mine
+        if wide:
+            v = (v + '; ' if v else '') + 'with 802.3\'s ranges it fails %s' % wide
+        return not v, v or 'statuses %s (802.3\'s ranges: %s); NBUSY %d; %.0f ms' % (mine, sts, r.count['NBUSY'],
+                                                                                    r.t_end / MS)
+    if kind == 'jab':
+        v, d = jab_verdict(jab_run(broken(*ENDLESS)))
+        return not v, v or d
+    if kind == 'extend':
+        r = extend_run(arg)
+        v = link_verdict(r)
+        sts = [f.link for f in r.rep.rx_frames if f.octets is not None]
+        if sts != ['up', 'down', 'up']:
+            v = (v + '; ' if v else '') + 'statuses %s' % sts
+        return not v, v or 'threads %s, alignment %d: statuses %s; NBUSY %d' % (
+            EXTEND_CFG[arg][0], EXTEND_CFG[arg][1], sts, r.count['NBUSY'])
+    if kind == 'extend_timer':
+        r = extend_timer_run(arg)
+        v = link_verdict(r)
+        sts = [f.link for f in r.rep.rx_frames if f.octets is not None]
+        if sts != ['up', 'down', 'up']:
+            v = (v + '; ' if v else '') + 'statuses %s' % sts
+        return not v, v or 'A ends %.1f us after link_test_max runs out: statuses %s; NKEEP %d, NBUSY %d' % (
+            EXTEND_TIMER_US[arg], sts, r.count['NKEEP'], r.count['NBUSY'])
+    if kind == 'count_trap':
+        r = count_trap_run(arg)
+        v = link_verdict(r)
+        sts = [f.link for f in r.rep.rx_frames if f.octets is not None]
+        if sts != ['up', 'down', 'up']:
+            v = (v + '; ' if v else '') + 'statuses %s' % sts
+        return not v, v or 'the request %.2f us late: statuses %s; NKEEP %d, NBUSY %d' % (
+            COUNT_TRAP_US[arg], sts, r.count['NKEEP'], r.count['NBUSY'])
+    if kind == 'jab_down':
+        r = jab_down_run(broken(*ENDLESS))
+        v, d = jab_verdict(r)
+        v = v.replace('NXS 2', '') if r.count['NXS'] == 2 else v       # both requests' replies are cut here
+        v = '; '.join(x for x in v.split('; ') if x)
+        tx = sorted(r.rep.tx_frames, key=lambda f: f.start)
+        late = [f for f in tx if f.start > 160 * MS]
+        if not late or late[0].start < 716 * MS:
+            v = (v + '; ' if v else '') + 'the held reply at %s' % ('%.1f ms' % (late[0].start / MS) if late else
+                                                                        'no time')
+        return not v, v or '%s; the held reply at %.1f ms' % (d, late[0].start / MS)
+    what, old, new, (rk, ra) = LINK_TEETH[arg]
+    text = broken(old, new)
+    if rk in ('jab', 'jab_down'):
+        t = text
+        assert t.count(ENDLESS[0]) == 1
+        r = (jab_run if rk == 'jab' else jab_down_run)(t.replace(*ENDLESS))
+        v, d = jab_verdict(r)
+        if rk == 'jab_down':
+            v = '; '.join(x for x in v.split('; ') if x and x != 'NXS 2')
+        return bool(v), v[:200] if v else 'every check passed: ' + d
+    if rk == 'extend':
+        r = extend_run(ra, text=text)
+    elif rk == 'extend_timer':
+        r = extend_timer_run(ra, text=text)
+    elif rk == 'count_trap':
+        r = count_trap_run(ra, text=text)
+    else:
+        r = link_run(rk, ra, text=text)[0]
+    v = link_verdict(r)
+    return bool(v), '%s %s: %s' % (rk, ra, v[:200]) if v else '%s %s: every check passed' % (rk, ra)
 
 
 def tooth(text, how):

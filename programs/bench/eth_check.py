@@ -51,6 +51,10 @@ The integrity checks are independent: arp_reply and icmp_reply judge a reply by 
 and the FCS is judged only by fcs; a frame that fails to decode is reported by manchester and the checks that
 need its octets then have nothing to judge for it.
 
+With link= or jabber=, eth_link_check.py (written later, from 14.2.1.6 and 14.2.1.7) adds its link and jabber
+checks, and a partner frame that the station's link integrity test may have kept from the MAC needs no reply, or
+may have one; without them nothing here changes.
+
 Template readings (14.3.1.2.1). A digital line has no amplitude, so a level is taken as a rectangle of the
 largest allowed peak, 2.8 V (14.3.1.2.1), which is the hardest case for the upper bounds:
   - TP_IDL (Figure 14-10, t = 0 at the last positive crossing): the lower bound is 585 mV from 0.25 to 2.25 BT
@@ -64,6 +68,8 @@ largest allowed peak, 2.8 V (14.3.1.2.1), which is the hardest case for the uppe
     2.207 BT.
 """
 import zlib
+
+import eth_link_check
 
 HI, LO, OFF = 1, -1, 0
 
@@ -462,9 +468,10 @@ def _classify(line, side, o, rep):
     return frames, pulses
 
 
-def check(tx, rx=None, mac=None, ip=None, t_end=None, t_start=None, **opts):
+def check(tx, rx=None, mac=None, ip=None, t_end=None, t_start=None, link=None, jabber=None, **opts):
     """Checks a record. tx and rx are lists of (time_ns, level). mac (6 bytes) and ip (4 bytes) are the chip's,
-    for the reply checks. t_start and t_end bound the record for link_period. opts override DEFAULTS."""
+    for the reply checks. t_start and t_end bound the record for link_period. link and jabber, if given, go to
+    eth_link_check.apply. opts override DEFAULTS."""
     o = dict(DEFAULTS)
     o.update(opts)
     T = o['bt']
@@ -479,6 +486,8 @@ def check(tx, rx=None, mac=None, ip=None, t_end=None, t_start=None, **opts):
     _check_pulses(rep, o)
     _check_period(rep, o, t_start, t_end)
     _check_gaps(rep, o)
+    if link is not None or jabber is not None:
+        eth_link_check.apply(rep, o, link, jabber, t_start, t_end)
     if mac is not None and ip is not None:
         _check_replies(rep, bytes(mac), bytes(ip), o)
     rep.findings.sort(key=lambda f: f.t)
@@ -701,7 +710,19 @@ def _check_gaps(rep, o):
 def _wants_reply(rf, mac, ip, o):
     """(kind, why). kind is 'arp' or 'icmp' if the partner's frame must be answered, 'icmp?' if a reply is
     allowed but not required (an echo request to the broadcast MAC: RFC 1122 3.2.2.6 lets a host discard it),
-    and None if nothing may answer it."""
+    and None if nothing may answer it. A frame that eth_link_check marked (rf.link) needs no reply if no allowed
+    MAU hands it up, and may have one ('arp?', 'icmp?') if only some do (14.2.1.7: rcv=disable)."""
+    kind, why = _wants_reply_frame(rf, mac, ip, o)
+    lk = getattr(rf, 'link', None)
+    if kind is None or lk in (None, 'up'):
+        return kind, why
+    if lk == 'down':
+        return None, 'kept from the MAC: received while the link was down (802.3 14.2.1.7, rcv=disable): ' + why
+    return (kind if kind.endswith('?') else kind + '?'), why + ', received while the link may have been down'
+
+
+def _wants_reply_frame(rf, mac, ip, o):
+    """_wants_reply from the frame's contents alone."""
     f = rf.fields
     octs = rf.octets
     if octs is None:
@@ -762,24 +783,33 @@ def _check_replies(rep, mac, ip, o):
             chk = 'icmp_reply' if 'ip' in rf.fields else 'arp_reply'
             rep.add(start, chk, None, 'needs no reply: ' + why)
             continue
-        base = 'arp' if kind == 'arp' else 'ip'
-        chk = 'arp_reply' if kind == 'arp' else 'icmp_reply'
+        kb = kind.rstrip('?')
+        base = 'arp' if kb == 'arp' else 'ip'
+        chk = 'arp_reply' if kb == 'arp' else 'icmp_reply'
         cand = [f for f in rep.tx_frames if f.start >= start and id(f) not in used and f.octets is not None
                 and base in f.fields]
-        named = [f for f in cand if _matches(kind.rstrip('?'), f, rf)]
-        others = [q for q, (k, _) in wants if q is not rf and k is not None and k.rstrip('?') == kind.rstrip('?')]
-        free = [f for f in cand if not any(_matches(kind.rstrip('?'), f, q) for q in others)]
-        pick = named[0] if named else (free[0] if free and kind != 'icmp?' else None)
+        named = [f for f in cand if _matches(kb, f, rf)]
+        others = [q for q, (k, _) in wants if q is not rf and k is not None and k.rstrip('?') == kb]
+        free = [f for f in cand if not any(_matches(kb, f, q) for q in others)]
+        pick = named[0] if named else (free[0] if free and not kind.endswith('?') else None)
         if pick is None:
-            rep.add(start, chk, None if kind == 'icmp?' else False, 'no reply to the %s' % why)
+            rep.add(start, chk, None if kind.endswith('?') else False, 'no reply to the %s' % why)
             continue
         used.add(id(pick))
-        if kind == 'arp':
+        if kb == 'arp':
             _judge_arp(pick, rf, mac, ip, rep)
         else:
             _judge_icmp(pick, rf, mac, ip, rep)
+    # a reply to a frame that the link integrity test kept from the MAC (eth_link_check) is reported as such
+    down = [(rf, _wants_reply_frame(rf, mac, ip, o)[0]) for rf in rep.rx_frames if getattr(rf, 'link', None) == 'down']
     for f in rep.tx_frames:
         if id(f) not in used and f.octets is not None:
+            hit = [rf for rf, k in down if k and ('arp' if k.rstrip('?') == 'arp' else 'ip') in f.fields and
+                   rf.start <= f.start and _matches(k.rstrip('?'), f, rf)]
+            if hit:
+                rep.add(f.start, 'link', False, 'answers the frame at %.1f us, received while the link was down, '
+                        'which never reaches the MAC (802.3 14.2.1.7: rcv=disable)' % (hit[0].start / 1e3))
+                continue
             chk = 'icmp_reply' if 'ip' in f.fields else 'arp_reply'
             rep.add(f.start, chk, False, 'a frame that answers no request: type %04X to %s' % (
                 f.fields.get('type', 0), f.fields.get('dst', b'').hex()))

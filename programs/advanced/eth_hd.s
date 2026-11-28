@@ -1,16 +1,26 @@
 ; Half-duplex 10BASE-T node at 50 MHz with CSMA/CD (IEEE 802.3 clause 4): answers ARP requests (RFC 826) for its own
 ; addresses, sends link test pulses (14.2.1.1), defers to the line, and on a collision jams, backs off and sends the
-; frame again, up to 16 attempts. Two threads, 512-word memory. It is eth_arp.s without the ICMP echo and with buffers
-; of 32 words: CSMA/CD takes about 120 words, which eth_arp.s doesn't have. The shift units do the line work as there
-; (section 5.9); this file says what differs. R and T may be any two threads; the host starts R at label rx and T at tx.
+; frame again, up to 16 attempts. Its MAU's link integrity test (14.2.1.7) and jabber function (14.2.1.6) are here
+; too. Two threads, 512-word memory. It is eth_arp.s without the ICMP echo and with buffers of 32 words: CSMA/CD takes
+; about 120 words, which eth_arp.s doesn't have. The shift units do the line work as there (section 5.9); this file
+; says what differs. R and T may be any two threads; the host starts R at label rx and T at tx.
 ;
 ; Board and mailbox: as eth_arp.s. DI = uo4, DE = uo5, RO = ui4; MCFG (M4) takes the MAC as three words, then the IP as
 ;   two, each word two octets in wire order. Counters the host can read with RDMEM while threads 2 and 3 stay stopped
-;   (section 9.4): NKEEP (word 7), NBAD (8), NOTHER (9), NBUSY (10) as eth_arp.s, and for the sending side NCOLL (17)
-;   collisions, NLATE (18) the late ones among them, counted twice as 5.2.2.1.10 asks, NXS (19) frames dropped after
-;   16 attempts (attemptLimit, 4.4.2).
+;   (section 9.4): NKEEP (word 7), NBAD (8), NOTHER (9) as eth_arp.s, NBUSY (10) frames taken unstored because both
+;   buffers were in use or the link was down, and for the sending side NCOLL (17) collisions, NLATE (18) the late ones
+;   among them, counted twice as 5.2.2.1.10 asks, NXS (19) frames dropped after 16 attempts (attemptLimit, 4.4.2) or
+;   cut by the jabber function. LST (13) is the link state, 4 in LINK TEST PASS: the link indicator 14.2.1.7
+;   recommends.
 ;
 ; R: as eth_arp.s, with BUFW 32. A collision fragment from the partner (a preamble, the SFD and a jam) is a runt: NBAD.
+;   At a frame's first word R reads the link state LST with RELEASED, and takes the frame unstored if the link is down
+;   (14.2.1.7: rcv=disable): the state there is the state at the frame's start, because T stores LST only after
+;   EXTEND, which waits for the end of the frame that brought the link back. The buffer choice before a frame's first
+;   store takes 19 slots with that store, against 20 before the second word. R doesn't test a frame's last word for
+;   whole octets: REOP's byte end leaves 0 or 8 bits in it (5.9.7), and R's configuration ends a reception no other
+;   way. Every reply is 60 octets, so T doesn't keep a frame's length (R5 only says a reply waits), and the buffer's
+;   first word is unused.
 ; T: link pulses, then an ARP reply for each request R hands over.
 ;   Deference (4.2.3.2.1, 4.2.8 Deference): 64 BT (320 cycles) of RO high, which any low restarts, then 32 BT that
 ;   nothing restarts, then the frame. 4.2.3.2.1 lets the timer restart only in the first two thirds of the gap.
@@ -19,14 +29,17 @@
 ;   RCNT 1, so it delivers a word, status bit 9, three decoded bits into a preamble, about 5 BT after the partner's
 ;   first level on the pair (14.2.1.4 allows the MAU 9 BT). A link test pulse decodes as at most 1, 0, so it never
 ;   counts (14.2.1.7). `sstop rx` before each attempt clears the word; status bit 11 would not do, since only the next
-;   reception clears RXSYN. T polls `sstat` at least every 8 slots while it feeds the frame's words, every 11 around
-;   the last one, and every 5 while it waits for the end; it queues a word only while bit 6 reads 0, so `txw` never
+;   reception clears RXSYN. T polls `sstat` at least every 8 slots while it feeds the frame's words, the last one
+;   included, and every 5 while it waits for the end; it queues a word only while bit 6 reads 0, so `txw` never
 ;   blocks.
 ;   The jam (4.2.3.2.4): the bits sent after T sees the collision. T puts 16 bits behind whatever is in flight at once,
-;   writes CODING with CMODE and CTX 0, so no FCS follows (a word of kind fcs then appends nothing, and the rest of an
-;   append under way goes out as CXOR, section 10 items 17 and 19), and adds octets of no kind until the send ends 32
-;   BT or more after that moment, by underrun, with TP_IDL. A collision in the preamble gives the whole header and
-;   then 32 jam bits, as PhysicalSignalEncap does (4.2.8). T counts cycles: the start commit is cycle E (D), a bit is
+;   writes CODING with CMODE 0 and CTX and CXOR as they were (0x027F, which R5 holds while a reply waits), so a word of
+;   kind fcs whose append hasn't begun appends nothing, and an append under way goes on unchanged: a change of CTX or
+;   CXOR would take effect from the next cycle (section 10 item 17), which may fall between the two symbols of an
+;   appended bit and split it, a Manchester code violation. Then T adds octets of no kind until the send ends 32 BT or
+;   more after that moment, by underrun, with TP_IDL; after a whole FCS they leave the octets after the SFD ending in
+;   an FCS that doesn't check, but for a 2^-32 chance. A collision in the preamble gives the whole header and then 32
+;   jam bits, as PhysicalSignalEncap does (4.2.8). T counts cycles: the start commit is cycle E (D), a bit is
 ;   5 cycles, a 16-bit word 80, an append 160; R6 holds where the queued bits end, less 6, and R7 the header's end.
 ;   No word is marked last, so a send ends by underrun even when nothing collides.
 ;   Backoff (4.2.3.2.5, 4.2.8 BackOff): before attempt n + 1, r x 512 BT, r drawn from 0 to 2^min(n, 10) - 1 by a
@@ -34,6 +47,36 @@
 ;   stations draw apart (the unit's LFSR starts from all ones, the same on every chip). T waits the slot times one
 ;   at a time in tloop, so link pulses go on; then it defers again. A late collision, after 512 BT, is jammed and
 ;   retried the same way (10 Mb/s may retry, 4.2.8).
+;   Link integrity (14.2.1.7, Figure 14-6): between sends the receive half keeps hunting, and T polls it in tloop. A
+;   link test pulse starts a reception (status bit 12) that gives no word; RD_input gives a word (bit 9), which T
+;   drains so that the half hunts on. LST holds the state: 4 in LINK TEST PASS, 2 and 3 in LINK TEST FAIL with a
+;   count of 0 and 1, 6 in LINK TEST FAIL EXTEND. One count of TB wraps, LW, is both timers, restarted at every
+;   change, so link_loss and link_test_max are each 67 wraps, 86.5 to 87.8 ms (50 to 150 and 25 to 150 ms), longer
+;   than the longest backoff, 52.4 ms; link_test_min is 4 wraps, 3.9 to 5.2 ms (2 to 7 ms), so a pulse with LW 64 or
+;   more is early. lc_max is 2, and the node powers on in LINK TEST PASS. In LINK TEST PASS an early pulse is
+;   ignored; in LINK TEST FAIL it sets the count to 0, and LW running out sets it to 0 too. EXTEND has no timer:
+;   RD activity there starts LW again, so a frame that arrives as link_test_max runs out can't fall back into LINK
+;   TEST FAIL (Figure 14-6 leaves EXTEND only for LINK TEST PASS). Once a loop, EXTEND waits
+;   up to 12 cycles for RO to stay high, which no part of a frame does (a level lasts at most a bit time, with 802.3's
+;   jitter under 7 cycles) and which TP_IDL ends: RD idle (14.3.1.3.3). A loop in EXTEND takes about 30 slots, so LINK
+;   TEST PASS comes 27 to 34 BT after the frame's last rise, before a frame 47 BT after it (4.4.2 note 1) begins. DO
+;   is idle then, because while the link is down T sends no frame (xmit=disable: a reply waits, and is sent once the
+;   link is back), takes none and lets the backoff wait; link test pulses go on in every state (TD_idle is TP_IDL,
+;   14.2.2.2). A partner's frame can also look like a pulse to a poll that comes before its word, which is why the
+;   pulse count leaves LINK TEST FAIL through EXTEND too. A limit: the receive half finds RD_input only where it
+;   decodes 1, 0, 1, which every frame's preamble holds, so a burst with no such run (no preamble) counts as a link
+;   test pulse, where 14.3.1.3.2 makes it RD activity, and a transmission with none after its preamble that outlasts
+;   link_loss reads as silence once its preamble is past. Collisions are seen only while T sends, so only in LINK
+;   TEST PASS. Between T's samples of TB there are under 7,000 cycles (an attempt after a backoff slot, with a late
+;   collision), so it misses no wrap; the timers stand still only while a send runs on to the guard.
+;   Jabber (14.2.1.6, Figure 14-5): the loops that feed a send count its words in R3 from 0, so a send fed past 65,536
+;   words, 52.4 ms of jam octets to 104.9 ms of 16-bit words (xmit_max, 20 to 150 ms), stops being fed and ends by
+;   underrun with its TP_IDL. The frame is dropped and counted in NXS, as a MAC drops one whose every attempt collides
+;   while the MAU holds CS0 (14.2.1.6 b: 16 backoffs end within 366 ms, inside the wait below), and BOFF holds T for
+;   9,766 slot times, 500.0 ms (unjab, 0.25 to 0.75 s): it sends no frame and takes none, while link test pulses and
+;   the link integrity test go on. The wait counts down only in LINK TEST PASS, as a backoff does, so a link that fails
+;   during it makes it last longer than 0.75 s; nothing is sent while the link is down anyway. A reply is 576 bits
+;   and a jam ends within 58 BT of its collision, so only a broken loop reaches the guard.
 .equ DI uo4
 .equ DE uo5
 .equ RO ui4
@@ -41,28 +84,41 @@
 .equ MCFG 4
 .equ BUFW 32                ; full words a buffer keeps: 64 octets, FCS included
 .equ RXOPTV 0x0E00          ; RACQ for the preamble, RGAIN 3, RFRAC 0, CSKIP 0
+.equ LINKW 67               ; TB wraps of link_loss and link_test_max (14.2.1.7)
+.equ QUIET 12               ; cycles of RO high that end EXTEND
+.equ UNJAB 9766             ; slot times of the jabber's unjab wait
 ; data, at addresses an ldi reaches
 .equ CFG 0                  ; MAC (3 words), then IP (2 words), from the host
 .equ CIP 3
-.equ HANDED 5               ; frames R has handed to T; written by R only
-.equ RELEASED 6             ; frames T has finished with; written by T only
+.equ NATT 5                 ; attempts on the frame T is sending
+.equ BOFF 6                 ; slot times of backoff, or of the jabber's unjab wait, left
 .equ NKEEP 7
 .equ NBAD 8
 .equ NOTHER 9
 .equ NBUSY 10
-.equ TBP 11                 ; T's last sample of TB, to see it wrap
-.equ ARPT 12                ; EtherType, hrd, pro, hln and pln, op of an ARP request, as received words
+.equ HANDED 11              ; frames R has handed to T; written by R only
+.equ RELEASED 12            ; frames T has finished with; written by T only
+.equ LST 13                 ; the link state, written by T only
+.equ LW 14                  ; TB wraps left on the link timer
+.equ TBP 15                 ; T's last sample of TB, to see it wrap
+.equ SEED 16                ; the generator's state
 .equ NCOLL 17
 .equ NLATE 18
 .equ NXS 19
-.equ NATT 20                ; attempts on the frame T is sending
-.equ BOFF 21                ; slot times of backoff left
-.equ SEED 22                ; the generator's state
-.equ BUF0 23                ; each buffer: its word count, then the frame from word 0
+.equ ARPT 20                ; EtherType, hrd, pro, hln and pln, op of an ARP request, as received words
+.equ BUF0 25                ; each buffer: a word, then the frame from word 0
 .equ BUF1 BUF0 + BUFW + 1
-        .org  HANDED
+        .org  NATT
         .data 0
         .data 0
+        .data 0
+        .data 0
+        .data 0
+        .data 0
+        .data 0
+        .data 0
+        .data 4
+        .data LINKW
         .data 0
         .data 0
         .data 0
@@ -73,17 +129,11 @@
         .data 0x0008
         .data 0x0406
         .data 0x0100
-        .data 0
-        .data 0
-        .data 0
-        .data 0
-        .data 0
-        .data 0
         .org  BUF1 + BUFW + 1
 ; ------------------------------------------------------------------------------------------------- R: receive
 rx:     sstop txrx
         call  rxset          ; Manchester decoder on half cycles, RINV, hunt for RO falling, 5 cycles a bit
-        li    R0, 0x8000
+        lui   R0, 0x80       ; 0x8000 (rxset leaves R0's low byte 0)
         scfg  R0, RXCNT      ; a 16-bit sync pattern, no bit limit, no timeout (RXEND 0 from reset)
         li    R0, 0xD555
         scfg  R0, RXSYNC     ; the last preamble octet, then the SFD
@@ -105,11 +155,13 @@ rcfg:   recv  R0, MCFG       ; MAC and IP from the host
 rframe: rxw   R0             ; a frame's first word
         jt    rbad           ; it ended within 16 bits of its SFD
         ldi   R1, RELEASED
-        ld    R3, R1
+        ldp   R3, R1
+        ld    R6, R1         ; LST: 2 or 3 while the link is down
         cp    R4, R5
         sub   R4, R3         ; frames T still holds: 0, 1 or 2
+        or    R4, R6
         bt    R4, 1
-        jt    rbusy
+        jt    rbusy          ; both buffers in use, or the link down
         ldi   R6, BUF0 + 1
         bt    R5, 0
         jf    r1
@@ -123,16 +175,12 @@ r2:     stp   R0, R1
 r3:     rxw   R0             ; the buffer is full: take the rest unstored
         jf    r3
         ldi   R2, 1
-rend:   sstat R3             ; R3[4:0]: bits in the last word. T: a word was lost
+rend:   sstat R3             ; T: a word was lost
         jt    rbad
         srd   R4, end
         bt    R4, 0          ; end flag 0: the FCS is right
         jf    rbad
-        andi  R3, 0x17
-        cmpi  R3, 0          ; a last word of 0 or 8 bits: whole octets
-        jf    rbad
-        ldi   R4, BUFW - 30
-        lt    R2, R4         ; at least 32 words stored: 64 octets with the FCS
+        cmpi  R2, 1          ; 32 words stored: 64 octets with the FCS (R2 is BUFW + 1 less the words stored)
         jf    rbad
         cp    R1, R6
         ldp   R0, R1
@@ -151,12 +199,7 @@ rda:    ldp   R0, R1
         cmp   R0, R7
         jf    rother
         djnz  R4, rda
-rkeep:  ldi   R3, BUFW + 1
-        sub   R3, R2         ; words stored
-        cp    R1, R6
-        subi  R1, 1
-        st    R3, R1         ; in the buffer's first word
-        addi  R5, 1
+rkeep:  addi  R5, 1
         ldi   R1, HANDED
         st    R5, R1         ; T takes the frame from here on
         ldi   R1, NKEEP
@@ -165,12 +208,10 @@ rbad:   ldi   R1, NBAD
         goto  rcnt
 rother: ldi   R1, NOTHER
         goto  rcnt
-rbusy:  rxw   R0             ; both buffers in use: take the frame unstored
+rbusy:  rxw   R0             ; take the frame unstored
         jf    rbusy
         ldi   R1, NBUSY
-rcnt:   ld    R0, R1
-        addi  R0, 1
-        st    R0, R1
+rcnt:   call  inc
         goto  rframe
 ; ------------------------------------------------------------------------------------------------- T: send
 tx:     sstop txrx
@@ -181,7 +222,7 @@ tx:     sstop txrx
         ldi   R0, 2
         scfg  R0, TXPER
         call  poly
-        call  rxset          ; the receive half watches RO for a collision, with R's decoder
+        call  rxset          ; the receive half watches RO, with R's decoder
         li    R0, 0x1801
         scfg  R0, RXCNT      ; SYNCLEN 3, RCNT 1: a word one bit after the pattern
         lui   R0, 0xA0
@@ -190,6 +231,7 @@ tx:     sstop txrx
         pcfg  DE, PP
         put   DI, 1
         put   DE, 0
+        sgo   rx             ; the receive half hunts from this commit on
         now
         sstop tx             ; outputs at their idle levels: A 1, B 0
         smap  DI, A
@@ -198,27 +240,66 @@ tx:     sstop txrx
         ldi   R5, 0          ; octets of a reply waiting to go, 0 for none
         call  pulse          ; the first link pulse at once
 tloop:  rdtb  R2
-        ldi   R1, TBP
+        ldi   R1, LST
+        ldp   R4, R1         ; R4: LST
+        ldp   R6, R1         ; R6: LW
         ld    R0, R1
         st    R2, R1
         lt    R2, R0         ; TB went down: it wrapped
-        jf    t1
-        djnz  R3, t1         ; R3: wraps left before the next pulse
+        jf    t0
+        djnz  R6, tw
+        ldi   R4, 2          ; link_loss or link_test_max done: LINK TEST FAIL RESET, then LINK TEST FAIL, count 0
+        ldi   R6, LINKW
+tw:     djnz  R3, t0         ; R3: wraps left before the next pulse
         call  pulse
-t1:     cmpi  R5, 0
-        jt    t2
+t0:     sstat R0
+        bt    R0, 9
+        jt    tfr            ; RD_input
+        bt    R0, 12
+        jf    t0e            ; nothing on RD
+        bt    R6, 6
+        jf    tpa            ; link_test_min done
+        bt    R4, 2
+        jt    t0e            ; LINK TEST PASS ignores an early pulse, and EXTEND every pulse
+        ldi   R4, 1          ; LINK TEST FAIL RESET: the count is 0 after the COUNT below
+tpa:    bt    R4, 2
+        jt    t0r            ; LINK TEST PASS (or EXTEND): both timers start again
+        addi  R4, 1          ; LINK TEST FAIL COUNT
+        cmpi  R4, 4
+        jt    tx6            ; link_count = lc_max: EXTEND
+        goto  t0r
+tfr:    rxw   R2             ; drained, so the half hunts on
+        cmpi  R4, 4
+        jt    t0r
+tx6:    ldi   R4, 6          ; LINK TEST FAIL EXTEND
+t0e:    cmpi  R4, 6
+        jf    t0x
+        ldi   R2, QUIET
+        now
+        until RO, 0, R2      ; RD and DO idle (T sends nothing in EXTEND): LINK TEST PASS
+        jt    t0r            ; RD active: EXTEND goes on, and LW starts again, so it never runs out in EXTEND
+        ldi   R4, 4
+t0r:    ldi   R6, LINKW      ; both timers start again
+t0x:    subi  R1, 2
+        stp   R4, R1
+        st    R6, R1
+        cmpi  R4, 4
+        jf    tloop          ; the link is down: nothing is sent (xmit=disable), no frame taken, the backoff waits
         ldi   R1, BOFF
         ld    R0, R1
         cmpi  R0, 0
-        jt    t3
+        jt    t1
         subi  R0, 1
         st    R0, R1
-        tick  2560           ; one slotTime of backoff, 512 BT (4.4.2); tloop keeps the link pulses going meanwhile
+        tick  2560           ; one slotTime of backoff (512 BT, 4.4.2), or of the unjab wait; tloop goes on meanwhile
         goto  tloop
-t3:     li    R2, 320
+t1:     cmpi  R5, 0
+        jt    t2
+        li    R2, 320
         now
         until RO, 0, R2      ; T 1: the line was active in the first 64 BT of the gap
         jt    tloop
+        ldi   R3, 0          ; the jabber's word count
         li    R0, 0x02FF
         scfg  R0, CODING     ; CRC-32 on the send half, appended complemented (a collision turns it off)
         li    R0, 0x800F
@@ -240,10 +321,7 @@ t3:     li    R2, 320
         addi  R7, 161        ; R7 = E + 321: the header's 64 bits end here
         cp    R6, R7
         subi  R6, 6          ; R6: where the queued bits end, less 6
-        cp    R2, R5
-        addi  R2, 1
-        clrt
-        shr16 R2, -, -       ; the reply's words, the last one included
+        ldi   R2, 30         ; the reply's 30 words, the last one included (every reply is 60 octets)
         ldp   R0, R1
 sp:     sstat R4
         bt    R4, 9
@@ -251,13 +329,8 @@ sp:     sstat R4
         bt    R4, 6
         jt    sp             ; until the buffer is empty
         djnz  R2, s3
-        bt    R5, 0
-        jt    s4
         txw   R0, 16, fcs
         addi  R6, 240        ; 16 bits and the FCS
-        goto  s5
-s4:     txw   R0, 8, fcs
-        addi  R6, 200
 s5:     sstat R4
         bt    R4, 9
         jt    coll
@@ -270,11 +343,12 @@ s3:     txw   R0, 16, crc
         bt    R4, 9
         jt    coll
         ldp   R0, R1
-        goto  sp
+        djnz  R3, sp         ; the jabber's guard
+        goto  jab
 ; a collision, seen at cycle c
 coll:   rdtb  R1             ; c
         txw   R0, 16         ; 16 bits behind whatever is in flight, at once, so the send never runs dry
-        scfg  R5, CODING     ; CMODE 0 and CTX 0, as any count under 128 gives: no FCS from here on
+        scfg  R5, CODING     ; CMODE 0, CTX and CXOR kept (R5 is 0x027F): a word of kind fcs appends nothing
         cp    R4, R6
         sub   R4, R1         ; R6 - c
         bt    R4, 15
@@ -285,7 +359,7 @@ coll:   rdtb  R1             ; c
         jf    c2             ; a data word was next
         ldi   R0, 164
         lt    R4, R0
-        jt    c1             ; the append had begun: the rest of it goes out as CXOR
+        jt    c1             ; the append had begun: it goes out whole, no bit of it split
         subi  R6, 160        ; the append won't happen
 c1:     cp    R4, R6
         sub   R4, R1
@@ -306,7 +380,24 @@ jl:     cp    R4, R6
         jf    jw
         txw   R0, 8          ; a jam octet
         addi  R6, 40
-        goto  jl
+        djnz  R3, jl         ; the jabber's guard
+; the guard ran out: the send is no longer fed, so it underruns with its TP_IDL. The frame is dropped
+jab:    li    R0, UNJAB
+        ldi   R1, BOFF
+        st    R0, R1         ; the unjab wait, in slot times
+        ldi   R1, NXS
+        call  inc
+        now                  ; the wait counts from here
+sover:  sstat R4
+        bt    R4, 5
+        jt    sover          ; until the tail ends
+        sstop tx             ; the 16 bits put behind it, which never went out
+sok:    ldi   R3, 12         ; the next pulse 12 wraps after the frame
+tdrop:  ldi   R5, 0          ; no reply waiting (the subroutines count down R5)
+        ldi   R1, NATT
+        st    R5, R1         ; and no attempts on the next one yet
+        call  tfree
+        goto  tloop
 jw:     sstat R4
         bt    R4, 5
         jt    jw             ; the jam and its TP_IDL are over
@@ -340,25 +431,14 @@ bm1:    call  rand
 txs:    ldi   R1, NXS
         call  inc
         goto  tdrop
-sover:  sstat R4
-        bt    R4, 5
-        jt    sover          ; until the tail ends
-        sstop tx             ; the 16 bits put behind it, which never went out
-sok:    ldi   R3, 12         ; the next pulse 12 wraps after the frame
-tdrop:  ldi   R5, 0          ; no reply waiting (the subroutines count down R5)
-        ldi   R1, NATT
-        st    R5, R1         ; and no attempts on the next one yet
-        call  tfree
-        goto  tloop
 t2:     ldi   R1, HANDED
-        ld    R0, R1
-        ldi   R1, RELEASED
+        ldp   R0, R1
         ld    R1, R1
         cmp   R0, R1
         jt    tloop
 ; ------------------------------------------------------------------------------------------------- T: a frame
 ; an ARP request for our IP: the reply in place
-tframe: call  tbuf           ; R1 = the buffer's first word, R6 = words stored
+tframe: call  tbuf           ; R1 = the buffer's first word
         cp    R2, R1
         addi  R2, 7
         ldi   R4, ARPT
@@ -393,7 +473,7 @@ tz:     stp   R0, R2         ; pad of zeros to 60 octets
         addi  R2, 4
         li    R0, 0x0200
         st    R0, R2         ; op := reply
-        ldi   R5, 60
+        li    R5, 0x027F     ; a reply waits; R5 is also the CODING a collision writes
         goto  tloop
 ; ------------------------------------------------------------------------------------------------- subroutines
 rxset:  li    R0, 0x002B | (RON << 8)
@@ -415,15 +495,14 @@ pulse:  li    R0, 0x8005
         now
         ldi   R3, 12
         ret
-; R1 = the first word of the buffer RELEASED names, R6 = its contents
+; R1 = the first word of the buffer RELEASED names
 tbuf:   ldi   R1, RELEASED
         ld    R0, R1
         ldi   R1, BUF0
         bt    R0, 0
         jf    tb1
         ldi   R1, BUF1
-tb1:    ld    R6, R1
-        ret
+tb1:    ret
 tfree:  ldi   R1, RELEASED
 inc:    ld    R0, R1
         addi  R0, 1

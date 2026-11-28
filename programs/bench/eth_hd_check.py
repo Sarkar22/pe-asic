@@ -50,10 +50,14 @@ replies only from whole frames):
              floor(delay / 512 BT), with 0 <= r < 2^min(n, 10) (4.2.3.2.5, 4.2.8 BackOff; a station may wait longer,
              never less)
   attempts   no frame has more than attemptLimit (16) attempts (4.2.8 TransmitLinkMgmt, 4.4.2)
+
+With link= or jabber=, eth_link_check.py adds its link and jabber checks (14.2.1.6, 14.2.1.7), every attempt counting
+as a transmission, as eth_check.check does.
 """
 import zlib
 
 import eth_check as E
+import eth_link_check
 
 BT = 100.0
 HDR = 64 * BT               # 4.2.8 headerSize: preamble and SFD
@@ -123,7 +127,7 @@ def _same_frame(a, b):
     return sa[:n] == sb[:n]
 
 
-def check(tx, rx, mac=None, ip=None, t_end=None, t_start=None, **opts):
+def check(tx, rx, mac=None, ip=None, t_end=None, t_start=None, link=None, jabber=None, **opts):
     o = dict(E.DEFAULTS)
     o.update(opts)
     rep = Report()
@@ -160,6 +164,8 @@ def check(tx, rx, mac=None, ip=None, t_end=None, t_start=None, **opts):
     _check_deference(rep)
     _check_collisions(rep, o)
     _check_attempts(rep)
+    if link is not None or jabber is not None:
+        eth_link_check.apply(rep, o, link, jabber, t_start, t_end)
     if mac is not None and ip is not None:
         allf = rep.tx_frames
         rep.tx_frames = [f for f in allf if f.whole]
