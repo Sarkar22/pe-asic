@@ -19,6 +19,9 @@ jobs:
           python-version: '3.12'
 
       # Python standard library only: nothing to install
+      - name: Check the demo board's host library
+        run: python3 host/test_host.py
+
       - name: Run every program on the simulator
         run: python3 programs/check.py
 

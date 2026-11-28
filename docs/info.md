@@ -28,6 +28,8 @@ Run the clock at 50 MHz, with a duty cycle close to 50%: the half-cycle timing t
 
 `test/test.py` does all of this at the pins, including a UART frame sent by a program, and runs the 10BASE-T, USB and CAN programs end to end. `sim/` has an assembler and a simulator to try a program first.
 
+`host/` is a host for the demo board's RP2350, in MicroPython: it selects the project, makes the 50 MHz clock with the PWM from a 100 MHz system clock (10 ns high and 10 ns low), holds reset, drives the link on SPI0 at 5 MHz with CS on a plain GPIO, and runs a first power-on test of the memory, the threads, the mailbox, the `uio` pads and the registers. `host/README.md` says how to copy it to the board and run it.
+
 ## External hardware
 
 None for a loopback test: a `uio` input reads the pad even while the chip drives it. The demo board's RP2350 can act as the host on SPI0; drive CS from a GPIO, not from the SPI block's own chip select. Lines that must stay recessive through reset belong on a `uio` pin in open-drain mode with an outside pull-up. Everything else depends on the protocol: low-speed USB needs D+ on `io0`, D- on `io1` and a 1.5 kΩ pull-up on D-; CAN needs a transceiver: for the node on a shift unit (`can_unit.s`), TXD on `io0` in open drain and RXD on `ui6`; 10BASE-T, on the bench's board that `eth_arp.s`'s header draws, needs a line driver and receiver with an enable, such as the ISL3176E, and 1:1 magnetics; for 802.3's transmit template, shift outputs A and B instead drive TD+ and TD- through two buffered legs and the equalizing network of ISA section 7.3, with the transmit settings that section gives.

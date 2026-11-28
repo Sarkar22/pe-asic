@@ -8,6 +8,7 @@ A Tiny Tapeout design for IHP SG13CMOS5L that emulates digital protocols after f
 - [Instruction set: the full specification](docs/ISA.md)
 - [Simulator and assembler: run a program in Python](sim/README.md)
 - [Protocol programs: 62 programs and the benches that check them](programs/README.md)
+- [Host for the demo board: the link from MicroPython, and a first power-on test](host/README.md)
 - [Protocols: what the chip speaks, and how](#protocols)
 - [Architecture of the RTL and how to run the tests](docs/ARCHITECTURE.md)
 - [Status: chip numbers, tests and open items](docs/STATUS.md)
@@ -53,7 +54,7 @@ The other seven programs are not protocols: `standard/crc8.s`, `standard/crc16.s
 
 ## Tests
 
-`cd test && make` runs the 49 cocotb tests at the pins under Icarus. It needs cocotb 2.0.1. `make GATES=yes` runs them on a netlist in `test/gate_level_netlist.v`, with the RTL core beside it for a pin-by-pin compare. [test/README.md](test/README.md) has the details.
+`cd test && make` runs the 54 cocotb tests at the pins under Icarus, five of them with the demo board's host library (`host/`) driving the link. It needs cocotb 2.0.1. `make GATES=yes` runs them on a netlist in `test/gate_level_netlist.v`, with the RTL core beside it for a pin-by-pin compare. [test/README.md](test/README.md) has the details. `python3 host/test_host.py` runs the host library's own tests in CPython.
 
 ## What is Tiny Tapeout?
 

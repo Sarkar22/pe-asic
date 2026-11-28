@@ -9,6 +9,7 @@ import zlib
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.task import bridge, resume
 from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer
 from cocotb.utils import get_sim_time
 
@@ -3170,3 +3171,256 @@ async def test_netlist_matches_rtl(dut):
     pins.cancel()
     assert int(dut.mismatches.value) == 0, f"{int(dut.mismatches.value)} cycles differ"
     assert toggles[0] >= MIN_TOGGLES, f"only {toggles[0]} output changes: stimulus too weak"
+
+
+# ---- host/: the demo board's host library, unchanged, at the pins ----------------------------------------------
+# pehost.py is plain blocking Python, the same file the board runs. PinLink is its transport here: cocotb's resume
+# turns PinLink's coroutines into blocking calls, and bridge runs the library in its own thread, so simulated time
+# moves only inside those calls. A profile gives the timing of one kind of host, in steps of `quantum` ps from a
+# start time whose offset from a rising clock edge is one of `offsets`: so no edge ever lands on a clock edge.
+#   phases: (high, low) SCK pairs in quanta, one drawn per transaction; lead: CS fall to the first rising SCK;
+#   lag: last falling SCK to CS rise; gap: CS high before the next transaction; byte_gap: extra SCK low between
+#   bytes, one drawn per byte; sample: MISO is read this many ps after each rising SCK, before it if negative.
+# PE_HOST_DIR runs these tests on another copy of host/.
+HOST_DIR = os.environ.get('PE_HOST_DIR') or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'host')
+
+# The demo board's RP2350 as board.py sets it up: SCK 5 MHz from a 100 MHz clock, the PLL the chip's 50 MHz clock
+# comes from, so its edges keep one offset from the chip's; CS a GPIO on the same 10 ns grid; at least one SCK
+# period from CS to the first rising SCK, and 1 us of CS high (board.py's sleep_us); the SPI block's longer SCK low
+# between bytes, now and then a byte late. MicroPython's own time between calls only lengthens these gaps, and the
+# link has no timeout, so they are kept short here.
+RP2350 = dict(name='RP2350 at 5 MHz', quantum=10_000, offsets=(3_000, 7_000, 13_000, 17_000), phases=((10, 10),),
+              lead=(20, 60), lag=(5, 30), gap=(100, 200), byte_gap=(30,) * 7 + (100,), sample=0)
+# MicroPython's default peripheral clock, 48 MHz from the USB PLL: SCK 4 MHz, 125 ns phases, unrelated to the
+# chip's clock, so each transaction lands on a new offset.
+RP2350_48 = dict(name='RP2350 at 4 MHz from 48 MHz', quantum=5_000, offsets=tuple(o * 1000 for o in range(1, 20) if o % 5),
+                 phases=((25, 25),), lead=(50, 120), lag=(10, 60), gap=(200, 400), byte_gap=(75,) * 7 + (200,), sample=0)
+# Section 9.1's limits, on whole cycles like Host: SCK at clk/6 with phases of 2 and 4 cycles, CS high for exactly
+# 3 cycles, CS falling 1 cycle before the first rising SCK, and no gap between bytes.
+LIMITS = dict(name='section 9.1 limits', quantum=20_000, offsets=(5_000,), phases=((2, 4), (4, 2), (3, 3)),
+              lead=(1, 1), lag=(2, 2), gap=(3, 3), byte_gap=(0,), sample=0)
+
+
+def host_modules():
+    if HOST_DIR not in sys.path:
+        sys.path.insert(0, HOST_DIR)
+    sys.dont_write_bytecode = True      # leave no cache in host/
+    import bringup
+    import pehost
+    return pehost, bringup
+
+
+class PinLink:
+    """pehost's transport at the pins: ui0 CS, ui1 SCK, ui2 MOSI, uo3 MISO, timed by a profile (above)."""
+
+    def __init__(self, dut, profile, seed):
+        self.dut, self.p, self.rng = dut, profile, random.Random(seed)
+        self.free = 0                   # ps: CS has been high long enough after this time
+        self.count = 0
+        self.xfer = resume(self._xfer)
+        self.pause_us = resume(self._pause_us)
+        self.probe = resume(self._probe)
+        dut.ui_in.value = 1 << CS
+
+    async def _pause_us(self, us):
+        await Timer(us, unit='us')
+
+    async def _probe(self):
+        """(uo, uio) as the board's own GPIOs would read them: uo3 is MISO."""
+        return int(self.dut.uo_out.value), int(self.dut.uio_out.value) & int(self.dut.uio_oe.value)
+
+    async def _xfer(self, out):
+        p, rng, q = self.p, self.rng, self.p['quantum']
+        now = get_sim_time('ps')
+        t = max(now, self.free)                                # on the grid already, CS falls right at `free`
+        t0 = t + (rng.choice(p['offsets']) - t) % 20_000       # CS falls here
+        high, low = rng.choice(p['phases'])
+        ev = [(t0, 0, CS, 0)]
+        r = t0 + q * rng.randint(*p['lead'])                   # the first rising SCK
+        n = 8 * len(out)
+        for j in range(n):
+            bit = out[j // 8] >> (7 - j % 8) & 1
+            # a bit goes out on MOSI a low phase before its rising SCK, at the falling SCK before it; the first
+            # half a period before, as the SPI block starts a frame (RP2350 datasheet 12.3.4.10), but not before CS
+            ev.append((max(t0, r - q * low), 1, MOSI, bit))
+            ev.append((r, 2, SCK, 1))
+            ev.append((r + p['sample'], 3 if p['sample'] >= 0 else -1, None, j))
+            f = r + q * high
+            ev.append((f, 0, SCK, 0))
+            r = f + q * low
+            if j % 8 == 7 and j + 1 < n:
+                r += q * rng.choice(p['byte_gap'])
+        cs_rise = f + q * rng.randint(*p['lag'])
+        ev.append((cs_rise, 0, CS, 1))
+        ev.append((cs_rise, 1, MOSI, 0))
+        self.free = cs_rise + q * rng.randint(*p['gap'])
+        got = [0] * n
+        level = {CS: 0, SCK: 0, MOSI: 0}
+        for when, _, _, sig, v in sorted((e[0], e[1], k, e[2], e[3]) for k, e in enumerate(ev)):
+            if when > now:
+                await Timer(when - now, unit='ps')
+                now = when
+            if sig is None:
+                got[v] = int(self.dut.uo_out.value) >> MISO & 1
+            else:
+                level[sig] = v
+                self.dut.ui_in.value = level[CS] << CS | level[SCK] << SCK | level[MOSI] << MOSI
+        self.count += 1
+        return bytes(sum(got[8 * k + i] << (7 - i) for i in range(8)) for k in range(len(out)))
+
+
+def netlist_compare(dut):
+    """At gate level, tb.v compares every output pin of the netlist with the RTL core beside it, in both halves of every
+    cycle. Turns that on and returns a check of the half cycles that differ from now on."""
+    if os.environ.get("GATES") != "yes":
+        return lambda: None
+    dut.compare.value = 1
+    before = int(dut.mismatches.value)
+
+    def check():
+        n = int(dut.mismatches.value) - before
+        assert n == 0, f"{n} half cycles where the netlist's pins differ from the RTL's"
+    return check
+
+
+async def uio_pads(dut):
+    """The demo board's uio lines: a pad the chip drives reads its own drive (section 5.2), and one it doesn't reads
+    0 through the RP2350's pull-down. Updated at both edges of tick, so in both halves of every cycle."""
+    while True:
+        dut.uio_in.value = int(dut.uio_out.value) & int(dut.uio_oe.value)
+        await dut.tick.value_change
+
+
+async def host_bringup(dut, profile, seed, memory):
+    pehost, bringup = host_modules()
+    await start(dut)
+    same = netlist_compare(dut)
+    cocotb.start_soon(uio_pads(dut))
+    link = PinLink(dut, profile, seed)
+    host = pehost.Host(link)
+    with open(os.path.join(HOST_DIR, 'bringup.img')) as fh:
+        img = pehost.read_image(fh)
+    lines = []
+    t = get_sim_time('ns')
+    try:
+        rep = await bridge(bringup.run)(host, img, probe=link.probe, log=lines.append, memory=memory)
+    finally:
+        for line in lines:                      # logged here, not from the library's thread
+            dut._log.info(line)
+    dut._log.info(f"{profile['name']}: {link.count} transactions, {(get_sim_time('ns') - t) / 20:.0f} cycles")
+    assert not rep.failed(), f"{len(rep.failed())} bring-up checks failed: {rep.failed()}"
+    want = 24 if memory else 22                 # the memory test is two checks
+    assert len(rep.rows) == want, f"{len(rep.rows)} checks ran, want {want}"
+    same()
+
+
+@cocotb.test()
+async def test_host_bringup(dut):
+    """host/bringup.py through host/pehost.py, unchanged, with the demo board's timing (board.py): the first
+    power-on test, threads, mailbox, uio pads and registers, read as the board reads them. The whole-memory part
+    runs in the next test, at clk/6, to keep the time down."""
+    await host_bringup(dut, RP2350, 1, memory=False)
+
+
+@cocotb.test()
+async def test_host_bringup_at_the_limits(dut):
+    """The whole bring-up, memory test included, at section 9.1's limits: SCK at clk/6 with phases of 2 and 4
+    cycles, CS high for exactly 3 cycles and falling 1 cycle before the first rising SCK."""
+    await host_bringup(dut, LIMITS, 2, memory=True)
+
+
+@cocotb.test()
+async def test_host_runs_a_program(dut):
+    """programs/basic/uart_tx.s as the board gets it: assembled into an image file by host/mkimage.py, read back by
+    pehost.read_image, loaded, read back by RDMEM and started on thread 1 through the library. Its frames at uo0."""
+    pehost, _ = host_modules()
+    import mkimage
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'programs', 'basic', 'uart_tx.s')
+    text = mkimage.image_text(mkimage.asm.read_program(src, depth=DEPTH), 'programs/basic/uart_tx.s', {1: 'start'})
+    img = pehost.read_image(text.splitlines())
+    await start(dut)
+    same = netlist_compare(dut)
+    link = PinLink(dut, RP2350, 3)
+    host = pehost.Host(link)
+    bit = 40
+    gap = pehost.Image({100: 0x1234, 102: 0x5678})             # two runs, one word apart
+
+    def load():
+        host.check_caps()
+        host.wrmem(101, [0xA5C3])       # memory starts undefined (section 10), so the word between is set first
+        host.load_and_verify(img)
+        host.load_and_verify(gap)
+        assert host.rdmem(100, 3) == [0x1234, 0xA5C3, 0x5678], "the word between two runs is left alone"
+        host.start(img.starts)
+        host.post_wait(7, bit)
+    await bridge(load)()
+    for byte in (0x55, 0xA3, 0x00, 0xFF):
+        receiver = cocotb.start_soon(receive(dut, bit))
+        await bridge(host.post_wait)(0, byte)
+        assert await receiver == byte
+    s = await bridge(host.status)()
+    assert (s.run, s.ill, s.late) == (0x2, 0, 0), f"thread 1 running, nothing late or illegal: {s}"
+    same()
+
+
+@cocotb.test()
+async def test_host_micropython_clock(dut):
+    """The library with MicroPython's default peripheral clock, 48 MHz from the USB PLL: SCK at 4 MHz with phases of
+    6.25 cycles, unrelated to the chip's clock. Load and read back the bring-up program, start the four threads and
+    make the eight mailbox round trips, then read their registers and ABORT."""
+    pehost, bringup = host_modules()
+    await start(dut)
+    same = netlist_compare(dut)
+    link = PinLink(dut, RP2350_48, 4)
+    host = pehost.Host(link)
+    with open(os.path.join(HOST_DIR, 'bringup.img')) as fh:
+        img = pehost.read_image(fh)
+
+    def steps():
+        host.check_caps()
+        host.load_and_verify(img)
+        host.start(dict((t, img.labels['start']) for t in range(4)))
+        got = []
+        for n in range(8):
+            host.post_wait(n, bringup.MAILBOX[n])
+            got.append(host.take_wait(n))
+        host.post_wait(0, bringup.DONE)
+        host.wait_stopped()
+        regs = [[host.rdreg(t, r) for r in ('R0', 'R1', 'R2', 'R3', 'PC')] for t in range(4)]
+        host.abort()
+        return got, regs, host.status()
+
+    got, regs, s = await bridge(steps)()
+    assert got == [m ^ 0xFFFF for m in bringup.MAILBOX], f"round trips {got}"
+    for t in range(4):
+        want = [t, bringup.MAILBOX[t] ^ 0xFFFF, bringup.MAILBOX[t + 4] ^ 0xFFFF, 0x5AF0 + t, img.labels['halted'] + 1]
+        assert regs[t] == want, f"thread {t}: {regs[t]}, want {want}"
+    assert (s.run, s.busy) == (0, 0), s
+    same()
+    dut._log.info(f"{RP2350_48['name']}: {link.count} transactions")
+
+
+@cocotb.test()
+async def test_host_miso_margins(dut):
+    """Where the RP2350 may read MISO: the chip moves it 2 to 3 cycles after a rising SCK reaches the pad (section
+    9.1). With the board's 5 MHz SCK at each of its offsets from the clock, CAPS reads right when MISO is read 35 ns
+    after the rising SCK or 120 ns before it; read 70 ns after, every bit arrives one place early, and 170 ns before,
+    one place late, and check_caps says which."""
+    pehost, _ = host_modules()
+    await start(dut)
+    same = netlist_compare(dut)
+    link = PinLink(dut, RP2350, 5)
+    host = pehost.Host(link)
+    for off in RP2350['offsets']:
+        for sample, want in ((35_000, None), (-120_000, None), (70_000, 'hold'), (-170_000, 'setup')):
+            link.p = dict(RP2350, offsets=(off,), sample=sample)
+            try:
+                await bridge(host.check_caps)()
+                why = None
+            except pehost.CapsError as e:
+                why = str(e)
+            if want is None:
+                assert why is None, f"offset {off / 1000} ns, sample {sample / 1000} ns: {why}"
+            else:
+                assert why is not None and want in why, f"offset {off / 1000} ns, sample {sample / 1000} ns: {why}"
+    same()
